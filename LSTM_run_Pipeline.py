@@ -17,6 +17,9 @@ import Load_Prepare_Data as LoadPrepareData
 import Pipeline_Utils as PipelineUtils
 import LSTM_Utils as LSTMUtils
 
+#import tf # TensorFlow-Import für LSTM-Modelle Lite
+
+
 from config import CONFIG_PATH
 from config import param_LSTM
 
@@ -51,6 +54,61 @@ def setup_and_train_lstm_model(param_LSTM):
 
     return model, duration, param_LSTM, paths, X_train_3D, y_train_3D, X_test_3D, y_test_3D, scaler_3D, test_df, full_feature_list, history
 
+def setup_train_save_lstm_model(param_lstm_config):
+    """Lädt ein vortrainiertes LSTM-Modell und bereitet die Daten vor."""
+
+    model, train_time, param_LSTM, paths, \
+    X_train_3D, y_train_3D, X_test_3D, y_test_3D, \
+    scaler_3D, test_df, full_feature_list, history = setup_and_train_lstm_model(CONFIG_LSTM_ALL)
+
+    # # Speichere das normale Modell
+    # LSTMUtils.save_model_LSTM(
+    #     model=model,
+    #     model_path=param_lstm_config.get("input_data_edge_device"),
+    #     model_name=param_lstm_config.get("model_name"),
+    # )
+
+    # Quantisiere das Modell (z.B. mit TensorFlow Lite)
+
+    converter = tf.lite.TFLiteConverter.from_keras_model(model)
+    converter.optimizations = [tf.lite.Optimize.DEFAULT]
+    quantized_tflite_model = converter.convert()
+
+    # Speichere das quantisierte Modell
+    quantized_model_path = os.path.join(
+        param_lstm_config.get("input_data_edge_device"),
+        f"{param_lstm_config.get('model_name')}_quantized.tflite"
+    )
+    with open(quantized_model_path, "wb") as f:
+        f.write(quantized_tflite_model)
+
+    return model, param_lstm_config, paths, X_train_3D, y_train_3D, X_test_3D, y_test_3D, scaler_3D, test_df, full_feature_list, history
+
+def setup_and_load_lstm_model(param_lstm_config):
+    """Lädt ein vortrainiertes LSTM-Modell und bereitet die Daten vor."""
+
+    # 1. Setup
+    param_lstm_config, paths = PipelineUtils.setup_experiment(param_lstm_config)
+
+    # 2. Daten vorbereiten mit erweiterten 3D-Features
+    (
+        X_train_3D, y_train_3D,
+        X_test_3D, y_test_3D,
+        scaler_3D, y_scaler,
+        train_df, test_df,
+        train_features_dict, full_feature_list
+    ) = LoadPrepareData._prepare_base_data_3D(param_lstm_config)
+
+    print(f"[DEBUG] Shape y_train_3D: {y_train_3D.shape}, Shape y_test_3D: {y_test_3D.shape}")
+    print(f"[DEBUG] Horizon aus config: {param_lstm_config.get('horizon')}")
+
+    # 3. Modell laden
+    model = LSTMUtils.load_model_LSTM(
+        model_path=param_lstm_config.get("input_data_edge_device"),
+        model_name=param_lstm_config.get("model_name"),
+    )
+
+    return model, param_lstm_config, paths, X_train_3D, y_train_3D, X_test_3D, y_test_3D, scaler_3D, test_df, full_feature_list
 
 def run_inference_and_save_results_lstm(model, train_time, param_LSTM, paths,
                                         X_test_3D, y_test_3D, y_train_3D,
@@ -90,66 +148,6 @@ def run_inference_and_save_results_lstm(model, train_time, param_LSTM, paths,
     )
 
     return metrics, results
-
-from tensorflow.keras.models import load_model
-
-def load_model_and_run_inference(model_path: str,
-                                  X_test_3D: np.ndarray,
-                                  scaler_3D,
-                                  y_test_3D: np.ndarray,
-                                  test_df: pd.DataFrame,
-                                  param_LSTM: dict,
-                                  y_train_3D: np.ndarray,
-                                  full_feature_list: list) -> dict:
-    """
-    Lädt ein gespeichertes LSTM-Modell und führt Inferenz & Evaluation aus.
-
-    Args:
-        model_path (str): Pfad zum gespeicherten Modell.
-        X_test_3D (np.ndarray): Testdaten für Inferenz.
-        scaler_3D: Skalierer für Rücktransformation.
-        y_test_3D (np.ndarray): Wahre Testwerte.
-        test_df (pd.DataFrame): Test DataFrame mit Zeitstempeln.
-        param_LSTM (dict): Konfiguration.
-        y_train_3D (np.ndarray): Trainingszielwerte (für Eval).
-        full_feature_list (list): Liste der verwendeten Features.
-
-    Returns:
-        dict: Ergebnisse inkl. Vorhersage, Metriken etc.
-    """
-
-    print(f"📦 Lade Modell von: {model_path}")
-    try:
-        model = load_model(model_path)
-        print("✅ Modell erfolgreich geladen.")
-    except Exception as e:
-        print(f"❌ Fehler beim Laden des Modells: {e}")
-        raise
-
-    # Inferenz
-    preds_test = LSTMUtils.run_inference_lstm(model=model, X_test=X_test_3D)
-
-    # Evaluation
-    pred_orig, true_orig, dates, metrics = PipelineUtils._evaluate_model(
-        config=param_LSTM,
-        predictions=preds_test,
-        y_test=y_test_3D,
-        scaler=scaler_3D,
-        test_df=test_df,
-        y_train=y_train_3D,
-        features=full_feature_list
-    )
-
-    # Zusammenfassen der Ergebnisse
-    results = {
-        "pred_orig": pred_orig,
-        "true_orig": true_orig,
-        "dates": dates,
-        "metrics": metrics
-    }
-
-    return results
-
 
 
 def run_full_pipeline_LSTM(param_LSTM):
