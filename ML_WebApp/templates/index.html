@@ -1,0 +1,122 @@
+<!-- templates/index.html -->
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Live MQTT Diagramm</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background-color: #f0f2f5; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
+        .chart-container {
+            position: relative;
+            width: 80%;
+            max-width: 900px;
+            padding: 20px;
+            background-color: white;
+            border-radius: 12px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+        }
+        h1 { text-align: center; color: #333; }
+        #status {
+            position: absolute;
+            top: 15px;
+            right: 20px;
+            font-size: 0.9em;
+            padding: 5px 12px;
+            background-color: #e0e0e0;
+            border-radius: 12px;
+            font-weight: 500;
+            color: #555;
+            transition: background-color 0.5s ease;
+        }
+    </style>
+</head>
+<body>
+    <div class="chart-container">
+        <div id="status">Verbinde...</div>
+        <h1>Live MassFlowRate</h1>
+        <canvas id="liveChart"></canvas>
+    </div>
+
+    <!-- Socket.IO und Chart.js Client-Bibliotheken laden -->
+    <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', (event) => {
+            const statusDiv = document.getElementById('status');
+            const ctx = document.getElementById('liveChart').getContext('2d');
+            
+            const chart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: [],
+                    // Nur noch ein Datensatz für MassFlowRate
+                    datasets: [{
+                        label: 'Avg MassFlowRate',
+                        data: [],
+                        borderColor: 'rgba(54, 162, 235, 1)',
+                        backgroundColor: 'rgba(54, 162, 235, 0.2)',
+                        borderWidth: 2,
+                        fill: true,
+                        tension: 0.4
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    animation: {
+                        duration: 250
+                    },
+                    scales: {
+                        x: { title: { display: true, text: 'Zeit' } },
+                        y: { title: { display: true, text: 'Durchschnittlicher Massendurchfluss' }, beginAtZero: true }
+                    }
+                }
+            });
+
+            const MAX_DATA_POINTS = 50; 
+
+            const socket = io();
+
+            socket.on('connect', () => {
+                console.log('Erfolgreich mit dem Server verbunden!');
+                statusDiv.innerText = 'Verbunden';
+                statusDiv.style.backgroundColor = '#28a745';
+            });
+
+            socket.on('connect_error', (err) => {
+                console.error('Verbindungsfehler:', err);
+                statusDiv.innerText = 'Verbindungsfehler';
+                statusDiv.style.backgroundColor = '#dc3545';
+            });
+            
+            socket.on('disconnect', () => {
+                console.warn('Verbindung zum Server getrennt.');
+                statusDiv.innerText = 'Verbindung getrennt';
+                statusDiv.style.backgroundColor = '#ffc107';
+            });
+
+            socket.on('update_data', (data) => {
+                // Daten validieren
+                if (data && typeof data.timestamp === 'string' && typeof data.mass_flow === 'number') {
+                    console.log('Valides Update empfangen:', data);
+                    
+                    const chartData = chart.data;
+                    chartData.labels.push(data.timestamp);
+                    chartData.datasets[0].data.push(data.mass_flow);
+
+                    // Sicherstellen, dass das Diagramm nicht zu voll wird
+                    if (chartData.labels.length > MAX_DATA_POINTS) {
+                        chartData.labels.shift();
+                        chartData.datasets[0].data.shift();
+                    }
+
+                    chart.update();
+                } else {
+                    console.error('Ungültiges oder unvollständiges Datenpaket vom Server empfangen:', data);
+                }
+            });
+        });
+    </script>
+</body>
+</html>

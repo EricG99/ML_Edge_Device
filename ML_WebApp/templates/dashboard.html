@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Modell Inferenz - Echtzeit Visualisierung</title>
+    <!-- Tailwind CSS for styling -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Chart.js for visualization -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+    <style>
+        body { font-family: 'Inter', sans-serif; }
+    </style>
+</head>
+<body class="bg-gray-900 text-gray-200 flex flex-col items-center justify-center min-h-screen p-4">
+
+    <div class="w-full max-w-6xl bg-gray-800 rounded-2xl shadow-2xl p-6 md:p-8 space-y-6 border border-gray-700">
+        
+        <!-- Header -->
+        <header class="text-center">
+            <h1 class="text-3xl md:text-4xl font-bold text-white">Modell Inferenz Horizont</h1>
+            <p class="text-gray-400 mt-2">Zweistufige Visualisierung: Training -> Live-Inferenz -> Zukunftsprognose</p>
+        </header>
+        
+        <!-- Status Display -->
+        <div id="status-container" class="text-center p-4 rounded-lg bg-gray-700 border border-gray-600 transition-all duration-300">
+            <p id="status-text" class="text-lg font-semibold animate-pulse">Initialisiere ML-Pipeline (Training)...</p>
+        </div>
+
+        <!-- Chart Container -->
+        <div class="relative h-64 md:h-96 bg-gray-900/50 p-4 rounded-xl border border-gray-700">
+            <canvas id="inferenceChart"></canvas>
+        </div>
+        
+        <!-- Controls -->
+        <div class="flex flex-col sm:flex-row items-center justify-center gap-4 pt-4">
+            <button id="inferenceButton" class="w-full sm:w-auto bg-green-600 hover:bg-green-700 text-white font-bold py-3 px-6 rounded-lg transition-transform transform hover:scale-105 disabled:bg-gray-500 disabled:cursor-not-allowed disabled:transform-none" disabled>
+                Live-Inferenz starten
+            </button>
+            <button id="pauseButton" class="w-full sm:w-auto bg-yellow-500 hover:bg-yellow-600 text-white font-bold py-3 px-6 rounded-lg transition-transform transform hover:scale-105 disabled:bg-gray-500 disabled:cursor-not-allowed disabled:transform-none" disabled>
+                Pause
+            </button>
+            <button id="resetButton" class="w-full sm:w-auto bg-red-600 hover:bg-red-700 text-white font-bold py-3 px-6 rounded-lg transition-transform transform hover:scale-105 disabled:bg-gray-500 disabled:cursor-not-allowed disabled:transform-none" disabled>
+                Reset
+            </button>
+        </div>
+
+    </div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            const statusText = document.getElementById('status-text');
+            const inferenceButton = document.getElementById('inferenceButton');
+            const pauseButton = document.getElementById('pauseButton');
+            const resetButton = document.getElementById('resetButton');
+            const ctx = document.getElementById('inferenceChart').getContext('2d');
+
+            let chart;
+            let dataInterval;
+            let currentStep = 0;
+            let isPaused = true;
+            let isFinished = false;
+            let statusInterval;
+            let forecastHorizon = 1;
+            let totalSteps = 0;
+
+            // --- Chart.js Initialisierung ---
+            function initializeChart() {
+                chart = new Chart(ctx, {
+                    type: 'line',
+                    data: {
+                        labels: [], 
+                        datasets: [{
+                            label: 'Echte Werte',
+                            data: [],
+                            borderColor: 'rgb(59, 130, 246)',
+                            backgroundColor: 'rgba(59, 130, 246, 0.5)',
+                            tension: 0.1,
+                        }, {
+                            label: 'Vorhersage (t+1)',
+                            data: [],
+                            borderColor: 'rgb(234, 179, 8)',
+                            backgroundColor: 'rgba(234, 179, 8, 0.5)',
+                            tension: 0.1,
+                        }, {
+                            label: `Vorhersage (t+n)`,
+                            data: [],
+                            borderColor: 'rgb(34, 197, 94)',
+                            backgroundColor: 'rgba(34, 197, 94, 0.5)',
+                            tension: 0.1,
+                            borderDash: [5, 5],
+                        }, {
+                            label: 'Zukunftsprognose (Rolling)',
+                            data: [],
+                            borderColor: 'rgb(192, 132, 252)', // Lila
+                            backgroundColor: 'rgba(192, 132, 252, 0.5)',
+                            borderWidth: 3,
+                            pointRadius: 4,
+                            pointBackgroundColor: 'rgb(192, 132, 252)',
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        scales: {
+                            x: {
+                                type: 'time',
+                                time: { unit: 'day', tooltipFormat: 'yyyy-MM-dd HH:mm' },
+                                title: { display: true, text: 'Datum', color: '#9CA3AF' },
+                                ticks: { color: '#9CA3AF' },
+                                grid: { color: 'rgba(255, 255, 255, 0.1)' }
+                            },
+                            y: {
+                                title: { display: true, text: 'Wert', color: '#9CA3AF' },
+                                ticks: { color: '#9CA3AF' },
+                                grid: { color: 'rgba(255, 255, 255, 0.1)' }
+                            }
+                        },
+                        plugins: { 
+                            legend: { labels: { color: '#D1D5DB' } },
+                            tooltip: { mode: 'index', intersect: false }
+                        },
+                        animation: { duration: 0 } // Deaktiviert die Animation für flüssigere Live-Updates
+                    }
+                });
+            }
+
+            // KORRIGIERT: Funktion zum Zeichnen der rollierenden Zukunftsprognose
+            function updateFutureForecast(stepForecast) {
+                console.log("DEBUG [updateFutureForecast]: Funktion wird aufgerufen. Empfangene Daten:", JSON.parse(JSON.stringify(stepForecast)));
+                if (!stepForecast || !stepForecast.dates || !stepForecast.values) {
+                    console.error("DEBUG [updateFutureForecast]: Keine validen Zukunftsdaten für diesen Schritt.");
+                    return;
+                }
+
+                // 1. Daten für die neue Prognoselinie vorbereiten
+                const forecastPoints = [];
+                // Ankerpunkt: Die letzte t+1 Vorhersage
+                const lastPredValue = chart.data.datasets[1].data[currentStep - 1]; 
+                const lastDate = chart.data.labels[currentStep - 1];
+                
+                if (lastPredValue !== undefined) {
+                    forecastPoints.push({ x: lastDate, y: lastPredValue });
+                }
+
+                // Die eigentlichen Zukunftspunkte hinzufügen
+                for (let i = 0; i < stepForecast.dates.length; i++) {
+                    forecastPoints.push({
+                        x: stepForecast.dates[i],
+                        y: stepForecast.values[i]
+                    });
+                }
+                
+                // 2. Das Dataset für die Zukunftsprognose aktualisieren
+                chart.data.datasets[3].data = forecastPoints;
+                
+                console.log("DEBUG [updateFutureForecast]: Prognose-Dataset aktualisiert mit", forecastPoints.length, "Punkten.");
+            }
+
+            // --- Datenabruf und Chart-Update für Live-Inferenz ---
+            async function fetchInferenceStep() {
+                if (isPaused || isFinished) return;
+
+                if (totalSteps > 0 && currentStep >= totalSteps) {
+                    isFinished = true;
+                    isPaused = true;
+                    clearInterval(dataInterval);
+                    updateStatus(`Visualisierung abgeschlossen.`);
+                    chart.data.datasets[3].data = []; // Letzte Prognose löschen
+                    chart.update();
+                    updateButtonStates('finished');
+                    return;
+                }
+
+                try {
+                    const response = await fetch(`/api/data?step=${currentStep}`);
+                    
+                    if (response.status === 202) {
+                        updateStatus(`Warte auf Inferenzschritt ${currentStep + 1}...`, false, true);
+                        return;
+                    }
+
+                    if (!response.ok) {
+                        throw new Error(`API-Fehler bei Schritt ${currentStep}: ${response.statusText}`);
+                    }
+                    
+                    const dataPoint = await response.json();
+                    
+                    // Historische Daten hinzufügen
+                    chart.data.labels.push(dataPoint.date);
+                    chart.data.datasets[0].data.push(dataPoint.true_value);
+                    chart.data.datasets[1].data.push(dataPoint.predicted_value_step_1);
+                    chart.data.datasets[2].data.push(dataPoint.predicted_value_step_n ?? NaN);
+                    
+                    // Rollierende Prognose aktualisieren
+                    updateFutureForecast(dataPoint.future_forecast);
+                    
+                    chart.update();
+                    updateStatus(`Visualisiere Schritt ${currentStep + 1} / ${totalSteps}`, false, false);
+                    currentStep++;
+
+                } catch (error) {
+                    console.error('Fehler beim Abrufen der Live-Daten:', error);
+                    updateStatus('Fehler bei der Datenübertragung.', true);
+                    clearInterval(dataInterval);
+                    isFinished = true;
+                    updateButtonStates('error');
+                }
+            }
+            
+            // --- UI-Steuerung ---
+            function updateStatus(message, isError = false, isLoading = false) {
+                statusText.textContent = message;
+                const container = document.getElementById('status-container');
+                container.classList.toggle('text-red-400', isError);
+                container.classList.toggle('bg-red-900/50', isError);
+                container.classList.toggle('animate-pulse', isLoading);
+            }
+
+            function updateButtonStates(status) {
+                inferenceButton.disabled = status !== 'ready_for_inference';
+                pauseButton.disabled = status !== 'inference_running' || isFinished;
+                resetButton.disabled = status === 'training';
+            }
+
+            function startLiveVisualization() {
+                if (isFinished) return;
+                isPaused = false;
+                pauseButton.textContent = "Pause";
+                dataInterval = setInterval(fetchInferenceStep, 200);
+                updateButtonStates('inference_running');
+            }
+
+            function pauseLiveVisualization() {
+                isPaused = !isPaused;
+                if (isPaused) {
+                    clearInterval(dataInterval);
+                    pauseButton.textContent = "Weiter";
+                } else {
+                    startLiveVisualization();
+                }
+            }
+
+            function resetVisualization() {
+                window.location.reload();
+            }
+
+            async function handleRunInference() {
+                updateStatus('Starte Live-Inferenz...', false, true);
+                inferenceButton.disabled = true;
+                try {
+                    const response = await fetch('/api/run_inference', { method: 'POST' });
+                    if (!response.ok) {
+                        throw new Error('Fehler beim Starten des Inferenzprozesses.');
+                    }
+                    startLiveVisualization();
+                } catch (error) {
+                    updateStatus(`Fehler bei Inferenzstart: ${error.message}`, true);
+                }
+            }
+
+            // --- Initialisierungslogik ---
+            async function checkPipelineStatus() {
+                try {
+                    const response = await fetch('/api/status');
+                    const data = await response.json();
+                    
+                    updateButtonStates(data.status);
+
+                    switch (data.status) {
+                        case 'training':
+                            updateStatus('Modelltraining wird ausgeführt...', false, true);
+                            break;
+                        case 'ready_for_inference':
+                            clearInterval(statusInterval);
+                            totalSteps = data.total_steps;
+                            forecastHorizon = data.horizon;
+                            chart.data.datasets[2].label = `Vorhersage (t+${forecastHorizon})`;
+                            chart.update();
+                            console.log("DEBUG [Status]: System bereit. Gesamtschritte:", totalSteps, "Horizont:", forecastHorizon);
+                            updateStatus('Modell trainiert. Bereit für Live-Inferenz.', false, false);
+                            break;
+                        case 'inference_running':
+                            break;
+                        case 'finished':
+                            clearInterval(statusInterval);
+                            updateStatus(`Inferenz abgeschlossen. ${totalSteps} Schritte verarbeitet.`, false, false);
+                            break;
+                        case 'error':
+                            clearInterval(statusInterval);
+                            updateStatus(`Fehler in Pipeline: ${data.message}`, true, false);
+                            break;
+                    }
+                } catch (error) {
+                    updateStatus('Verbindung zum Server verloren.', true);
+                    clearInterval(statusInterval);
+                }
+            }
+            
+            // Event Listeners
+            inferenceButton.addEventListener('click', handleRunInference);
+            pauseButton.addEventListener('click', pauseLiveVisualization);
+            resetButton.addEventListener('click', resetVisualization);
+
+            // App starten
+            initializeChart();
+            statusInterval = setInterval(checkPipelineStatus, 2000);
+            checkPipelineStatus();
+        });
+    </script>
+</body>
+</html>

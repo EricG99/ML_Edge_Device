@@ -1,0 +1,21 @@
+# Python-spezifisch
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.dll
+
+# Virtuelle Umgebungen
+.venv/
+.venv_backup/
+
+# Jupyter Notebook & Historie
+.ipynb_checkpoints/
+.history/
+
+# IDEs
+.vscode/
+.idea/
+
+# Output-Ordner
+Output/
