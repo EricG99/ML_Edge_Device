@@ -129,3 +129,4 @@ if __name__ == '__main__':
     print("Starte Flask-SocketIO-Server...")
     # Startet die Web-Anwendung. allow_unsafe_werkzeug wird für neuere Flask-Versionen benötigt.
     socketio.run(app, host='0.0.0.0', port=5000, debug=False, allow_unsafe_werkzeug=True)
+
