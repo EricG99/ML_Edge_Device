@@ -42,6 +42,7 @@ PREDICTION_DATA = {
     "inference_step": -1
 }
 
+
 # --- Background Task Management ---
 inference_processor = None
 mqtt_client = None

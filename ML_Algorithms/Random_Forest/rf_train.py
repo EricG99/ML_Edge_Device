@@ -125,14 +125,12 @@ if __name__ == "__main__":
     # --- Basiskonfiguration (unverändert) ---
     training_config = {**CONFIG_PATH, **param_rf_test}
     training_config.update({
-        "train_csv_path": r"C:\DEV\RevPi_ML\ML_Edge_Device\Input\Input_Data\train_data_sample.csv",
-        "base_features": ["Group4-2_S6_MassFlowRate", "Group4-2_S6_Pressure", "Group4-2_S6_Temperature"],
         "dataset": "train_data_sample.csv",
         "scaler_path": "trained_rf_scaler.joblib",
         "features_path": "trained_rf_features.joblib",
         "model_path": "trained_rf_model.joblib",
         # Wichtiger Schlüssel für die DataPipeline2D
-        "loading_strategy": "split" 
+        "loading_strategy": "live_mqtt" #"split", "separate_csv", "live_mqtt"
     })
     
     # Führe das Training aus und speichere die Artefakte standardmäßig

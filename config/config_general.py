@@ -31,9 +31,11 @@ MQTT_CONFIG = {
 # Die Logik, welcher Run geladen wird, sollte zur Laufzeit entschieden werden,
 # aber die statischen Namen für den "Fast-Mode" können hier bleiben.
 CONFIG_LOAD_ARTIFACTS = {
-    "inference_mode": "load_artifacts_path", # "load_artifacts_fast" oder "load_artifacts_path"
+    "inference_mode": "load_artifacts_fast", # "load_artifacts_fast" oder "load_artifacts_path"
     "artifacts_base_path": ARTIFACTS_OUTPUT_PATH,
     "load_id": "2025-07-19_180549_3036", # Beispiel-ID
+
+    "loading_strategy": "live_mqtt", #"split", "separate_csv", "live_mqtt"
     
     # Statische Namen für den 'fast' mode
     "model_path_static": "trained_rf_model.joblib",

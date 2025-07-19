@@ -572,7 +572,7 @@ class DataPipeline2D:
         elif strategy == "live_mqtt":
              # Strategie 3: Trainingsdaten aus CSV, Testdaten kommen live
              if mode == 'train':
-                train_df = pd.read_csv(self.config['train_csv_path'], index_col='datetime', parse_dates=True)
+                train_df = df = _load_full_timeseries(config=self.config, make_date_as_index=True)
                 return train_df, None
              else: # mode == 'test'
                 # Bei MQTT werden die Daten nicht als Block geladen.
