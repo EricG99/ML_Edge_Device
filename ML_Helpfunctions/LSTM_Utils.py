@@ -133,7 +133,7 @@ def train_model_LSTM(config: dict, X_train: np.ndarray,
         forecast_horizon=config["horizon"]
     )
 
-    loss_function = config.get("loss", tf.keras.losses.Huber())
+    loss_function = config.get("loss", "huber_loss")
     optimizer = config.get("optimizer", "adam")
     model.compile(optimizer=optimizer, loss=loss_function, metrics=config.get("metrics", ["mae"]))
 

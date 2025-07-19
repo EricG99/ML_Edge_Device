@@ -4,6 +4,10 @@ import os
 import logging
 import numpy as np
 import pandas as pd
+import json
+import time
+from sklearn.ensemble import RandomForestRegressor
+
 # Keine Notwendigkeit für subprocess mehr
 
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
@@ -21,6 +25,8 @@ from ML_Helpfunctions import Pipeline_Utils as PipelineUtils
 from ML_Helpfunctions import Load_Prepare_Data as LoadPrepareData
 from ML_Algorithms import RF_Run_Pipeline as RFRunPipeline
 from ML_Helpfunctions import RF_Utils as RFUtils
+from ML_Helpfunctions.Load_Prepare_Data import DataPipeline2D
+
 # Annahme: config.py liegt direkt im Projekt-Root
 from config import CONFIG_PATH, param_rf
 
@@ -29,166 +35,184 @@ CONFIG_RF_ALL = {**CONFIG_PATH, **param_rf}
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 
-# --- Schnittstellenfunktionen, die vom Flask-Backend aufgerufen werden ---
+import paho.mqtt.client as mqtt
 
-def setup_and_train_rf():
+class MqttInferenceClient:
     """
-    Implementierung der Schnittstelle für das Training.
-    Verwendet die gekapselte Pipeline-Funktion aus RF_Run_Pipeline.py.
+    Ein Client, der eine Daten-Pipeline und ein trainiertes Modell verwaltet, 
+    MQTT-Nachrichten abonniert, diese verarbeitet, eine Inferenz durchführt 
+    und das Ergebnis ausgibt.
+    """
+    def __init__(self, model, pipeline: DataPipeline2D, broker_ip: str, port: int, topic: str, sampling_interval_sec: float = 1.0):
+        self.model = model
+        self.pipeline = pipeline
+        self.topic = topic
+        self.sampling_interval = sampling_interval_sec
+        self.last_message_time = 0
+        
+        self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+        self.client.on_connect = self._on_connect
+        self.client.on_message = self._on_message
+        
+        self.broker_ip = broker_ip
+        self.port = port
 
+    def _on_connect(self, client, userdata, flags, reason_code, properties):
+        if reason_code == 0:
+            logging.info(f"Erfolgreich mit MQTT Broker unter {self.broker_ip} verbunden.")
+            client.subscribe(self.topic)
+            logging.info(f"Abonniert auf Topic: '{self.topic}' mit Abtastrate: {self.sampling_interval}s")
+        else:
+            logging.error(f"Verbindung zum MQTT Broker fehlgeschlagen mit Code: {reason_code}")
+
+    def _on_message(self, client, userdata, msg):
+        """
+        Callback für den Empfang von Nachrichten. Führt den gesamten Inferenzprozess aus.
+        """
+        current_time = time.time()
+        if (current_time - self.last_message_time) < self.sampling_interval:
+            return
+
+        try:
+            payload_str = msg.payload.decode('utf-8')
+            data = json.loads(payload_str)
+            
+            # 1. DATEN VORBEREITEN: Live-Datenpunkt durch die Pipeline schicken
+            inference_vector = self.pipeline.prepare_live_data_point(data)
+            
+            if inference_vector is not None:
+                # 2. INFERENZ DURCHFÜHREN
+                # Das Modell erwartet eine 2D-Array, unser Vektor ist bereits (1, n_features)
+                prediction_scaled = self.model.predict(inference_vector)
+                
+                # 3. ERGEBNIS DESKALIEREN
+                # Wir müssen das Ergebnis in die richtige Form für den y_scaler bringen
+                prediction_descaled = self.pipeline.y_scaler.inverse_transform(prediction_scaled.reshape(-1, 1))
+                
+                # 4. ERGEBNIS AUSGEBEN
+                date_str = data.get('datetime', 'Unbekanntes Datum')
+                final_prediction = prediction_descaled.flatten()[0]
+                
+                logging.info(f"[{date_str}] VORHERSAGE: {final_prediction:.4f}")
+            
+            self.last_message_time = current_time
+
+        except json.JSONDecodeError:
+            logging.warning("Empfangene MQTT-Nachricht ist kein gültiges JSON.")
+        except Exception as e:
+            logging.error(f"Fehler in _on_message: {e}", exc_info=True)
+
+    def run(self):
+        """Startet den Client und die Endlosschleife."""
+        logging.info(f"Versuche, eine Verbindung zum MQTT Broker herzustellen: {self.broker_ip}:{self.port}...")
+        try:
+            self.client.connect(self.broker_ip, self.port, 60)
+            self.client.loop_forever()
+        except ConnectionRefusedError:
+            logging.error("Verbindung verweigert. Prüfen Sie IP, Port und Broker-Status.")
+        except KeyboardInterrupt:
+            logging.info("Skript durch Benutzer beendet. Trenne die Verbindung...")
+            self.client.disconnect()
+            logging.info("Verbindung getrennt.")
+        except Exception as e:
+            logging.critical(f"Ein kritischer Fehler ist aufgetreten: {e}", exc_info=True)
+
+
+# --- NEUE, ZENTRALE TRAININGSFUNKTION ---
+def train_model_pipeline(config: dict):
+    """
+    Führt den gesamten Trainingsprozess aus:
+    1. Initialisiert die Datenpipeline.
+    2. Bereitet die Trainingsdaten vor.
+    3. Trainiert ein RandomForest-Modell.
+    
     Returns:
-        dict: Ein Dictionary mit den für die Inferenz benötigten Artefakten
-              (Modell, Scaler, Testdaten, Konfiguration etc.).
+        tuple: Ein Tuple mit (trainiertes Modell, initialisierte Datenpipeline).
     """
-    logging.info("RF-Pipeline: Gekapseltes Setup und Training starten...")
-
-    (
-        model, train_time, param_rf_config, paths,
-        X_train, y_train, X_test, y_test,
-        scaler, test_df, features
-    ) = RFRunPipeline.setup_and_train_rf_model(CONFIG_RF_ALL)
-
-    return {
-        "model": model,
-        "train_time": train_time,
-        "param_rf": param_rf_config,
-        "paths": paths,
-        "X_test_2D": X_test,
-        "y_test_2D": y_test,
-        "scaler_2D": scaler,
-        "test_df": test_df,
-        "full_feature_list": features,
-        "config": param_rf_config,
-        "total_steps": len(X_test)
-    }
-
-def run_inference_step_rf(artifacts, step_index):
-    """
-    Implementierung der Schnittstelle für die Inferenz für einen einzelnen Schritt.
-
-    Args:
-        artifacts (dict): Das Dictionary von Artefakten, das von setup_and_train_rf zurückgegeben wurde.
-        step_index (int): Der aktuelle Schrittindex für die Inferenz.
-
-    Returns:
-        dict: Ein Dictionary mit den Ergebnissen des Inferenzschritts,
-              einschließlich Datum, tatsächlichem Wert und Prognose.
-    """
-    model, X_test, y_test, scaler, test_df, config, features = (
-        artifacts["model"], artifacts["X_test_2D"], artifacts["y_test_2D"], artifacts["scaler_2D"],
-        artifacts["test_df"], artifacts["param_rf"], artifacts["full_feature_list"]
+    logging.info("--- Starte Trainingsphase ---")
+    
+    # 1. Pipeline initialisieren
+    data_pipeline = DataPipeline2D(config)
+    
+    # 2. Trainingsdaten vorbereiten
+    X_train, y_train = data_pipeline.prepare_training_data()
+    
+    if X_train is None or y_train is None:
+        logging.error("Trainingsdaten konnten nicht vorbereitet werden. Breche ab.")
+        return None, None
+        
+    logging.info(f"Trainingsdaten erfolgreich vorbereitet. X_train shape: {X_train.shape}, y_train shape: {y_train.shape}")
+    
+    # 3. RandomForest-Modell trainieren
+    logging.info("Trainiere RandomForest-Modell...")
+    rf_model = RandomForestRegressor(
+        n_estimators=config.get("n_estimators", 100),
+        max_depth=config.get("max_depth", None),
+        random_state=config.get("random_state", 42),
+        n_jobs=-1 # Nutze alle verfügbaren CPU-Kerne
     )
-    horizon = config.get("horizon", 1)
     
-    # Sicherstellen, dass 'base_features' existiert und der erste Eintrag gültig ist
-    base_feature = config.get("base_features", [None])
-    if not base_feature or base_feature[0] is None:
-        logging.error("Konfigurationsfehler: 'base_features' muss spezifiziert sein und darf nicht leer sein.")
-        raise ValueError("base_features muss in der Konfiguration spezifiziert sein und darf nicht leer sein.")
-    base_feature_name = base_feature[0]
+    start_time = time.time()
+    rf_model.fit(X_train, y_train)
+    end_time = time.time()
     
-    # Prüfen, ob der Basis-Feature-Name in der Feature-Liste vorhanden ist
-    if base_feature_name not in features:
-        logging.error(f"Feature '{base_feature_name}' nicht in der Feature-Liste gefunden: {features}")
-        raise ValueError(f"Basis-Feature '{base_feature_name}' nicht in der Liste der Features gefunden.")
-    target_index = features.index(base_feature_name)
-
-    # Sicherstellen, dass der Schritt-Index innerhalb der Grenzen liegt
-    if step_index >= len(X_test):
-        logging.warning(f"Inferenzschritt {step_index} liegt außerhalb der Grenzen von X_test (Länge {len(X_test)}).")
-        # Geeignete Fehlerbehandlung oder leere Daten zurückgeben
-        return {
-            "date": "N/A",
-            "true_value": None,
-            "future_forecast": {"dates": [], "values": []},
-            "predicted_value_step_1": None,
-            "predicted_value_step_n": None
-        }
-
-    X_step = X_test[step_index:step_index+1] # Nehmen den aktuellen Datenpunkt für die Vorhersage
+    logging.info(f"Modell-Training abgeschlossen in {end_time - start_time:.2f} Sekunden.")
     
-    # Spezielle Behandlung für y_test basierend auf horizon
-    if horizon == 1:
-        # Bei horizon=1 ist y_test 1D, wir brauchen einen 2D-Array für die inverse Transformation
-        y_for_inverse = np.array([[y_test[step_index]]])  # Doppelte Klammern für 2D-Format
-    else:
-        # Bei horizon>1 nehmen wir den ersten Wert des Horizonts für t+1 als wahren Wert
-        # y_test ist hier (N_samples, horizon)
-        y_step = y_test[step_index:step_index+1] # Dies ist (1, horizon)
-        y_for_inverse = y_step[:, 0].reshape(-1, 1) # Nur den ersten Wert (für t+1) als 2D-Array
-
-    # Führe Vorhersage durch
-    preds_scaled = RFUtils.run_inference_random_forest(model=model, X_test=X_step)
-    
-    # Spezielle Behandlung der Vorhersage basierend auf horizon
-    if horizon == 1:
-        # Bei horizon=1 ist die Ausgabe des Modells ein Skalar oder 1D-Array; mache es 2D für inverse_transform
-        preds_scaled = np.array([preds_scaled]) if preds_scaled.ndim == 1 else preds_scaled
-        preds_descaled = PipelineUtils.safe_inverse_transform(scaler, preds_scaled, target_index)
-    else:
-        # Für horizon > 1 ist preds_scaled wahrscheinlich (1, horizon)
-        # safe_inverse_transform erwartet (n_samples, n_features). Hier ist es 1 Sample und 'horizon' "Features" (Prognosen)
-        # Wir müssen sicherstellen, dass die Form passt. preds_scaled[0] ist ein 1D-Array der Länge 'horizon'.
-        # reshape es zu (1, horizon) für safe_inverse_transform, wenn es eine skalare Inversion pro "Feature" macht.
-        # Beachten Sie: Wenn der Scaler nur für ein einzelnes Feature trainiert wurde, ist dies möglicherweise keine ideale Nutzung.
-        # Es wird davon ausgegangen, dass safe_inverse_transform diese Multi-Output-Prediction korrekt behandelt.
-        preds_descaled = PipelineUtils.safe_inverse_transform(scaler, preds_scaled[0].reshape(1, -1), target_index)
+    # Gib das trainierte Modell und die initialisierte Pipeline zurück.
+    # Die Pipeline enthält die wichtigen Scaler für die Live-Inferenz.
+    return rf_model, data_pipeline
 
 
-    # Berechne Zeitstempel für den aktuellen Wert und die zukünftigen Prognosen
-    # Lags werden zur step_index hinzugefügt, um den korrekten Startpunkt im originalen test_df zu finden.
-    data_start_index = config.get("lags", 0)
-    if (data_start_index + step_index) >= len(test_df.index):
-        logging.warning(f"Datum für Schritt {step_index} (mit Lags {data_start_index}) liegt außerhalb des Test-DF-Index.")
-        # Fallback für den Fall, dass der Index außerhalb der Grenzen liegt.
-        return {
-            "date": "N/A",
-            "true_value": None,
-            "future_forecast": {"dates": [], "values": []},
-            "predicted_value_step_1": None,
-            "predicted_value_step_n": None
-        }
-
-    current_date = test_df.index[data_start_index + step_index]
-    # Frequenz berechnen, um zukünftige Datenpunkte zu bestimmen
-    freq = test_df.index[1] - test_df.index[0] if len(test_df.index) > 1 else pd.Timedelta(minutes=1)
-    future_dates = [current_date + (j + 1) * freq for j in range(horizon)]
-    
-    # Vorbereitung der Rückgabewerte
-    result = {
-        "date": current_date.strftime('%Y-%m-%d %H:%M:%S'),
-        # .item() wird verwendet, um einen Skalar aus einem 0D- oder 1D-Array zu erhalten
-        "true_value": PipelineUtils.safe_inverse_transform(scaler, y_for_inverse, target_index).item(),
-        "future_forecast": {
-            "dates": [d.strftime('%Y-%m-%d %H:%M:%S') for d in future_dates],
-            "values": preds_descaled.flatten().tolist()  # Sicherstellen dass es eine flache Liste ist
-        }
+# --- ZENTRALER STARTPUNKT DER ANWENDUNG ---
+if __name__ == "__main__":
+    # 1. KONFIGURATION
+    # Alle Einstellungen an einem Ort
+    config = {
+        "loading_strategy": "live_mqtt", # Wichtig: Sagt der Pipeline, dass sie für Live-Daten vorbereitet wird
+        "train_csv_path": r"C:\Users\ericg\Documents\Mechatronik M Sc\6. Semster\MA\Dev_Ma\ML_Edge_Device\Input\Input_Data\train_data_sample.csv",        
+        "lags": 5,
+        "horizon": 1, # Bei Live-Inferenz ist ein Horizont von 1 typisch
+        "base_features": ["Group4-2_S6_MassFlowRate", "Group4-2_S6_Pressure", "Group4-2_S6_Temperature"],
+        "scale_target": True,
+        "scale_other_features": True,
+        "min_fe_window": 20, # Mindestanzahl an Datenpunkten für rollierende Features
+        "max_fe_window": 60, # Maximale Länge des internen Puffers
+        "rolling_window_size": 4,
+        "include_roll_mean": True,
+        "include_roll_std": True,
+        
+        # Modell-Hyperparameter
+        "n_estimators": 150,
+        "max_depth": 10,
+        "random_state": 42,
+        
+        # MQTT-Einstellungen
+        "mqtt_broker_ip": "192.168.0.101",
+        "mqtt_port": 1883,
+        "mqtt_topic": "sim/data/20240341/S6",
+        "sampling_interval_sec": 0.1
     }
 
-    # Behandlung der einzelnen Vorhersagewerte basierend auf horizon
-    if horizon == 1:
-        result["predicted_value_step_1"] = preds_descaled.item()
-        result["predicted_value_step_n"] = preds_descaled.item()
-    else:
-        preds_list = preds_descaled.flatten().tolist()
-        result["predicted_value_step_1"] = preds_list[0] if preds_list else None
-        result["predicted_value_step_n"] = preds_list[-1] if preds_list else None
+    # 2. MODELL TRAINIEREN
+    # Führe die Trainingspipeline aus, um das Modell und die initialisierte Datenpipeline zu erhalten.
+    model, pipeline = train_model_pipeline(config)
 
-    return result
-
-# --- Zentraler Startpunkt der Anwendung ---
-if __name__ == "__main__":
-    logging.info("Starte die Random Forest ML-Anwendung (als Hauptskript)...")
-
-    try:
-        # Initialisiere die Flask-App mit den ML-Pipeline-Funktionen dieses Skripts
-        Flask_App.initialize_flask_app(
-            setup_and_train_func=setup_and_train_rf,
-            run_inference_step_func=run_inference_step_rf
+    # 3. LIVE-INFERENZ STARTEN
+    # Prüfe, ob das Training erfolgreich war, bevor der MQTT-Client gestartet wird.
+    if model and pipeline:
+        logging.info("\n--- Trainingsphase erfolgreich. Starte Live-Inferenz-Phase. ---")
+        
+        inference_client = MqttInferenceClient(
+            model=model,
+            pipeline=pipeline,
+            broker_ip=config["mqtt_broker_ip"],
+            port=config["mqtt_port"],
+            topic=config["mqtt_topic"],
+            sampling_interval_sec=config["sampling_interval_sec"]
         )
-        # Starte den Flask-Server
-        Flask_App.run_flask_server(host='0.0.0.0', port=5001, debug=False, use_reloader=False)
-    except Exception as e:
-        logging.error(f"Fehler beim Starten der Anwendung: {e}", exc_info=True)
+        
+        # Diese Funktion blockiert und läuft, bis das Skript beendet wird.
+        inference_client.run()
+    else:
+        logging.critical("Das Training ist fehlgeschlagen. Die Anwendung wird nicht gestartet.")
         sys.exit(1)
-

@@ -11,6 +11,9 @@ import logging
 import traceback
 from pathlib import Path
 
+import psutil
+import time
+
 
 import xgboost as xgb
 from sklearn.ensemble import RandomForestRegressor
@@ -357,6 +360,17 @@ def setup_experiment(config: dict) -> tuple[dict, dict]:
 # Modellbewertung
 # -------------------------------------------
 
+def get_cpu_usage() -> float:
+    """
+    Gibt die aktuelle systemweite CPU-Auslastung als Prozentwert zurück.
+    
+    Returns:
+        float: CPU-Auslastung in Prozent.
+    """
+    # Der Parameter interval=None macht den Aufruf nicht-blockierend.
+    # Er misst die Auslastung seit dem letzten Aufruf.
+    return psutil.cpu_percent(interval=None)
+
 def _evaluate_model(
     predictions: np.ndarray,
     y_test: np.ndarray,
@@ -390,6 +404,28 @@ def _evaluate_model(
     )
 
     return pred_orig, true_orig, dates, metrics
+
+
+def run_timed_inference(model: object, input_data: np.ndarray) -> tuple[np.ndarray, float]:
+    """
+    Führt eine einzelne Inferenz durch und misst die exakte Dauer.
+
+    Args:
+        model (object): Das trainierte Modell (Keras, scikit-learn, etc.).
+        input_data (np.ndarray): Die Eingabedaten für das Modell.
+
+    Returns:
+        tuple:
+            - np.ndarray: Das Ergebnis der Vorhersage.
+            - float: Die Dauer der Inferenz in Millisekunden.
+    """
+    start_time = time.perf_counter()
+    prediction = model.predict(input_data)
+    end_time = time.perf_counter()
+    
+    duration_ms = (end_time - start_time) * 1000
+    
+    return prediction, duration_ms
 
 
 # -------------------------------------------
@@ -848,6 +884,100 @@ def create_representative_dataset_generator(dataset: tf.data.Dataset):
 
     return generator
 
+
+
+
+def load_model_artifacts_for_inference(config: dict) -> tuple:
+    """
+    Lädt robust die notwendigen Artefakte (Scaler, Features, Modell) für die Inferenz.
+    Die Funktion unterstützt zwei verschiedene Modi, die über die Konfiguration
+    gesteuert werden. Sie erkennt den Modelltyp automatisch anhand der Dateiendung.
+
+    Args:
+        config (dict): Das Konfigurations-Wörterbuch, das den Modus und die Pfade enthält.
+
+    Returns:
+        tuple: Ein Tupel mit den geladenen Artefakten in der Reihenfolge (scaler, features, model).
+
+    Raises:
+        ValueError: Wenn ein unbekannter 'inference_mode' angegeben wird oder
+                    notwendige Konfigurationsschlüssel fehlen.
+        FileNotFoundError: Wenn eine der Artefakt-Dateien nicht gefunden wird.
+
+    ---------------------------------------------------------------------------
+    Modi:
+    ---------------------------------------------------------------------------
+    1. mode: 'load_artifacts_fast' (Statischer Modus)
+       Lädt Artefakte von fest definierten Pfaden. Ideal für schnelles Testen.
+       Benötigte Schlüssel in der config:
+       - "model_path_static": "trained_rf_model.joblib" (oder .keras)
+       - "scaler_path_static": "trained_rf_scaler.joblib"
+       - "features_path_static": "trained_rf_features.joblib"
+
+    2. mode: 'load_artifacts_path' (Dynamischer Modus)
+       Lädt Artefakte aus einem versionierten Ordner, der über eine 'load_id'
+       in der Konfiguration bestimmt wird. Ideal für den produktiven Einsatz.
+       Benötigte Schlüssel in der config:
+       - "artifacts_path": "Output/saved_models" (Basis-Verzeichnis)
+       - "load_id": "run_20250718_123456" (Spezifische Trainingslauf-ID)
+       - "model_filename": "model.keras" (oder .joblib)
+    ---------------------------------------------------------------------------
+    """
+    mode = config.get("inference_mode", "load_artifacts_fast")
+    logging.info(f"Lade Artefakte im Modus: '{mode}'...")
+
+    # ----- Pfade basierend auf dem Modus bestimmen -----
+    if mode == 'load_artifacts_path':
+        try:
+            # Der Schlüssel 'artifacts_path' wurde in der letzten Korrektur festgelegt
+            base_path = config['paths']['artifacts_output']
+            load_id = config["load_id"]
+            
+            # KORREKTUR: Lese den Modell-Dateinamen aus der Konfiguration
+            model_filename = config["model_filename"] 
+            
+        except KeyError as e:
+            raise ValueError(f"Für Modus 'load_artifacts_path' fehlt der Schlüssel '{e}' in der Konfiguration.")
+
+        run_dir  = os.path.join(base_path, load_id)
+
+        # Verwende den dynamischen Dateinamen für das Modell
+        model_path = os.path.join(run_dir, "Models", model_filename)
+        
+        # Die Namen für Scaler und Features sind oft konsistent
+        scaler_path = os.path.join(run_dir, "Scalers", "scaler.joblib")
+        features_path = os.path.join(run_dir, "Models", "features.joblib")
+        logging.info(f"Lade versionierte Artefakte aus: {run_dir}")
+
+    elif mode == 'load_artifacts_fast':
+        model_path = config.get("model_path_static", "trained_rf_model.joblib")
+        scaler_path = config.get("scaler_path_static", "trained_rf_scaler.joblib")
+        features_path = config.get("features_path_static", "trained_rf_features.joblib")
+        logging.info("Lade Artefakte von statischen Pfaden.")
+
+    else:
+        raise ValueError(f"Unbekannter 'inference_mode': '{mode}'. Gültige Modi sind 'load_artifacts_fast' und 'load_artifacts_path'.")
+
+    for path in [model_path, scaler_path, features_path]:
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"Benötigte Artefakt-Datei wurde nicht gefunden unter: {path}")
+
+    if model_path.endswith((".keras", ".h5")):
+        model = tf.keras.models.load_model(model_path)
+    elif model_path.endswith(".joblib"):
+        model = joblib.load(model_path)
+    else:
+        raise ValueError(f"Unbekannte Modelldatei-Endung. Unterstützt werden .keras, .h5, .joblib. Pfad: {model_path}")
+
+    # Scaler und Features werden immer mit joblib geladen
+    scaler = joblib.load(scaler_path)
+    features = joblib.load(features_path)
+
+    logging.info("✅ Alle Artefakte erfolgreich geladen.")
+
+    # Rückgabe in der gewünschten Reihenfolge
+    return scaler, features, model
+
 class ModelScalerSaver:
     """
     Eine Klasse zur Kapselung der gesamten Logik zum Speichern von Modellen
@@ -934,7 +1064,7 @@ class ModelScalerSaver:
         """Speichert das Skalierer-Objekt, falls Skalierung aktiviert ist."""
         if (self.config.get("scale_target", False)) and scaler:
             try:
-                path = os.path.join(self.paths.get("Scalers"), f"scaler_{self.config['run_id']}.joblib")
+                path = os.path.join(self.paths.get("Scalers"), "scaler.joblib")
                 joblib.dump(scaler, path)
                 print(f"✅ Skalierer gespeichert unter: {path}")
                 return {"scaler_path": path}
@@ -1167,7 +1297,7 @@ class ModelScalerSaver:
             model_dir = self.paths.get("Models")
             model_name = self.config.get("model_name", "sklearn_model")
             dataset = self.config.get("dataset", "data")
-            model_filename = f"{model_name}_{dataset}_{self.config['run_id']}_{self.config['time_stamp']}.joblib"
+            model_filename = "model.joblib"
             model_path = os.path.join(model_dir, model_filename)
             joblib.dump(model, model_path, compress=3)
             print(f"📤 Scikit-learn-Modell gespeichert unter: {model_path}")
@@ -1224,6 +1354,3 @@ class ModelScalerSaver:
             print(traceback.format_exc())
             
         return {} 
-    
-
-    

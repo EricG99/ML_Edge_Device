@@ -1,0 +1,62 @@
+# config/config_ml_rf.py
+
+# Konfiguration für einen schnellen Testlauf (wenige Bäume, kleine Datenmenge).
+# Ideal für Debugging und Funktionsüberprüfungen.
+param_rf_test = {
+    # Experimentinformationen
+    "model_name": "rf_test",
+    "dataset": "train_data_sample.csv",
+    "model_filename": "model.joblib", # Wichtig für das Speichern
+
+    # Modellparameter
+    "n_estimators": 5,
+    "max_depth": 3,
+    "random_state": 42,
+    "n_jobs": 1,
+
+    # Zeitreihenparameter
+    "lags": 2,
+    "horizon": 5,
+    "train_fraction": 0.3,
+    "rolling_window_size": 4,
+
+    # Features
+    "base_features": ['Group4-2_S6_MassFlowRate'],
+    "time_features": ['hour', 'day_of_week'],
+    "include_roll_mean": True,
+    "include_roll_std": False,
+    "scale_other_features": True, # Für RF oft nicht nötig, aber zur Konsistenz
+    "scale_target": True,
+}
+
+# Eine robustere Konfiguration für das eigentliche Training auf dem Server.
+param_rf_server_train = {
+    "model_name": "random_forest_server_trained",
+    "dataset": "dataset3_m_v1.csv",
+
+    # Modellparameter
+    "n_estimators": 100,
+    "max_depth": 10,
+    "min_samples_split": 5,
+    "min_samples_leaf": 3,
+    "max_features": "sqrt",
+    "random_state": 42,
+    "n_jobs": -1, # Alle verfügbaren CPU-Kerne nutzen
+
+    # Zeitreihenparameter
+    "lags": 8,
+    "horizon": 4,
+    "train_fraction": 0.8,
+    "rolling_window_size": 10,
+
+    # Feature-Konfiguration
+    "base_features": ['Volume_Flow', 'Pressure_Hall'],
+    "time_features": [
+        "minute_sin", "minute_cos", "hour_sin", "hour_cos",
+        "day_of_month", "day_of_week", "is_weekend"
+    ],
+    "include_roll_mean": True,
+    "include_roll_std": True,
+    "scale_other_features": False,
+    "scale_target": False,
+}
