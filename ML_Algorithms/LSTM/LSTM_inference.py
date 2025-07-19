@@ -182,7 +182,9 @@ if __name__ == "__main__":
 
     infer_config['model_filename'] = "model.keras"
 
-    
+    infer_config["inference_mode"] = "load_artifacts_path" # "load_artifacts_fast" oder "load_artifacts_path"
+    infer_config["load_id"] = "2025-07-20_002945_8844" # "load_artifacts_fast" oder "load_artifacts_path"
+
     # MQTT-Konfiguration
     mqtt_broker_ip = MQTT_CONFIG['MQTT_BROKER_IP']
     mqtt_port = MQTT_CONFIG['MQTT_PORT']

@@ -190,9 +190,9 @@ if __name__ == "__main__":
     })
     
     # Beispiel-Pfade für den 'fast' mode (müssen durch die Trainingsartefakte ersetzt werden)
-    infer_config['model_path_static'] = "trained_lstm_model.keras" 
-    infer_config['scaler_path_static'] = "trained_lstm_scaler.joblib"
-    infer_config['features_path_static'] = "trained_lstm_features.joblib"
+    infer_config['model_path_static'] = "trained_rf_model.joblib" 
+    infer_config['scaler_path_static'] = "trained_rf_scaler.joblib"
+    infer_config['features_path_static'] = "trained_rf_features.joblib"
     
     # MQTT-Konfiguration
     mqtt_broker_ip = MQTT_CONFIG['MQTT_BROKER_IP']

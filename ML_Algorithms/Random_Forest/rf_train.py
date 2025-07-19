@@ -44,7 +44,7 @@ def run_training(config: dict, save_artifacts: bool = True):
     X_train, y_train = pipeline.prepare_training_data()
 
     # Hole die trainierten Artefakte direkt aus der Pipeline-Instanz
-    scaler = pipeline.scaler_2D
+    scaler = pipeline.scaler
     final_feature_list = pipeline.full_feature_list
     
     # Überprüfe, ob die Pipeline die Artefakte erfolgreich erstellt hat

@@ -1078,13 +1078,13 @@ class ModelScalerSaver:
         base_filename = f"{self.config['model_name']}_{self.config['dataset'].split('.')[0]}_{self.config['run_id']}"
         
         try:
-            path = os.path.join(self.paths.get("Models"), f"{base_filename}.keras")
+            path = os.path.join(self.paths.get("Models"), "model.keras")
             model.save(path)
             results["model_path"] = path
             print(f"✅ Normales Keras-Modell gespeichert unter: {path}")
         except Exception as e:
             print(f"❌ Fehler beim Speichern des Keras-Modells: {e}")
-            traceback.print_exc() # KORREKTUR
+            traceback.print_exc() 
 
         if self.config.get("edge_device", False):
             quantized_path = self._convert_and_quantize_tflite(model)
@@ -1141,8 +1141,8 @@ class ModelScalerSaver:
             tflite_model_quant = converter.convert()
             
             # Dateinamen erstellen und speichern
-            base_filename = f"{self.config['model_name']}_{self.config['dataset'].split('.')[0]}_{self.config['run_id']}"
-            tflite_path = os.path.join(self.paths.get("Models"), f"{base_filename}_quant_float16.tflite")
+            #base_filename = f"{self.config['model_name']}_{self.config['dataset'].split('.')[0]}_{self.config['run_id']}"
+            tflite_path = os.path.join(self.paths.get("Models"), "model_quant_float16.tflite")
             
             with open(tflite_path, 'wb') as f:
                 f.write(tflite_model_quant)
@@ -1298,7 +1298,7 @@ class ModelScalerSaver:
             model_name = self.config.get("model_name", "sklearn_model")
             dataset = self.config.get("dataset", "data")
             model_filename = "model.joblib"
-            model_path = os.path.join(model_dir, model_filename)
+            model_path = os.path.join(model_dir, "model.joblib")
             joblib.dump(model, model_path, compress=3)
             print(f"📤 Scikit-learn-Modell gespeichert unter: {model_path}")
             return {"model_path": model_path}
@@ -1313,7 +1313,7 @@ class ModelScalerSaver:
             model_name = self.config.get("model_name", "xgb_model")
             dataset = self.config.get("dataset", "data")
             model_filename = f"{model_name}_{dataset}_{self.config['run_id']}_{self.config['time_stamp']}.json"
-            model_path = os.path.join(model_dir, model_filename)
+            model_path = os.path.join(model_dir, "model.json")
             model.save_model(model_path)
             print(f"📤 XGBoost-Modell gespeichert unter: {model_path}")
             return {"model_path": model_path}

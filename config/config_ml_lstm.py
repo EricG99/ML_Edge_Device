@@ -84,7 +84,7 @@ param_lstm_test = {
     "batch_size": 32,
     "validation_fraction": 0.2,
     "early_stopping_patience": 10,
-    
+    "loss": "huber",    
     # Zeitreihenparameter
     "lags": 2,
     "horizon": 5,

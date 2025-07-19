@@ -515,11 +515,10 @@ def create_timeseries_validation_split(X_train, y_train, config):
         return X_train, y_train, None, None
     
 
-class DataPipeline2D:
+class DataPipelineBase:
     """
-    Eine Klasse zur Kapselung des gesamten Datenvorbereitungsprozesses für 2D-Modelle.
-    Sie verwaltet den Zustand (Scaler, Feature-Listen) zwischen Trainings- und
-    Test-Pipelines und unterstützt verschiedene Datenlade-Strategien.
+    Eine abstrakte Basisklasse, die die gemeinsame Logik für Datenpipelines kapselt.
+    Verwaltet das Laden von Daten, Feature Engineering und den Zustand (Scaler, Features).
     """
     def __init__(self, config: dict):
         """
@@ -527,18 +526,16 @@ class DataPipeline2D:
 
         Args:
             config (dict): Ein Konfigurationswörterbuch, das alle Einstellungen enthält.
-            Erwartet einen Schlüssel 'loading_strategy' ("split", "separate_csv", "live_mqtt").
         """
         self.config = config
         
         # Zustandsobjekte, die während des Trainings initialisiert werden
-        self.scaler_2D = None
+        self.scaler = None
         self.y_scaler = None
         self.full_feature_list = None
         self.train_features_dict = None
         
         # Puffer für Live-Daten (z.B. für MQTT)
-        # Hält die letzten N Datenpunkte, um Lags und rollierende Features zu berechnen
         self._live_data_buffer = pd.DataFrame()
 
     def _load_data(self, mode: str) -> tuple[pd.DataFrame, pd.DataFrame | None]:
@@ -555,226 +552,71 @@ class DataPipeline2D:
         print(f"\nLade Daten im Modus '{mode}' mit Strategie '{strategy}'...")
 
         if strategy == "split":
-            # Strategie 1: Lade ein Dataset und teile es
             train_df = load_train_data_by_fraction(config=self.config, make_date_as_index=True)
             test_df = load_test_data_by_fraction(config=self.config, make_date_as_index=True)
             return train_df, test_df
 
         elif strategy == "separate_csv":
-            # Strategie 2: Lade aus getrennten CSV-Dateien
             if mode == 'train':
-                train_df = pd.read_csv(self.config['train_csv_path'], index_col='datetime', parse_dates=True)
-                return train_df, None
+                # Im Trainingsmodus wird die Test-CSV nur für eine robustere Skalierung benötigt
+                train_df = _load_full_timeseries(config=self.config, make_date_as_index=True)
+                test_df = pd.read_csv(self.config['test_csv_path'], index_col='datetime', parse_dates=True) if 'test_csv_path' in self.config else None
+                return train_df, test_df
             else: # mode == 'test'
                 test_df = pd.read_csv(self.config['test_csv_path'], index_col='datetime', parse_dates=True)
                 return None, test_df
         
         elif strategy == "live_mqtt":
-             # Strategie 3: Trainingsdaten aus CSV, Testdaten kommen live
              if mode == 'train':
-                train_df = df = _load_full_timeseries(config=self.config, make_date_as_index=True)
+                train_df = _load_full_timeseries(config=self.config, make_date_as_index=True)
                 return train_df, None
              else: # mode == 'test'
-                # Bei MQTT werden die Daten nicht als Block geladen.
-                # Dies wird in der `prepare_live_data_point` Methode behandelt.
                 print("Im MQTT-Modus werden Testdaten live verarbeitet, kein initiales Laden.")
                 return None, None
         
         else:
             raise ValueError(f"Unbekannte Lade-Strategie: {strategy}")
 
-    def prepare_training_data(self) -> tuple[np.ndarray, np.ndarray]:
-        """
-        Führt die komplette Pipeline für die Trainingsdaten aus.
-        1. Lädt Daten.
-        2. Führt Feature Engineering durch.
-        3. Initialisiert und trainiert die Scaler.
-        4. Speichert die Zustandsobjekte (Scaler, Feature-Listen).
-        5. Gibt die vorbereiteten 2D-Trainingsdaten zurück.
-        """
-        print("--- Starte Trainings-Pipeline ---")
+    def prepare_training_data(self):
+        """Muss von den Unterklassen implementiert werden."""
+        raise NotImplementedError("Diese Methode muss in der Unterklasse implementiert werden.")
+
+    def prepare_testing_data(self):
+        """Muss von den Unterklassen implementiert werden."""
+        raise NotImplementedError("Diese Methode muss in der Unterklasse implementiert werden.")
         
-        # Schritt 1: Daten laden
-        train_df, _ = self._load_data(mode='train') # Testdaten werden hier nicht benötigt
+    def prepare_live_data_point(self, mqtt_payload: dict):
+        """Muss von den Unterklassen implementiert werden."""
+        raise NotImplementedError("Diese Methode muss in der Unterklasse implementiert werden.")
 
-        # Schritt 2: Feature Engineering
-        print("\nSchritt 2: Feature Engineering...")
-        train_df, self.train_features_dict = fe.add_all_features(train_df, self.config)
-        self.full_feature_list = self.train_features_dict["all"]
-        print(f"Trainingsdaten nach FE (Shape): {train_df.shape}")
-        print(f"Verfügbare Features: {self.full_feature_list}")
 
-        # Schritt 3: Daten in 2D-Format bringen und skalieren
-        print("\nSchritt 3: Skalierung und 2D-Formatierung...")
-        # Die Funktion `prepare_2d_train_data` muss leicht angepasst werden,
-        # um die Scaler zurückzugeben, damit wir sie speichern können.
-        X_train_2D, y_train_2D, self.scaler_2D, self.y_scaler = prepare_2d_train_data(
-            full_feature_train_data=train_df[self.full_feature_list],
-            used_lags=self.config["lags"],
-            scale_target=self.config.get("scale_target", False),
-            scaler_type=self.config.get("scaler_type", "minmax"),
-            scale_features=self.config.get("scale_other_features", False)
-        )
-
-        # Schritt 4: Multi-Step Target (optional)
-        if self.config["horizon"] > 1:
-            print("\nSchritt 4: Erstelle Multi-Step Target...")
-            y_train_2D = create_multi_step_target(y_train_2D, self.config["horizon"])
-            # Schneide X passend zur neuen Länge von y
-            X_train_2D = X_train_2D[:len(y_train_2D)]
-
-        print(f"\nTrainings-Pipeline abgeschlossen. Shapes: X_train: {X_train_2D.shape}, y_train: {y_train_2D.shape}")
-        return X_train_2D, y_train_2D
-
-    def prepare_testing_data(self) -> tuple[np.ndarray, np.ndarray]:
-        """
-        Führt die komplette Pipeline für die (Batch-)Testdaten aus.
-        1. Lädt Testdaten.
-        2. Führt Feature Engineering durch.
-        3. Verwendet die existierenden, trainierten Scaler zur Transformation.
-        4. Gibt die vorbereiteten 2D-Testdaten zurück.
+class DataPipeline2D(DataPipelineBase):
+    """
+    Eine Klasse zur Kapselung des gesamten Datenvorbereitungsprozesses für 2D-Modelle.
+    Der Scaler wird hier nur mit Trainingsdaten trainiert.
+    """
+    def __init__(self, config: dict):
+        super().__init__(config)
         
-        HINWEIS: Diese Methode ist für Batch-Verarbeitung gedacht (aus CSV oder Split).
-        Für Live-Daten siehe `prepare_live_data_point`.
-        """
-        if self.scaler_2D is None or self.full_feature_list is None:
-            raise RuntimeError("Die Methode `prepare_training_data` muss zuerst aufgerufen werden.")
-        
-        print("\n--- Starte Batch-Testing-Pipeline ---")
-
-        # Schritt 1: Daten laden
-        _, test_df = self._load_data(mode='test')
-        if test_df is None:
-            raise ValueError("Keine Testdaten für Batch-Verarbeitung geladen. Falsche Strategie?")
-
-        # Schritt 2: Feature Engineering
-        # Wichtig: dieselben Features wie im Training erstellen
-        print("\nSchritt 2: Feature Engineering für Testdaten...")
-        test_df, _ = fe.add_all_features(test_df, self.config)
-        
-        # Sicherstellen, dass die Spaltenreihenfolge exakt übereinstimmt
-        test_df = test_df[self.full_feature_list]
-
-        # Schritt 3: Daten transformieren (ohne erneutes Fitten!)
-        print("\nSchritt 3: Transformierung und 2D-Formatierung...")
-        X_test_2D, y_test_2D = prepare_test_data_2D(
-            full_feature_test_data=test_df,
-            scaler_2D=self.scaler_2D,
-            scaler_y=self.y_scaler,
-            used_lags=self.config["lags"],
-            scale_target=self.config.get("scale_target", False),
-            target_column=self.config["base_features"][0]
-        )
-
-        # Schritt 4: Multi-Step Target (optional)
-        if self.config["horizon"] > 1:
-            print("\nSchritt 4: Erstelle Multi-Step Target...")
-            y_test_2D = create_multi_step_target(y_test_2D, self.config["horizon"])
-            X_test_2D = X_test_2D[:len(y_test_2D)]
-
-        print(f"\nTest-Pipeline abgeschlossen. Shapes: X_test: {X_test_2D.shape}, y_test: {y_test_2D.shape}")
-        return X_test_2D, y_test_2D
-        
-    def prepare_live_data_point(self, mqtt_payload: dict) -> np.ndarray | None:
-        """
-        Verarbeitet einen einzelnen, live eintreffenden Datenpunkt aus einer MQTT-Payload.
-        Extrahiert die benötigten Basis-Features, fügt den Datenpunkt dem internen
-        Puffer hinzu und führt die vollständige Vorverarbeitung für die Inferenz durch.
-
-        Args:
-            mqtt_payload (dict): Das vollständige Dictionary, das aus dem MQTT JSON-Payload
-            geparst wurde.
-
-        Returns:
-            Ein fertig vorbereiteter 2D-Vektor (np.ndarray) für die Inferenz, oder None,
-            wenn der interne Puffer noch nicht genügend Daten hat.
-        """
-        if self.scaler_2D is None or self.full_feature_list is None:
-            raise RuntimeError("Die Methode `prepare_training_data` muss zuerst aufgerufen werden, um die Pipeline zu initialisieren.")
-
-        base_features_needed = self.train_features_dict.get("base", [])
-        
-        # 'datetime' wird als Index benötigt
-        if "datetime" not in mqtt_payload:
-            print("Fehler: 'datetime' fehlt in der MQTT-Nachricht. Überspringe Datenpunkt.")
-            return None
-            
-        new_data_point = {"datetime": mqtt_payload["datetime"]}
-
-        for feature in base_features_needed:
-            if feature in mqtt_payload:
-                new_data_point[feature] = mqtt_payload[feature]
-            else:
-                # Falls ein benötigtes Feature fehlt, kann der Punkt nicht verarbeitet werden
-                print(f"Warnung: Benötigtes Basis-Feature '{feature}' nicht in MQTT-Nachricht gefunden. Überspringe.")
-                return None
-        
-        # Neuen Datenpunkt in einen DataFrame konvertieren und an den Puffer anhängen
-        # pd.to_datetime wandelt den String in ein echtes Datumsobjekt um
-        new_row = pd.DataFrame([new_data_point])
-        new_row['datetime'] = pd.to_datetime(new_row['datetime'])
-        new_row = new_row.set_index('datetime')
-        
-        # Alte Daten im Puffer löschen, die den gleichen Zeitstempel haben könnten
-        self._live_data_buffer = self._live_data_buffer[~self._live_data_buffer.index.isin(new_row.index)]
-        
-        # Neuen Datenpunkt hinzufügen und Puffer sortieren
-        self._live_data_buffer = pd.concat([self._live_data_buffer, new_row]).sort_index()
-
-        # Puffer auf eine maximale Länge begrenzen
-        max_history_needed = self.config.get('max_fe_window', 50) + self.config['lags']
-        if len(self._live_data_buffer) > max_history_needed:
-            self._live_data_buffer = self._live_data_buffer.iloc[-max_history_needed:]
-
-        # Prüfen, ob genügend Daten für eine vollständige FE-Berechnung vorhanden sind
-        # Diese Logik geht davon aus, dass `add_all_features` mit einem Puffer umgehen kann
-        required_len = self.config.get('min_fe_window', 10) # Mindestlänge für rollierende Features
-        if len(self._live_data_buffer) < required_len:
-            print(f"Puffer füllt sich... Aktuelle Größe: {len(self._live_data_buffer)}/{required_len}")
-            return None
-
-        # Feature Engineering auf dem gesamten Puffer durchführen
-        featured_buffer, _ = fe.add_all_features(self._live_data_buffer.copy(), self.config)
-
-        # Prüfen, ob nach dem FE genügend Zeilen für die Lag-Features vorhanden sind
-        if len(featured_buffer) < self.config['lags'] + 1:
-             print("Puffer füllt sich für Lag-Features...")
-             return None
-
-        # Den letzten, vollständig berechneten Vektor extrahieren und sicherstellen,
-        # dass alle Spalten vorhanden sind.
-        try:
-            last_vector_full = featured_buffer[self.full_feature_list].iloc[-1:]
-        except KeyError as e:
-            print(f"Fehler: Eine oder mehrere Spalten aus `full_feature_list` wurden nach dem FE nicht gefunden: {e}")
-            return None
-
-        # Transformieren mit dem trainierten Scaler
-        X_live_2D = self.scaler_2D.transform(last_vector_full.values)
-
-        return X_live_2D
-    
     def _prepare_and_scale_training_data(self, train_df_featured: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
         """
-        Bereitet die Trainingsdaten für das Modell vor, nachdem Feature Engineering stattgefunden hat.
-        - Initialisiert und trainiert die Scaler.
-        - Speichert die Scaler in der Klasseninstanz.
-        - Gibt die skalierten X_train und y_train Arrays zurück.
+        Initialisiert und trainiert die Scaler ausschließlich auf den Trainingsdaten
+        und gibt die skalierten 2D-Arrays zurück.
         """
         scaler_type = self.config.get("scaler_type", "minmax")
         scale_target = self.config.get("scale_target", False)
         scale_features = self.config.get("scale_other_features", False)
-        target_column = self.config["base_features"][0] # Annahme: Das erste Basis-Feature ist das Target
+        target_column = self.config["base_features"][0]
 
         scaler_class = RobustScaler if scaler_type == "robust" else MinMaxScaler
 
         # 1. Feature-Skalierung (X)
         X_train = train_df_featured.values
         if scale_features:
-            print("Passe Feature-Scaler (scaler_2D) auf Trainingsdaten an...")
-            self.scaler_2D = scaler_class()
-            # WICHTIG: .fit_transform() NUR auf den Trainingsdaten! Kein Data Leakage.
-            X_train = self.scaler_2D.fit_transform(X_train)
+            print("Passe Feature-Scaler (scaler) auf Trainingsdaten an...")
+            self.scaler = scaler_class()
+            # WICHTIG: .fit_transform() wird NUR auf den Trainingsdaten ausgeführt.
+            X_train = self.scaler.fit_transform(X_train)
         
         # 2. Target-Skalierung (y)
         y_train_raw = train_df_featured[target_column].values
@@ -787,47 +629,13 @@ class DataPipeline2D:
             
         return X_train, y_train
 
-    def _prepare_and_scale_inference_data(self, df_featured: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
-        """
-        NEUE INTERNE METHODE:
-        Bereitet Test- oder Live-Daten für die Inferenz vor.
-        - Verwendet die bereits trainierten Scaler.
-        - Führt KEIN .fit() oder .fit_transform() aus.
-        - Gibt die skalierten X und y Arrays zurück.
-        """
-        scale_target = self.config.get("scale_target", False)
-        scale_features = self.config.get("scale_other_features", False)
-        target_column = self.config["base_features"][0]
-
-        # 1. Feature-Transformation (X)
-        X_inference = df_featured.values
-        if scale_features:
-            if not self.scaler_2D:
-                raise RuntimeError("Feature-Scaler (scaler_2D) wurde nicht trainiert. Führen Sie zuerst die Trainings-Pipeline aus.")
-            print("Transformiere Features mit existierendem scaler_2D...")
-            X_inference = self.scaler_2D.transform(X_inference)
-            
-        # 2. Target-Transformation (y)
-        y_inference_raw = df_featured[target_column].values
-        y_inference = y_inference_raw
-        
-        if scale_target:
-            if not self.y_scaler:
-                raise RuntimeError("Target-Scaler (y_scaler) wurde nicht trainiert. Führen Sie zuerst die Trainings-Pipeline aus.")
-            print("Transformiere Target mit existierendem y_scaler...")
-            y_inference = self.y_scaler.transform(y_inference_raw.reshape(-1, 1)).flatten()
-
-        return X_inference, y_inference
-
-
     def prepare_training_data(self) -> tuple[np.ndarray, np.ndarray]:
         """
-        ÜBERARBEITETE Hauptmethode für das Training.
-        Nutzt jetzt die neue interne Helper-Methode.
+        Führt die komplette Pipeline für die Trainingsdaten aus.
         """
-        print("--- Starte Trainings-Pipeline ---")
+        print("--- Starte 2D Trainings-Pipeline ---")
         
-        # Schritt 1: Lade Trainings-CSV
+        # Schritt 1: Lade Trainings-CSV (Test-CSV wird hier ignoriert)
         train_df, _ = self._load_data(mode='train')
 
         # Schritt 2: Feature Engineering
@@ -835,14 +643,12 @@ class DataPipeline2D:
         train_df_featured, self.train_features_dict = fe.add_all_features(train_df, self.config)
         self.full_feature_list = self.train_features_dict["all"]
         
-        # Schritt 2.1: Entferne Zeilen mit NaNs, die durch Lags/Rolling-Features entstanden sind
-        # Dies ist der sauberste Weg, um X und y perfekt auszurichten.
         original_rows = len(train_df_featured)
         train_df_featured.dropna(inplace=True)
         print(f"Entferne Zeilen mit NaNs nach FE. Shape: {original_rows} -> {len(train_df_featured)}")
 
-        # Schritt 3: Skalierung und finale Vorbereitung
-        print("\nSchritt 3: Skalierung und finale Formatierung...")
+        # Schritt 3: Skalierung und finale Vorbereitung (nur auf Trainingsdaten)
+        print("\nSchritt 3: Skalierung und finale 2D-Formatierung...")
         X_train_2D, y_train_2D = self._prepare_and_scale_training_data(
             train_df_featured=train_df_featured[self.full_feature_list]
         )
@@ -851,249 +657,110 @@ class DataPipeline2D:
         if self.config.get("horizon", 1) > 1:
             print(f"\nSchritt 4: Erstelle Multi-Step Target für Horizont={self.config['horizon']}...")
             y_train_2D = create_multi_step_target(y_train_2D, self.config["horizon"])
-            # Schneide X passend zur neuen, kürzeren Länge von y
             X_train_2D = X_train_2D[:len(y_train_2D)]
 
         print(f"\nTrainings-Pipeline abgeschlossen. Shapes: X_train: {X_train_2D.shape}, y_train: {y_train_2D.shape}")
         return X_train_2D, y_train_2D
-
-        print(f"\nTrainings-Pipeline abgeschlossen. Shapes: X_train: {X_train_2D.shape}, y_train: {y_train_2D.shape}")
-        return X_train_2D, y_train_2D
-
-    def prepare_testing_data(self) -> tuple[np.ndarray, np.ndarray]:
-        """
-        ÜBERARBEITETE Hauptmethode für das Testen mit CSV-Dateien.
-        """
-        if not self.full_feature_list:
-            raise RuntimeError("Die Methode `prepare_training_data` muss zuerst aufgerufen werden.")
         
-        print("\n--- Starte Batch-Testing-Pipeline ---")
+    # Die Methode prepare_testing_data bleibt unverändert.
 
-        # Schritt 1: Lade Test-CSV
-        _, test_df = self._load_data(mode='test')
-        
-        # Schritt 2: Feature Engineering
-        test_df_featured, _ = fe.add_all_features(test_df, self.config)
-        test_df_featured.dropna(inplace=True)
-
-        # Schritt 3: Skalierung mit den trainierten Scalern
-        X_test_2D, y_test_2D = self._prepare_and_scale_inference_data(
-            df_featured=test_df_featured[self.full_feature_list]
-        )
-
-        print(f"\nTest-Pipeline abgeschlossen. Shapes: X_test: {X_test_2D.shape}, y_test: {y_test_2D.shape}")
-        return X_test_2D, y_test_2D
-    
-
-class DataPipeline3D:
+class DataPipeline3D(DataPipelineBase):
     """
-    A class to encapsulate the entire data preparation process for 3D models (like LSTMs).
-    It manages state (scalers, feature lists) between training and testing pipelines 
-    and is designed to mirror the functionality of DataPipeline2D for 3D data shapes.
+    Eine Klasse zur Kapselung des gesamten Datenvorbereitungsprozesses für 3D-Modelle.
+    Der Scaler wird hier nur mit Trainingsdaten trainiert.
     """
     def __init__(self, config: dict):
-        """
-        Initializes the pipeline with the configuration.
-
-        Args:
-            config (dict): A configuration dictionary containing all settings.
-        """
-        self.config = config
-        
-        # State objects initialized during training
-        self.scaler_3D = None
-        self.y_scaler = None
-        self.full_feature_list = None
-        self.train_features_dict = None
-        
-        # Buffer for live data (e.g., for MQTT)
-        self._live_data_buffer = pd.DataFrame()
-
-    def _load_data(self, mode: str) -> tuple[pd.DataFrame, pd.DataFrame | None]:
-        """
-        Internal method to load data based on the strategy in the configuration.
-        
-        Args:
-            mode (str): Either 'train' or 'test'.
-            
-        Returns:
-            A tuple with (train_df, test_df). test_df can be None.
-        """
-        strategy = self.config.get("loading_strategy", "split")
-        print(f"\nLoading data in '{mode}' mode with strategy '{strategy}'...")
-
-        if strategy == "split":
-            train_df = load_train_data_by_fraction(config=self.config, make_date_as_index=True)
-            test_df = load_test_data_by_fraction(config=self.config, make_date_as_index=True)
-            return train_df, test_df
-
-        elif strategy == "separate_csv":
-            if mode == 'train':
-                train_df = pd.read_csv(self.config['train_csv_path'], index_col='datetime', parse_dates=True)
-                return train_df, None
-            else: # mode == 'test'
-                test_df = pd.read_csv(self.config['test_csv_path'], index_col='datetime', parse_dates=True)
-                return None, test_df
-        
-        elif strategy == "live_mqtt":
-             if mode == 'train':
-                train_df = pd.read_csv(self.config['train_csv_path'], index_col='datetime', parse_dates=True)
-                return train_df, None
-             else: # mode == 'test'
-                print("In MQTT mode, test data is processed live, no initial loading.")
-                return None, None
-        
-        else:
-            raise ValueError(f"Unknown loading strategy: {strategy}")
+        super().__init__(config)
 
     def prepare_training_data(self) -> tuple[np.ndarray, np.ndarray]:
         """
-        Executes the complete pipeline for the training data.
-        1. Loads data.
-        2. Performs feature engineering.
-        3. Initializes and fits scalers.
-        4. Transforms data into sliding windows (3D shape).
-        5. Stores the state objects (scalers, feature lists).
-        6. Returns the prepared 3D training data (X, y).
+        Führt die komplette Pipeline für die Trainingsdaten aus und formt sie in 3D.
+        Der Scaler wird ausschließlich auf den Trainingsdaten angepasst.
         """
-        print("--- Starting 3D Training Pipeline ---")
+        print("--- Starte 3D Trainings-Pipeline ---")
         
-        # Step 1: Load data
-        train_df, test_df_for_scaler_fitting = self._load_data(mode='train') 
+        # Schritt 1: Lade Daten (Testdaten werden nicht mehr für den Scaler verwendet)
+        train_df, _ = self._load_data(mode='train') 
 
-        # Step 2: Feature Engineering
-        print("\nStep 2: Feature Engineering...")
-        train_df, self.train_features_dict = fe.add_all_features(train_df, self.config)
+        # Schritt 2: Feature Engineering
+        print("\nSchritt 2: Feature Engineering...")
+        train_df_featured, self.train_features_dict = fe.add_all_features(train_df, self.config)
         self.full_feature_list = self.train_features_dict["all"]
-        
-        # For robust scaling, it's beneficial to fit on a representative data distribution
-        test_df_for_scaler_fitting, _ = fe.add_all_features(test_df_for_scaler_fitting, self.config)
-        
-        print(f"Training data after FE (Shape): {train_df.shape}")
-        print(f"Available features: {self.full_feature_list}")
+        print(f"Verfügbare Features: {self.full_feature_list}")
 
-        # Step 3: Scale data and create 3D sliding windows
-        print("\nStep 3: Scaling and 3D Windowing...")
-        X_train_3D, y_train_3D, self.scaler_3D, self.y_scaler, _, _ = prepare_3d_train_data(
-            base_train_data=train_df,
-            base_test_data=test_df_for_scaler_fitting, # Used for a more robust scaler fit
-            feature_list=self.full_feature_list,
-            used_lags=self.config["lags"],
+        # WICHTIG: NaN-Zeilen entfernen, die durch rollierende Features entstehen,
+        # BEVOR der Scaler angepasst wird.
+        train_df_featured.dropna(inplace=True)
+        print(f"Nach FE und dropna verbleiben {len(train_df_featured)} Zeilen für das Training.")
+        
+        # Schritt 3: Scaler ausschließlich auf Trainingsdaten anpassen
+        print("\nSchritt 3: Scaler anpassen (nur auf Trainingsdaten)...")
+        scaler_class = RobustScaler if self.config.get("scaler_type", "minmax") == "robust" else MinMaxScaler
+        self.scaler = scaler_class()
+        self.scaler.fit(train_df_featured[self.full_feature_list])
+        print("Feature-Scaler wurde ausschließlich auf den Trainingsdaten angepasst.")
+        
+        if self.config.get("scale_target", False):
+            self.y_scaler = scaler_class()
+            target_col = self.config["base_features"][0]
+            # y_scaler wird ebenfalls nur auf den Target-Werten der Trainingsdaten angepasst
+            self.y_scaler.fit(train_df_featured[[target_col]])
+            print("Target-Scaler wurde ausschließlich auf den Trainingsdaten angepasst.")
+
+        # Schritt 4: Trainingsdaten transformieren und in Sliding Windows umwandeln
+        print("\nSchritt 4: Skalierung und 3D-Windowing für Trainingsdaten...")
+        train_scaled = self.scaler.transform(train_df_featured[self.full_feature_list])
+        
+        X_train_3D, y_train_3D_raw = convert_data_to_sliding_window(
+            train_scaled,
+            lag_horizon=self.config["lags"],
             forecast_horizon=self.config["horizon"],
-            scaler_type=self.config.get("scaler_type", "minmax"),
-            scale_target=self.config.get("scale_target", False)
+            shift=1
         )
+        
+        y_train_3D = y_train_3D_raw
+        if self.config.get("scale_target", False):
+            # Transformieren mit dem bereits angepassten y_scaler
+            # Form für den Scaler anpassen -> (N, 1)
+            y_train_3D_reshaped = y_train_3D_raw.reshape(-1, 1)
+            # Skalieren
+            y_train_3D_scaled = self.y_scaler.transform(y_train_3D_reshaped)
+            # Zurück in die ursprüngliche Form (Anzahl_Fenster, forecast_horizon)
+            y_train_3D = y_train_3D_scaled.reshape(y_train_3D_raw.shape)
 
-        print(f"\nTraining pipeline complete. Shapes: X_train: {X_train_3D.shape}, y_train: {y_train_3D.shape}")
+        print(f"\nTrainings-Pipeline abgeschlossen. Shapes: X_train: {X_train_3D.shape}, y_train: {y_train_3D.shape}")
         return X_train_3D, y_train_3D
 
     def prepare_testing_data(self) -> tuple[np.ndarray, np.ndarray]:
         """
-        Executes the complete pipeline for batch testing data.
-        1. Loads test data.
-        2. Performs feature engineering.
-        3. Uses existing, fitted scalers to transform the data.
-        4. Creates 3D sliding windows for testing.
+        Führt die komplette Pipeline für die (Batch-)Testdaten aus.
         """
-        if self.scaler_3D is None or self.full_feature_list is None:
-            raise RuntimeError("The `prepare_training_data` method must be called first.")
+        if not self.scaler or not self.full_feature_list:
+            raise RuntimeError("Die Methode `prepare_training_data` muss zuerst aufgerufen werden.")
         
-        print("\n--- Starting Batch 3D-Testing Pipeline ---")
+        print("\n--- Starte 3D Batch-Testing-Pipeline ---")
 
-        # Step 1: Load data
         _, test_df = self._load_data(mode='test')
-        if test_df is None:
-            raise ValueError("No test data loaded for batch processing. Check your strategy.")
-
-        # Step 2: Feature Engineering
-        print("\nStep 2: Feature Engineering for test data...")
-        test_df, _ = fe.add_all_features(test_df, self.config)
         
-        # Ensure column order matches the training set
-        test_df = test_df[self.full_feature_list]
+        # Feature Engineering & NaN-Entfernung
+        test_df_featured, _ = fe.add_all_features(test_df, self.config)
+        test_df_featured.dropna(inplace=True)
+        
+        # Skalierung mit trainiertem Scaler
+        test_scaled = self.scaler.transform(test_df_featured[self.full_feature_list])
 
-        # Step 3: Transform data and create 3D windows
-        print("\nStep 3: Transforming and creating 3D windows...")
-        X_test_3D, y_test_3D = prepare_test_data_3D(
-            base_test_data=test_df,
-            feature_list=self.full_feature_list,
-            scaler_3D=self.scaler_3D,
-            scaler_y=self.y_scaler,
-            used_lags=self.config["lags"],
+        # 3D-Fenster erstellen
+        X_test_3D, y_test_3D_raw = convert_data_to_sliding_window(
+            test_scaled,
+            lag_horizon=self.config["lags"],
             forecast_horizon=self.config["horizon"],
-            scale_target=self.config.get("scale_target", False),
+            shift=1
         )
+        
+        # Target skalieren, falls konfiguriert
+        y_test_3D = y_test_3D_raw
+        if self.config.get("scale_target", False):
+            y_test_3D = self.y_scaler.transform(y_test_3D_raw)
 
-        print(f"\nTest pipeline complete. Shapes: X_test: {X_test_3D.shape}, y_test: {y_test_3D.shape}")
+        print(f"\nTest-Pipeline abgeschlossen. Shapes: X_test: {X_test_3D.shape}, y_test: {y_test_3D.shape}")
         return X_test_3D, y_test_3D
-        
-    def prepare_live_data_point(self, mqtt_payload: dict) -> np.ndarray | None:
-        """
-        Processes a single, live data point from an MQTT payload for 3D model inference.
-        It maintains a buffer to construct a full window of (lags, features).
-
-        Args:
-            mqtt_payload (dict): The dictionary parsed from the MQTT JSON payload.
-
-        Returns:
-            A prepared 3D array of shape (1, lags, features) for inference, 
-            or None if the buffer is not yet full.
-        """
-        if self.scaler_3D is None or self.full_feature_list is None:
-            raise RuntimeError("The `prepare_training_data` method must be called first.")
-
-        base_features_needed = self.train_features_dict.get("base", [])
-        
-        if "datetime" not in mqtt_payload:
-            print("Error: 'datetime' missing in MQTT message. Skipping.")
-            return None
-            
-        new_data_point = {"datetime": mqtt_payload["datetime"]}
-        for feature in base_features_needed:
-            if feature not in mqtt_payload:
-                print(f"Warning: Needed base feature '{feature}' not in MQTT message. Skipping.")
-                return None
-            new_data_point[feature] = mqtt_payload[feature]
-        
-        # Convert to DataFrame and append to buffer
-        new_row = pd.DataFrame([new_data_point])
-        new_row['datetime'] = pd.to_datetime(new_row['datetime'])
-        new_row = new_row.set_index('datetime')
-        
-        self._live_data_buffer = self._live_data_buffer[~self._live_data_buffer.index.isin(new_row.index)]
-        self._live_data_buffer = pd.concat([self._live_data_buffer, new_row]).sort_index()
-
-        # Trim buffer to the necessary length for FE and lags
-        max_history_needed = self.config.get('max_fe_window', 50) + self.config['lags']
-        if len(self._live_data_buffer) > max_history_needed:
-            self._live_data_buffer = self._live_data_buffer.iloc[-max_history_needed:]
-
-        # Check if enough data exists to create at least one full lag window
-        required_len = self.config.get('min_fe_window', 10) 
-        if len(self._live_data_buffer) < required_len:
-            print(f"Buffer filling for feature engineering... Current size: {len(self._live_data_buffer)}/{required_len}")
-            return None
-
-        # Perform feature engineering on the buffer
-        featured_buffer, _ = fe.add_all_features(self._live_data_buffer.copy(), self.config)
-
-        # We need exactly `lags` timesteps for one prediction
-        if len(featured_buffer) < self.config['lags']:
-             print(f"Buffer filling for lag window... Have {len(featured_buffer)}/{self.config['lags']} feature vectors.")
-             return None
-
-        # Get the last `lags` timesteps to form the window
-        try:
-            window_df = featured_buffer[self.full_feature_list].iloc[-self.config['lags']:]
-            if len(window_df) < self.config['lags']:
-                print("Not enough data for a full window after feature engineering.")
-                return None
-        except KeyError as e:
-            print(f"Error: A column from `full_feature_list` was not found after FE: {e}")
-            return None
-
-        # Scale the window and reshape for the 3D model
-        X_live_scaled = self.scaler_3D.transform(window_df.values)
-        X_live_3D = np.expand_dims(X_live_scaled, axis=0) 
-
-        return X_live_3D

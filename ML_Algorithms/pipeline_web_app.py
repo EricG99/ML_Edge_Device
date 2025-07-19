@@ -17,7 +17,7 @@ from ML_Helpfunctions import Pipeline_Utils as PipelineUtils
 from ML_Helpfunctions.MQTT_Client import MqttInferenceClient
 from ML_Algorithms.web_app import create_app
 
-from LSTM.lstm_train import run_training as run_lstm_training
+# from LSTM.LSTM_train import run_training as run_lstm_training
 from config.config_ml_lstm import param_lstm_test, param_lstm_server
 
 
