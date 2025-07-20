@@ -875,7 +875,7 @@ def create_representative_dataset_generator(dataset: tf.data.Dataset):
     Gibt nur die Eingabe-Tensoren zurück.
     """
     def generator():
-        for data_sample in dataset.take(100):  # optional limitieren
+        for data_sample in dataset.take(100):  
             if isinstance(data_sample, tuple):
                 input_data = data_sample[0]
             else:
@@ -883,8 +883,6 @@ def create_representative_dataset_generator(dataset: tf.data.Dataset):
             yield [tf.cast(input_data, tf.float32)]
 
     return generator
-
-
 
 
 def load_model_artifacts_for_inference(config: dict) -> tuple:
