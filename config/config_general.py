@@ -35,7 +35,6 @@ CONFIG_LOAD_ARTIFACTS = {
     "inference_steps" : 10,
     "inference_interval_sec": 0.1,
     "artifacts_base_path": ARTIFACTS_OUTPUT_PATH,
-    "load_id": "2025-07-19_180549_3036", # Beispiel-ID
 
     "loading_strategy": "live_mqtt", #"split", "separate_csv", "live_mqtt"
     

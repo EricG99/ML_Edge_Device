@@ -20,8 +20,8 @@ if project_root not in sys.path:
 from config.config_ml_rf import param_rf_test
 from config.config_general import CONFIG_PATH, generate_run_id, MQTT_CONFIG, CONFIG_LOAD_ARTIFACTS
 
-from ML_Algorithms.Random_Forest.rf_train import run_training
-from ML_Algorithms.Random_Forest.rf_inference import LiveInferenceProcessor
+#from ML_Algorithms.Random_Forest.rf_train import run
+from ML_Algorithms.Random_Forest.rf_inference import RFInference
 from ML_Algorithms.web_app import create_app
 from ML_Helpfunctions import Pipeline_Utils as PipelineUtils
 from ML_Helpfunctions.MQTT_Client import MqttInferenceClient

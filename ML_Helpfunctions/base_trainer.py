@@ -86,8 +86,6 @@ class BaseTrainer(ABC):
             logging.info("Saving in 'path' mode with versioned directory...")
             saver = Pipeline_Utils.ModelScalerSaver(self.config, paths)
             saved_artifacts = saver.save_artifacts(model=self.model, scaler=self.scaler)
-            
-            # Speichere die Feature-Liste manuell
             try:
                 features_path = os.path.join(paths.get("Models"), "features.joblib")
                 joblib.dump(self.features, features_path)
@@ -95,6 +93,7 @@ class BaseTrainer(ABC):
                 saved_artifacts["features_path"] = features_path
             except Exception as e:
                 logging.error(f"Failed to save feature list: {e}")
+
             logging.info(f"All artifacts for run '{self.config['run_id']}' saved successfully.")
         
         else:

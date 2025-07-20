@@ -69,7 +69,9 @@ param_lstm_edge = {
 param_lstm_test = {
     "model_name": "lstm",
     "dataset": "train_data_sample.csv",
-    "model_filename": "model.joblib", # Wichtig für das Speichern
+    "model_filename": "model.keras", # Wichtig für das Speichern
+    "load_id": "2025-07-20_105731_9431", # Beispiel-ID
+
 
     # Modellarchitektur
     "num_layers": 2,

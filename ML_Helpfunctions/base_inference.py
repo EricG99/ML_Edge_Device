@@ -23,6 +23,8 @@ class BaseInferenceProcessor(ABC):
         self.port = port
         self.topic = topic
         
+        self.training_config = None
+        
         self.model, self.scaler, self.feature_list = None, None, None
         self.is_running = False
         self.lock = threading.Lock()
@@ -47,7 +49,9 @@ class BaseInferenceProcessor(ABC):
         """Lädt die für die Inferenz benötigten Artefakte."""
         try:
             logging.info("Loading inference artifacts...")
-            self.scaler, self.feature_list, self.model = Pipeline_Utils.load_model_artifacts_for_inference(self.config)
+            # ERWEITERT: Unpackt jetzt vier Werte
+            self.scaler, self.feature_list, self.model, self.training_config = \
+                Pipeline_Utils.load_model_artifacts_for_inference(self.config)
             logging.info("✅ Artifacts loaded successfully.")
         except (FileNotFoundError, ValueError) as e:
             logging.error(f"Fatal error loading artifacts: {e}")
@@ -88,26 +92,27 @@ class BaseInferenceProcessor(ABC):
                 )
                 cpu_load = Pipeline_Utils.get_cpu_usage()
                 
-                prediction_value = prediction[0] if isinstance(prediction, (list, np.ndarray)) else prediction
+                prediction_value = prediction[0] if isinstance(prediction, (list, np.ndarray)) and prediction.ndim > 1 else prediction
                 prediction_list = prediction_value.tolist() if hasattr(prediction_value, 'tolist') else [prediction_value]
 
-                # NEU: Schrittzähler erhöhen
                 self.step_counter += 1
-                
                 logging.info(f"Step {self.step_counter}: Prediction at {timestamp.isoformat()}: {prediction_list} | Time: {inference_time_ms:.2f}ms | CPU: {cpu_load:.1f}%")
 
-                self.results_buffer.append({
+                # KORREKTUR: Alle Vorhersageschritte dynamisch zum Ergebnis hinzufügen
+                result_entry = {
                     "datetime": timestamp,
                     "true_value": true_value,
-                    "prediction_step_1": prediction_list[0],
                     "cpu_load_percent": cpu_load,
                     "inference_time_ms": inference_time_ms
-                })
+                }
+                for i, pred_val in enumerate(prediction_list):
+                    result_entry[f"prediction_step_{i+1}"] = pred_val
                 
-                # NEU: Prüfen, ob das Limit erreicht ist
+                self.results_buffer.append(result_entry)
+                
                 if isinstance(self.inference_steps, int) and self.step_counter >= self.inference_steps:
                     logging.info(f"--- ✅ Reached configured inference limit of {self.inference_steps} steps. Stopping loop. ---")
-                    self.is_running = False # Dies beendet die Schleife
+                    self.is_running = False
 
             elapsed = time.time() - start_time
             sleep_for = max(0, self.config.get("inference_interval_sec", 1.0) - elapsed)
@@ -115,27 +120,65 @@ class BaseInferenceProcessor(ABC):
             
         logging.info("Inference loop has stopped.")
 
+    # ERWEITERT: Speichert die volle Vorhersage-CSV und die separate Zusammenfassung
     def _save_results(self):
-        """Speichert die gesammelten Inferenz-Ergebnisse in einer CSV-Datei."""
+        """
+        Speichert die detaillierten Vorhersagen und separat eine Zusammenfassung
+        mit Metriken und Konfigurationen.
+        """
         if not self.results_buffer:
             logging.warning("No results were collected, nothing to save.")
             return
 
         logging.info(f"\nSaving {len(self.results_buffer)} collected inference results...")
-        
         self.config, paths = Pipeline_Utils.setup_experiment(self.config)
-        output_dir = paths.get("Prediction_Data", "Output/Prediction_Data")
         
+        results_df = pd.DataFrame(self.results_buffer)
+
+        # --- Schritt 1: Detaillierte Vorhersage-Datei mit allen Spalten speichern ---
         try:
-            results_df = pd.DataFrame(self.results_buffer)
-            filename = f"inference_results_{self.config['run_id']}.csv"
-            output_path = os.path.join(output_dir, filename)
+            pred_filename = f"inference_results_{self.config['run_id']}.csv"
+            pred_output_path = os.path.join(paths.get("Prediction_Data"), pred_filename)
             
-            results_df.to_csv(output_path, index=False, date_format='%Y-%m-%dT%H:%M:%S.%f')
-            logging.info(f"✅ Results successfully saved to: {output_path}")
+            # KORREKTUR: Speichere den gesamten DataFrame ohne Spaltenfilter
+            results_df.to_csv(pred_output_path, index=False, date_format='%Y-%m-%dT%H:%M:%S.%f')
+            
+            logging.info(f"✅ Detailed prediction results saved to: {pred_output_path}")
 
         except Exception as e:
-            logging.error(f"Failed to save inference results: {e}", exc_info=True)
+            logging.error(f"Failed to save detailed prediction results: {e}", exc_info=True)
+
+        # --- Schritt 2: Gesamtmetriken für die Zusammenfassung berechnen ---
+        # Die Metriken werden standardmäßig auf den ersten Schritt berechnet
+        if "true_value" in results_df.columns and "prediction_step_1" in results_df.columns:
+            y_true = results_df["true_value"].to_numpy()
+            y_pred = results_df["prediction_step_1"].to_numpy()
+            
+            valid_indices = ~np.isnan(y_true) & ~np.isnan(y_pred)
+            if np.sum(valid_indices) > 0:
+                metrics = Pipeline_Utils.evaluate_all_metrics(
+                    y_true=y_true[valid_indices],
+                    y_pred=y_pred[valid_indices]
+                )
+                logging.info(f"Overall Inference Metrics for summary: {metrics}")
+            else:
+                metrics = {}
+                logging.warning("Could not compute metrics for summary file (not enough valid data).")
+        else:
+            metrics = {}
+            logging.warning("Skipping metrics calculation: 'true_value' or 'prediction_step_1' not in results.")
+
+
+        # --- Schritt 3: Zentrale Zusammenfassungs-Datei speichern/aktualisieren ---
+        try:
+            Pipeline_Utils.save_metrics_summary(
+                metrics=metrics,
+                infer_config=self.config,
+                train_config=self.training_config,
+                paths=paths
+            )
+        except Exception as e:
+            logging.error(f"Failed to save metrics summary file: {e}", exc_info=True)
 
 
     def run(self):

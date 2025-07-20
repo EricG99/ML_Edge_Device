@@ -71,7 +71,7 @@ def prepare_inference(config: dict, algorithm: str):
     
     try:
         # Laden der Artefakte (Modell, Scaler, Features)
-        model, scaler, features = PipelineUtils.load_model_artifacts_for_inference(config)
+        model, scaler, features, _ = PipelineUtils.load_model_artifacts_for_inference(config)
         
         # --- DYNAMISCHE AUSWAHL DES INFERENCE PROCESSORS ---
         if algorithm == 'random_forest':

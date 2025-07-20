@@ -142,6 +142,49 @@ def flatten_config(config: dict, prefix: str = "") -> dict:
             flat[full_key] = str(value)  # Sicherer Fallback
     return flat
 
+def save_metrics_summary(metrics: dict, infer_config: dict, train_config: dict, paths: dict) -> str:
+    """
+    Fügt die Metriken, Konfigurationen und Pfade eines Inferenzlaufs 
+    zu einer zentralen Übersichts-CSV-Datei hinzu.
+    """
+    summary_path = None
+    try:
+        # Pfad zur zentralen Metrik-Datei
+        summary_dir = paths.get("Error_Metrics")
+        os.makedirs(summary_dir, exist_ok=True)
+        summary_path = os.path.join(summary_dir, "metrics_summary.csv")
+        
+        # Konfigurationen für die Speicherung vorbereiten
+        flat_infer_cfg = flatten_config(infer_config, "infer_")
+        flat_train_cfg = flatten_config(train_config, "train_") if train_config else {}
+
+        # Alle Daten für die neue Zeile kombinieren
+        new_row = {
+            "run_id": infer_config.get("run_id"),
+            "timestamp": infer_config.get("time_stamp"),
+            "model_name": infer_config.get("model_name"),
+            **metrics,
+            **flat_infer_cfg,
+            **flat_train_cfg
+        }
+        
+        # Bestehende Datei laden oder neuen DataFrame erstellen
+        if os.path.exists(summary_path):
+            summary_df = pd.read_csv(summary_path)
+        else:
+            summary_df = pd.DataFrame()
+            
+        # Neue Zeile hinzufügen und speichern
+        # Alte Spalten beibehalten und neue hinzufügen, falls sie nicht existieren
+        summary_df = pd.concat([summary_df, pd.DataFrame([new_row])], ignore_index=True)
+        summary_df.to_csv(summary_path, index=False)
+        
+        print(f"✅ Metriken-Zusammenfassung aktualisiert: {summary_path}")
+    except Exception as e:
+        print(f"❌ Fehler beim Speichern der Metriken-Zusammenfassung: {e}")
+        traceback.print_exc()
+    return summary_path
+
 
 def evaluate_all_metrics(y_true, y_pred, y_train=None, horizon=1, alpha=0.8):
     """
@@ -923,6 +966,8 @@ def load_model_artifacts_for_inference(config: dict) -> tuple:
     """
     mode = config.get("inference_mode", "load_artifacts_fast")
     logging.info(f"Lade Artefakte im Modus: '{mode}'...")
+    
+    training_config = None # NEU: Initialisierung
 
     # ----- Pfade basierend auf dem Modus bestimmen -----
     if mode == 'load_artifacts_path':
@@ -945,7 +990,18 @@ def load_model_artifacts_for_inference(config: dict) -> tuple:
         # Die Namen für Scaler und Features sind oft konsistent
         scaler_path = os.path.join(run_dir, "Scalers", "scaler.joblib")
         features_path = os.path.join(run_dir, "Models", "features.joblib")
+
+        training_config_path = os.path.join(run_dir, "Models", "training_config.json")
+
         logging.info(f"Lade versionierte Artefakte aus: {run_dir}")
+
+        if os.path.exists(training_config_path):
+            try:
+                with open(training_config_path, 'r') as f:
+                    training_config = json.load(f)
+                logging.info("✅ Trainings-Konfiguration geladen.")
+            except Exception as e:
+                logging.warning(f"Konnte Trainings-Konfiguration nicht laden: {e}")
 
     elif mode == 'load_artifacts_fast':
         model_path = config.get("model_path_static", "trained_rf_model.joblib")
@@ -974,7 +1030,7 @@ def load_model_artifacts_for_inference(config: dict) -> tuple:
     logging.info("✅ Alle Artefakte erfolgreich geladen.")
 
     # Rückgabe in der gewünschten Reihenfolge
-    return scaler, features, model
+    return scaler, features, model, training_config
 
 class ModelScalerSaver:
     """
@@ -992,6 +1048,19 @@ class ModelScalerSaver:
         
         # Stelle sicher, dass die Basis-Verzeichnisse existieren
         self._ensure_output_dirs_exist(["Models", "Scalers", "Model_Structures", "Loss_Plots"])
+
+    def _save_config_as_json(self, output_path: str):
+        """Speichert die Konfiguration als JSON-Datei."""
+        try:
+            # Stelle sicher, dass das Verzeichnis existiert
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
+            with open(output_path, 'w') as f:
+                json.dump(self.config, f, indent=4, default=str) # default=str für nicht-serialisierbare Typen
+            logging.info(f"✅ Trainings-Konfiguration gespeichert unter: {output_path}")
+            return output_path
+        except Exception as e:
+            logging.error(f"❌ Fehler beim Speichern der Konfigurationsdatei: {e}", exc_info=True)
+            return None
 
     def _save_structure_plot(self, model, output_path: str) -> str:
         """
@@ -1034,6 +1103,12 @@ class ModelScalerSaver:
         print(f"--- 🚀 Starte Speichern der Deployment-Artefakte für Modell: {self.config.get('model_name')} ---")
         results = {}
         results.update(self._save_scaler(scaler))
+
+        config_path = os.path.join(self.paths.get("Models"), "training_config.json")
+
+        saved_config_path = self._save_config_as_json(config_path)
+        if saved_config_path:
+            results["training_config_path"] = saved_config_path
         
         # Smart Dispatch zu den modellspezifischen Speicher-Methoden
         if isinstance(model, tf.keras.Model):
