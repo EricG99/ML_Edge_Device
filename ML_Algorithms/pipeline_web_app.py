@@ -5,6 +5,7 @@ import sys
 import threading
 import os
 from flask import Flask, jsonify, render_template, request
+import pandas as pd
 
 # --- Setup ---
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
@@ -180,21 +181,37 @@ def main():
     @app.route('/api/data')
     def get_data():
         step = request.args.get('step', type=int, default=0)
-        
+
         if not inference_processor or step >= len(inference_processor.results_buffer):
             return jsonify({"status": "waiting"}), 200
-        
-        # Data is available, send it
-        # The data format from results_buffer needs to be adapted for the frontend
-        raw_data = inference_processor.results_buffer[step]
-        
-        # Assuming horizon=1 for simplicity, adapt if multi-step is needed for frontend
-        pred_val = raw_data.get("prediction_step_1", None)
 
+        # --- Korrigierte Logik zum Erstellen der JSON-Antwort ---
+
+        # 1. Rohdaten für den aktuellen Schritt holen
+        raw_data = inference_processor.results_buffer[step]
+
+        # 2. Die komplette Liste der Vorhersageschritte rekonstruieren
+        predictions_list = []
+        i = 1
+        while f"prediction_step_{i}" in raw_data:
+            predictions_list.append(raw_data[f"prediction_step_{i}"])
+            i += 1
+
+        # 3. Die zukünftigen Zeitstempel für den Graphen berechnen
+        timestamp_obj = raw_data["datetime"]
+        interval_sec = inference_processor.config.get("inference_interval_sec", 1.0)
+        future_dates = [
+            (timestamp_obj + pd.Timedelta(seconds=i * interval_sec)).isoformat()
+            for i in range(len(predictions_list))
+        ]
+
+        # 4. Das finale JSON-Objekt im von der Web-App erwarteten Format erstellen
         output_data = {
-            "date": raw_data["datetime"].isoformat(),
+            "date": timestamp_obj.isoformat(),
             "true_value": raw_data["true_value"],
-            "predicted_value_step_1": pred_val,
+            "predicted_value_step_1": predictions_list[0] if predictions_list else None,
+            "predicted_value_step_n": predictions_list[-1] if predictions_list else None,
+            "future_forecast": {"dates": future_dates, "values": predictions_list}, # Entscheidender Teil für den Graphen
             "cpu_load": raw_data["cpu_load_percent"],
             "inference_time_ms": raw_data["inference_time_ms"]
         }
