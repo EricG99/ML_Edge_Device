@@ -87,5 +87,5 @@ if __name__ == "__main__":
     
     # Führe die gesamte Pipeline mit der korrekten Konfiguration aus
     # run_training_pipeline_3d(config=training_config)
-    trainer = LSTMTrainer(config=training_config)
+    trainer = LSTMTrainer(config=training_config, folder_flag= FOLDER_FLAG)
     trainer.run(save_artifacts=True)

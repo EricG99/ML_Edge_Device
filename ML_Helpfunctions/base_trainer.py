@@ -12,12 +12,13 @@ class BaseTrainer(ABC):
     Abstrakte Basisklasse für Trainingspipelines.
     Kapselt die Logik für Experiment-Setup, Datenvorbereitung und Artefaktspeicherung.
     """
-    def __init__(self, config: dict):
+    def __init__(self, config: dict , folder_flag:str):
         self.config = config
         self.model = None
         self.scaler = None
         self.features = None
         self.train_time = 0.0
+        self.folder_flag = folder_flag
 
     @abstractmethod
     def _setup_pipeline(self):
@@ -56,7 +57,7 @@ class BaseTrainer(ABC):
         if save_artifacts:
             if not self.folder_flag:
                 raise ValueError("Für das Speichern der Artefakte muss ein 'folder_flag' übergeben werden.")
-            self._save_artifacts(self.folder_flag)
+            self._save_artifacts()
         else:
             logging.info("\nStep 3: Returning trained artifacts without saving.")
         
