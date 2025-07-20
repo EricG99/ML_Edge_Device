@@ -337,7 +337,7 @@ def save_prediction_data(
 # Experiment Setup
 # -------------------------------------------
 
-def setup_experiment(config: dict) -> tuple[dict, dict]:
+def setup_experiment(config: dict, run_type: str = None) -> tuple[dict, dict]:
     """
     Initialisiert das Experiment: Erstellt die Ausgabeordnerstruktur.
     Nur 'Error_Metrics' bleibt persistent. Alles andere kommt in Run-Ordner.
@@ -348,7 +348,12 @@ def setup_experiment(config: dict) -> tuple[dict, dict]:
         config["time_stamp"] = datetime.now().strftime("%Y-%m-%d_%H%M%S")
 
     if "run_id" not in config or config.get("run_id") is None:
-        config["run_id"] = f"{config['time_stamp']}_{random.randint(1000, 9999)}"
+        base_run_id = f"{config['time_stamp']}_{random.randint(1000, 9999)}"
+        # Suffix hinzufügen, falls ein gültiger run_type übergeben wird
+        if run_type in ['train', 'inference']:
+            config["run_id"] = f"{base_run_id}_{run_type}"
+        else:
+            config["run_id"] = base_run_id
 
     # Basispfade
     try:
@@ -396,8 +401,6 @@ def setup_experiment(config: dict) -> tuple[dict, dict]:
     print(f"📁 Ergebnisordner: {run_output_path}")
 
     return config, config["paths"]
-
-
 
 # -------------------------------------------
 # Modellbewertung

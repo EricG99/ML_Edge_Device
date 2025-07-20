@@ -120,7 +120,6 @@ class BaseInferenceProcessor(ABC):
             
         logging.info("Inference loop has stopped.")
 
-    # ERWEITERT: Speichert die volle Vorhersage-CSV und die separate Zusammenfassung
     def _save_results(self):
         """
         Speichert die detaillierten Vorhersagen und separat eine Zusammenfassung
@@ -131,7 +130,7 @@ class BaseInferenceProcessor(ABC):
             return
 
         logging.info(f"\nSaving {len(self.results_buffer)} collected inference results...")
-        self.config, paths = Pipeline_Utils.setup_experiment(self.config)
+        self.config, paths = Pipeline_Utils.setup_experiment(self.config, run_type='inference')
         
         results_df = pd.DataFrame(self.results_buffer)
 

@@ -66,8 +66,8 @@ class BaseTrainer(ABC):
         logging.info("\nStep 3: Saving artifacts for inference...")
         mode = self.config.get("inference_mode", "load_artifacts_fast")
         
-        # Erstellt Ordnerstruktur für 'path' mode
-        self.config, paths = Pipeline_Utils.setup_experiment(self.config)
+        # Erstellt Ordnerstruktur für 'path' mode und fügt Suffix hinzu
+        self.config, paths = Pipeline_Utils.setup_experiment(self.config, run_type='train')
         
         if mode == 'load_artifacts_fast':
             logging.info("Saving in 'fast' mode with static paths...")
