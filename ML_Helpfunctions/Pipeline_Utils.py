@@ -337,11 +337,12 @@ def save_prediction_data(
 # Experiment Setup
 # -------------------------------------------
 
-def setup_experiment(config: dict, run_type: str = None) -> tuple[dict, dict]:
+def setup_experiment(config: dict, folder_flag: str, run_type: str = None) -> tuple[dict, dict]:
     """
-    Initialisiert das Experiment: Erstellt die Ausgabeordnerstruktur.
-    Nur 'Error_Metrics' bleibt persistent. Alles andere kommt in Run-Ordner.
+    Initialisiert das Experiment: Erstellt die Ausgabeordnerstruktur basierend auf einem Modell-Flag.
     """
+    if not folder_flag or not isinstance(folder_flag, str):
+        raise ValueError("Ein gültiger 'folder_flag' als String muss für das Setup übergeben werden.")
 
     # Zeitstempel & Run-ID erzeugen, falls nicht vorhanden
     if "time_stamp" not in config or config["time_stamp"] is None:
@@ -349,7 +350,6 @@ def setup_experiment(config: dict, run_type: str = None) -> tuple[dict, dict]:
 
     if "run_id" not in config or config.get("run_id") is None:
         base_run_id = f"{config['time_stamp']}_{random.randint(1000, 9999)}"
-        # Suffix hinzufügen, falls ein gültiger run_type übergeben wird
         if run_type in ['train', 'inference']:
             config["run_id"] = f"{base_run_id}_{run_type}"
         else:
@@ -358,26 +358,33 @@ def setup_experiment(config: dict, run_type: str = None) -> tuple[dict, dict]:
     # Basispfade
     try:
         paths = config["paths"].copy()
+        # Der Haupt-Ausgabepfad (z.B. .../Output)
         base_output_path = Path(paths["output"])
         input_path = Path(paths["input"])
     except KeyError:
         raise ValueError("Fehlender 'input' oder 'output' Pfad in config['paths'].")
+        
+    # --- NEUE LOGIK: Erstelle den modellspezifischen Ordner ---
+    # z.B. .../Output/LSTM oder .../Output/RANDOM_FOREST
+    model_base_path = base_output_path / folder_flag
 
-    # 📂 Input-Unterordner sicherstellen
+    # Der Ordner für diesen spezifischen Lauf kommt in den Modell-Ordner
+    # z.B. .../Output/LSTM/2025-07-20_160000_1234_train
+    run_output_path = model_base_path / config["run_id"]
+
+    # Input-Pfade bleiben unverändert
     input_subfolders = {
         "Input_Data": input_path / "Input_Data",
         "Input_Models": input_path / "Input_Models",
         "Input_Scaler": input_path / "Input_Scaler"
     }
-
-    # 📂 Persistenter Ordner für Error Metrics
+    
+    # Error_Metrics bleiben im Haupt-Output-Ordner, nicht pro Modell
     persistent_subfolders = {
         "Error_Metrics": base_output_path / "Error_Metrics"
     }
 
-    # 📂 Neuen Run-Ordner mit run_id erstellen
-    run_output_path = base_output_path / config["run_id"]
-
+    # Die Unterordner für den Lauf werden relativ zum neuen run_output_path erstellt
     run_subfolders = {
         "Base_Output_Path": run_output_path,
         "Models": run_output_path / "Models",
@@ -389,15 +396,16 @@ def setup_experiment(config: dict, run_type: str = None) -> tuple[dict, dict]:
         "Loss_Plots": run_output_path / "Loss_Plots"
     }
 
-    # Alle Pfade zusammenführen
+    # Alle Pfade zusammenführen und Konfiguration aktualisieren
     all_paths = {**paths, **input_subfolders, **persistent_subfolders, **run_subfolders}
-    config["paths"] = all_paths  # config updaten
+    config["paths"] = all_paths
 
-    # 🔨 Ordner anlegen
+    # Alle benötigten Ordner anlegen
     for path in all_paths.values():
-        Path(path).mkdir(parents=True, exist_ok=True)
+        if isinstance(path, Path):
+            path.mkdir(parents=True, exist_ok=True)
 
-    print(f"✅ Experiment-Setup abgeschlossen. Run ID: {config['run_id']}")
+    print(f"✅ Experiment-Setup für '{folder_flag}' abgeschlossen. Run ID: {config['run_id']}")
     print(f"📁 Ergebnisordner: {run_output_path}")
 
     return config, config["paths"]
@@ -455,20 +463,28 @@ def _evaluate_model(
 def run_timed_inference(model: object, input_data: np.ndarray) -> tuple[np.ndarray, float]:
     """
     Führt eine einzelne Inferenz durch und misst die exakte Dauer.
-
-    Args:
-        model (object): Das trainierte Modell (Keras, scikit-learn, etc.).
-        input_data (np.ndarray): Die Eingabedaten für das Modell.
-
-    Returns:
-        tuple:
-            - np.ndarray: Das Ergebnis der Vorhersage.
-            - float: Die Dauer der Inferenz in Millisekunden.
+    Unterstützt Keras-Modelle, scikit-learn-Modelle und TFLite-Interpreter.
     """
     start_time = time.perf_counter()
-    prediction = model.predict(input_data)
+
+    # Prüfe, ob das übergebene Modell ein TFLite-Interpreter ist
+    if isinstance(model, tf.lite.Interpreter):
+        # TFLite-Inferenz
+        input_details = model.get_input_details()
+        output_details = model.get_output_details()
+        
+        # Stelle sicher, dass die Eingabedaten den vom Modell erwarteten Datentyp haben
+        input_data_tflite = np.asarray(input_data, dtype=input_details[0]['dtype'])
+        
+        # Setze den Input-Tensor, führe die Inferenz aus und hole den Output-Tensor
+        model.set_tensor(input_details[0]['index'], input_data_tflite)
+        model.invoke()
+        prediction = model.get_tensor(output_details[0]['index'])
+    else:
+        # Standard-Inferenz für Keras/scikit-learn-Modelle
+        prediction = model.predict(input_data)
+
     end_time = time.perf_counter()
-    
     duration_ms = (end_time - start_time) * 1000
     
     return prediction, duration_ms
@@ -931,7 +947,7 @@ def create_representative_dataset_generator(dataset: tf.data.Dataset):
     return generator
 
 
-def load_model_artifacts_for_inference(config: dict) -> tuple:
+def load_model_artifacts_for_inference(config: dict, folder_flag ) -> tuple:
     """
     Lädt robust die notwendigen Artefakte (Scaler, Features, Modell) für die Inferenz.
     Die Funktion unterstützt zwei verschiedene Modi, die über die Konfiguration
@@ -985,7 +1001,7 @@ def load_model_artifacts_for_inference(config: dict) -> tuple:
         except KeyError as e:
             raise ValueError(f"Für Modus 'load_artifacts_path' fehlt der Schlüssel '{e}' in der Konfiguration.")
 
-        run_dir  = os.path.join(base_path, load_id)
+        run_dir  = os.path.join(base_path, folder_flag, load_id)
 
         # Verwende den dynamischen Dateinamen für das Modell
         model_path = os.path.join(run_dir, "Models", model_filename)
@@ -1023,6 +1039,14 @@ def load_model_artifacts_for_inference(config: dict) -> tuple:
         model = tf.keras.models.load_model(model_path)
     elif model_path.endswith(".joblib"):
         model = joblib.load(model_path)
+    elif model_path.endswith(".tflite"):
+        logging.info("Lade TFLite-Modell mit TensorFlow Lite Interpreter.")
+        # Lade das Modell mit dem TFLite Interpreter
+        interpreter = tf.lite.Interpreter(model_path=model_path)
+        # Reserviere Speicher für die Tensoren des Modells
+        interpreter.allocate_tensors()
+        # Gib den Interpreter als "Modell"-Objekt zurück
+        model = interpreter
     else:
         raise ValueError(f"Unbekannte Modelldatei-Endung. Unterstützt werden .keras, .h5, .joblib. Pfad: {model_path}")
 
@@ -1186,40 +1210,45 @@ class ModelScalerSaver:
         try:
             print("--- 🔬 Starte TFLite-Konvertierung mit FLOAT16-Quantisierung ---")
             
-            # Der Workaround für LSTMs bleibt für die Stabilität erhalten
-            model_to_convert = model
+            # Handle LSTM/GRU models differently
             if any(isinstance(layer, (tf.keras.layers.LSTM, tf.keras.layers.GRU)) for layer in model.layers):
-                print("INFO: LSTM/GRU-Modell erkannt. Wende Rebuild-Workaround an.")
-                model_config = model.get_config()
-                model_to_convert = tf.keras.Sequential.from_config(model_config)
-                model_to_convert.set_weights(model.get_weights())
-
-            # Konverter initialisieren
-            converter = tf.lite.TFLiteConverter.from_keras_model(model_to_convert)
-            
-            # --- START DER ANPASSUNG FÜR FLOAT16 ---
-            # Wir legen fest, dass die Standard-Optimierung...
-            converter.optimizations = [tf.lite.Optimize.DEFAULT]
-            # ...alle möglichen Gleitkommazahlen in das FP16-Format umwandeln soll.
-            converter.target_spec.supported_types = [tf.float16]
-            # Das representative_dataset wird nicht mehr benötigt.
-            # --- ENDE DER ANPASSUNG ---
-
-            # Der Fix für LSTMs bleibt relevant, falls Flex-Ops benötigt werden
-            if any(isinstance(layer, (tf.keras.layers.LSTM, tf.keras.layers.GRU)) for layer in model_to_convert.layers):
+                print("INFO: LSTM/GRU-Modell erkannt. Wende speziellen Konvertierungsprozess an.")
+                
+                # Get the input shape from the original model
+                input_shape = model.input_shape
+                if not input_shape:
+                    raise ValueError("Model has no defined input shape")
+                
+                # Create concrete function with input signature
+                input_spec = tf.TensorSpec(shape=(None,) + input_shape[1:], dtype=tf.float32)
+                
+                # Create the converter with concrete function
+                @tf.function(input_signature=[input_spec])
+                def model_func(inputs):
+                    return model(inputs)
+                
+                concrete_func = model_func.get_concrete_function()
+                converter = tf.lite.TFLiteConverter.from_concrete_functions([concrete_func])
+                
+                # Set optimization options
+                converter.optimizations = [tf.lite.Optimize.DEFAULT]
+                converter.target_spec.supported_types = [tf.float16]
                 converter.target_spec.supported_ops = [
                     tf.lite.OpsSet.TFLITE_BUILTINS,
                     tf.lite.OpsSet.SELECT_TF_OPS
                 ]
                 converter._experimental_lower_tensor_list_ops = False
+            else:
+                # Standard conversion for non-RNN models
+                converter = tf.lite.TFLiteConverter.from_keras_model(model)
+                converter.optimizations = [tf.lite.Optimize.DEFAULT]
+                converter.target_spec.supported_types = [tf.float16]
 
-            # Konvertierung durchführen
+            # Perform conversion
             tflite_model_quant = converter.convert()
             
-            # Dateinamen erstellen und speichern
-            #base_filename = f"{self.config['model_name']}_{self.config['dataset'].split('.')[0]}_{self.config['run_id']}"
+            # Save the model
             tflite_path = os.path.join(self.paths.get("Models"), "model_quant_float16.tflite")
-            
             with open(tflite_path, 'wb') as f:
                 f.write(tflite_model_quant)
             print(f"✅ TFLite-Modell (FLOAT16) gespeichert unter: {tflite_path}")

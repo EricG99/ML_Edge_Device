@@ -54,7 +54,9 @@ class BaseTrainer(ABC):
 
         # --- SCHRITT 3: ARTEFAKTE SPEICHERN ---
         if save_artifacts:
-            self._save_artifacts()
+            if not self.folder_flag:
+                raise ValueError("Für das Speichern der Artefakte muss ein 'folder_flag' übergeben werden.")
+            self._save_artifacts(self.folder_flag)
         else:
             logging.info("\nStep 3: Returning trained artifacts without saving.")
         
@@ -65,10 +67,10 @@ class BaseTrainer(ABC):
         """Speichert die trainierten Artefakte (Modell, Scaler, Features)."""
         logging.info("\nStep 3: Saving artifacts for inference...")
         mode = self.config.get("inference_mode", "load_artifacts_fast")
-        
-        # Erstellt Ordnerstruktur für 'path' mode und fügt Suffix hinzu
-        self.config, paths = Pipeline_Utils.setup_experiment(self.config, run_type='train')
-        
+        folder_flag = self.folder_flag
+        # Erstellt Ordnerstruktur für 'path' mode
+        self.config, paths = Pipeline_Utils.setup_experiment(self.config, folder_flag=folder_flag, run_type='train')
+
         if mode == 'load_artifacts_fast':
             logging.info("Saving in 'fast' mode with static paths...")
             # Statische Pfade werden direkt aus der Config gelesen

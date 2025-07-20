@@ -6,7 +6,7 @@ from datetime import datetime
 BASE_DIR = Path(__file__).resolve().parent.parent
 INPUT_DIR = BASE_DIR / "Input"
 OUTPUT_DIR = BASE_DIR / "Output"
-ARTIFACTS_OUTPUT_PATH = OUTPUT_DIR / "saved_models"
+ARTIFACTS_OUTPUT_PATH = OUTPUT_DIR 
 
 # Diese Struktur bleibt für den Zugriff auf Unterordner nützlich
 CONFIG_PATH = {
@@ -31,7 +31,7 @@ MQTT_CONFIG = {
 # Die Logik, welcher Run geladen wird, sollte zur Laufzeit entschieden werden,
 # aber die statischen Namen für den "Fast-Mode" können hier bleiben.
 CONFIG_LOAD_ARTIFACTS = {
-    "inference_mode": "load_artifacts_fast", # "load_artifacts_fast" oder "load_artifacts_path"
+    "inference_mode": "load_artifacts_path", # "load_artifacts_fast" oder "load_artifacts_path"
     "inference_steps" : 100,
     "inference_interval_sec": 0.5,
     "artifacts_base_path": ARTIFACTS_OUTPUT_PATH,

@@ -11,17 +11,20 @@ from abc import ABC, abstractmethod
 from ML_Helpfunctions import Pipeline_Utils
 from ML_Helpfunctions.MQTT_Client import MqttInferenceClient
 
+
+
 class BaseInferenceProcessor(ABC):
     """
     Abstrakte Basisklasse für Inferenz-Pipelines.
     Kapselt die Logik zum Laden von Artefakten, MQTT-Kommunikation,
     Inferenzschleife und das Speichern der Ergebnisse.
     """
-    def __init__(self, config: dict, broker_ip: str, port: int, topic: str):
+    def __init__(self, config: dict, broker_ip: str, port: int, topic: str, folder_flag:str):
         self.config = config
         self.broker_ip = broker_ip
         self.port = port
         self.topic = topic
+        self.folder_flag = folder_flag
         
         self.training_config = None
         
@@ -51,7 +54,7 @@ class BaseInferenceProcessor(ABC):
             logging.info("Loading inference artifacts...")
             # ERWEITERT: Unpackt jetzt vier Werte
             self.scaler, self.feature_list, self.model, self.training_config = \
-                Pipeline_Utils.load_model_artifacts_for_inference(self.config)
+                Pipeline_Utils.load_model_artifacts_for_inference(self.config, self.folder_flag )
             logging.info("✅ Artifacts loaded successfully.")
         except (FileNotFoundError, ValueError) as e:
             logging.error(f"Fatal error loading artifacts: {e}")
@@ -120,7 +123,7 @@ class BaseInferenceProcessor(ABC):
             
         logging.info("Inference loop has stopped.")
 
-    def _save_results(self):
+    def _save_results(self, folder_flag: str):
         """
         Speichert die detaillierten Vorhersagen und separat eine Zusammenfassung
         mit Metriken und Konfigurationen.
@@ -130,7 +133,7 @@ class BaseInferenceProcessor(ABC):
             return
 
         logging.info(f"\nSaving {len(self.results_buffer)} collected inference results...")
-        self.config, paths = Pipeline_Utils.setup_experiment(self.config, run_type='inference')
+        self.config, paths = Pipeline_Utils.setup_experiment(self.config, folder_flag=folder_flag, run_type='inference')
         
         results_df = pd.DataFrame(self.results_buffer)
 
@@ -180,7 +183,7 @@ class BaseInferenceProcessor(ABC):
             logging.error(f"Failed to save metrics summary file: {e}", exc_info=True)
 
 
-    def run(self):
+    def run(self, folder_flag: str = None):
         """Startet den gesamten Inferenzprozess."""
         self.load_artifacts()
         
@@ -212,5 +215,9 @@ class BaseInferenceProcessor(ABC):
             mqtt_client.client.loop_stop()
             mqtt_client.client.disconnect()
             
-            self._save_results()
+            if not folder_flag:
+                logging.warning("Kein 'folder_flag' übergeben, Ergebnisse können nicht gespeichert werden.")
+            else:
+                self._save_results(folder_flag=folder_flag)
+
             logging.info("✅ Shutdown complete.")

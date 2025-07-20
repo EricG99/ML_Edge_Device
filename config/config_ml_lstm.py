@@ -69,9 +69,10 @@ param_lstm_edge = {
 param_lstm_test = {
     "model_name": "lstm",
     "dataset": "train_data_sample.csv",
-    "model_filename": "model.keras", # Wichtig für das Speichern
-    "load_id": "2025-07-20_105731_9431", # Beispiel-ID
+    "model_filename": "model_quant_float16.tflite", # model_quant_float16.tflite Wichtig für das Speichern
+    "load_id": "2025-07-20_171927_1631_train", # Beispiel-ID
 
+    "edge_device": True, #quamtisierung des Modells
 
     # Modellarchitektur
     "num_layers": 2,

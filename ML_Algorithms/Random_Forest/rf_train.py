@@ -22,6 +22,8 @@ from config.config_ml_rf import param_rf_test
 from config.config_general import CONFIG_PATH
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+FOLDER_FLAG = "RandomForest"
+
 
 class RandomForestTrainer(BaseTrainer):
     """Spezialisierte Trainingsklasse für Random Forest Modelle."""

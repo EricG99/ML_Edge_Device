@@ -26,14 +26,17 @@ from ML_Helpfunctions.base_inference import BaseInferenceProcessor
 from config.config_ml_rf import param_rf_test
 from config.config_general import CONFIG_PATH, MQTT_CONFIG, CONFIG_LOAD_ARTIFACTS
 
+FOLDER_FLAG = "RandomForest"
+
+
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 class RFInference(BaseInferenceProcessor):
     """Spezialisierte Inferenzklasse für Random Forest."""
 
-    def __init__(self, config: dict, broker_ip: str, port: int, topic: str):
-        super().__init__(config, broker_ip, port, topic)
+    def __init__(self, config: dict, broker_ip: str, port: int, topic: str, folder_flag:str):
+        super().__init__(config, broker_ip, port, topic, folder_flag)
         self.target_feature = config['base_features'][0]
 
     def _prepare_input_data(self):
