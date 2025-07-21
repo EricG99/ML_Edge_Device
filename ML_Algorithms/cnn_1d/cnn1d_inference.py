@@ -18,6 +18,7 @@ from ML_Helpfunctions.base_inference import BaseInferenceProcessor
 
 # --- Configuration Imports ---
 from config.config_general import CONFIG_PATH, MQTT_CONFIG, CONFIG_LOAD_ARTIFACTS
+from config.config_ml_cnn1d import param_cnn1d_test
 
 # Eindeutiger Ordner-Name, um die Artefakte zu finden
 FOLDER_FLAG = "CNN1D"
@@ -80,12 +81,6 @@ if __name__ == "__main__":
     
     logging.info("--- MODE: Standalone 1D-CNN Inference (Console Output) ---")
     
-    # Temporäre Config für die Inferenz
-    param_cnn1d_test = {
-        'model_name': 'cnn1d_test',
-        'lags': 10,
-        'base_features': ['Group4-2_S6_MassFlowRate'],
-    }
 
     # --- Basiskonfiguration laden ---
     infer_config = {**CONFIG_PATH, **CONFIG_LOAD_ARTIFACTS, **param_cnn1d_test}
