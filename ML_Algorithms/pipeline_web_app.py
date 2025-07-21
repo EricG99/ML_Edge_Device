@@ -101,9 +101,12 @@ def prepare_inference(config: dict, algorithm: str):
             if algorithm == 'random_forest':
                 from ML_Algorithms.Random_Forest.rf_inference import RFInference
                 processor_class = RFInference
+                FOLDER_FLAG = "random_forest"
             elif algorithm == 'lstm':
                 from ML_Algorithms.LSTM.lstm_inference import LSTMInference
                 processor_class = LSTMInference
+                FOLDER_FLAG = "lstm"
+
             else:
                 raise ValueError(f"Unknown algorithm: {algorithm}")
             
@@ -113,7 +116,8 @@ def prepare_inference(config: dict, algorithm: str):
                 config=config,
                 broker_ip=config['MQTT_BROKER_IP'],
                 port=config['MQTT_PORT'],
-                topic=config['MQTT_TOPIC']
+                topic=config['MQTT_TOPIC'],
+                folder_flag=FOLDER_FLAG
             )
             
             # Load artifacts (model, scaler, features)
