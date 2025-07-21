@@ -17,7 +17,7 @@ from ML_Helpfunctions import Feature_Engeneering as fe
 from ML_Helpfunctions import Load_Prepare_Data as LoadPrepareData
 from ML_Helpfunctions import Pipeline_Utils as PipelineUtils 
 from ML_Helpfunctions import RF_Utils as RFUtils
-from config import CONFIG_PATH, param_linreg_test
+from ML_Algorithms import CONFIG_PATH, param_linreg_test
 
 # Kombinierte Konfiguration
 CONFIG_LINREG_ALL = {**CONFIG_PATH, **param_linreg_test}

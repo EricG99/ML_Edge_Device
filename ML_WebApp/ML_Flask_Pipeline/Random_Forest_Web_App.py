@@ -28,7 +28,7 @@ from ML_Helpfunctions import RF_Utils as RFUtils
 from ML_Helpfunctions.Load_Prepare_Data import DataPipeline2D
 
 # Annahme: config.py liegt direkt im Projekt-Root
-from config import CONFIG_PATH, param_rf
+from ML_Algorithms import CONFIG_PATH, param_rf
 
 # Kombinierte Konfiguration
 CONFIG_RF_ALL = {**CONFIG_PATH, **param_rf}

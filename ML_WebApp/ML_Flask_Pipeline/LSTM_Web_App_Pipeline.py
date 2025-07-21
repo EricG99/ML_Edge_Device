@@ -18,7 +18,7 @@ from ML_Helpfunctions import Pipeline_Utils as PipelineUtils
 from ML_Helpfunctions import Load_Prepare_Data as LoadPrepareData
 from ML_Algorithms import RF_Run_Pipeline as RFRunPipeline
 from ML_Helpfunctions import RF_Utils as RFUtils
-from config import CONFIG_PATH, param_LSTM
+from ML_Algorithms import CONFIG_PATH, param_LSTM
 
 # Kombinierte Konfiguration
 CONFIG_LSTM_ALL = {**CONFIG_PATH, **param_LSTM}
