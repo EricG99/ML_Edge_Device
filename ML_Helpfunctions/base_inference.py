@@ -183,7 +183,7 @@ class BaseInferenceProcessor(ABC):
             logging.error(f"Failed to save metrics summary file: {e}", exc_info=True)
 
 
-    def run(self, folder_flag: str = None):
+    def run(self):
         """Startet den gesamten Inferenzprozess."""
         self.load_artifacts()
         
@@ -215,9 +215,9 @@ class BaseInferenceProcessor(ABC):
             mqtt_client.client.loop_stop()
             mqtt_client.client.disconnect()
             
-            if not folder_flag:
+            if not self.folder_flag:
                 logging.warning("Kein 'folder_flag' übergeben, Ergebnisse können nicht gespeichert werden.")
             else:
-                self._save_results(folder_flag=folder_flag)
+                self._save_results()
 
             logging.info("✅ Shutdown complete.")

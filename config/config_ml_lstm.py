@@ -68,7 +68,7 @@ param_lstm_edge = {
 
 param_lstm_test = {
     "model_name": "lstm",
-    "dataset": "train_data_sample.csv",
+    "dataset": "mqtt_data.csv",
     "model_filename": "model_quant_float16.tflite", # model_quant_float16.tflite Wichtig für das Speichern
     "load_id": "2025-07-20_230601_4018_train", # Beispiel-ID
 

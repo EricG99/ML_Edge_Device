@@ -67,7 +67,7 @@ class BaseTrainer(ABC):
     def _save_artifacts(self):
         """Speichert die trainierten Artefakte (Modell, Scaler, Features)."""
         logging.info("\nStep 3: Saving artifacts for inference...")
-        mode = self.config.get("inference_mode", "load_artifacts_fast")
+        mode = self.config.get("inference_mode", "load_artifacts_path")
         folder_flag = self.folder_flag
         # Erstellt Ordnerstruktur für 'path' mode
         self.config, paths = Pipeline_Utils.setup_experiment(self.config, folder_flag=folder_flag, run_type='train')

@@ -114,7 +114,7 @@ def record_mqtt_to_csv(output_path: str, duration_seconds: int):
 # --- Beispiel für die Ausführung ---
 if __name__ == "__main__":
     # Definieren Sie hier den Speicherort und die Aufnahmedauer
-    AUFNAHMEDAUER_IN_SEKUNDEN = 10
+    AUFNAHMEDAUER_IN_SEKUNDEN = 600
     SPEICHERORT_CSV = "aufzeichnungen/mqtt_data.csv"
     
     # Rufe die Hauptfunktion auf
