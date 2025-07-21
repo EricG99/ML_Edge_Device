@@ -1082,7 +1082,8 @@ class ModelScalerSaver:
             # Stelle sicher, dass das Verzeichnis existiert
             os.makedirs(os.path.dirname(output_path), exist_ok=True)
             with open(output_path, 'w') as f:
-                json.dump(self.config, f, indent=4, default=str) # default=str für nicht-serialisierbare Typen
+                # default=str wird verwendet, um nicht-serialisierbare Typen (wie Pfad-Objekte) zu konvertieren
+                json.dump(self.config, f, indent=4, default=str) 
             logging.info(f"✅ Trainings-Konfiguration gespeichert unter: {output_path}")
             return output_path
         except Exception as e:
@@ -1125,29 +1126,51 @@ class ModelScalerSaver:
 
     def save_artifacts(self, model, scaler, **kwargs) -> dict:
         """
-        Hauptmethode zum Speichern. Erkennt den Modelltyp und delegiert.
+        Hauptmethode zum Speichern. Speichert zuerst das Modell, ermittelt dessen Größe,
+        fügt sie zur Konfiguration hinzu und speichert dann die Konfigurations-JSON.
         """
         print(f"--- 🚀 Starte Speichern der Deployment-Artefakte für Modell: {self.config.get('model_name')} ---")
         results = {}
+        
+        # Schritt 1: Scaler speichern
         results.update(self._save_scaler(scaler))
 
-        config_path = os.path.join(self.paths.get("Models"), "training_config.json")
+        # Schritt 2: Modell-spezifische Artefakte speichern
+        model_artifacts = {}
+        if isinstance(model, tf.keras.Model):
+            model_artifacts = self._save_keras_artifacts(model, **kwargs)
+        elif isinstance(model, xgb.XGBRegressor):
+            model_artifacts = self._save_xgboost_model(model)
+        elif isinstance(model, (RandomForestRegressor, MultiOutputRegressor)):
+            model_artifacts = self._save_sklearn_model(model)
+        else:
+            print(f"⚠️ Warnung: Kein spezifischer Speicherpfad für Modelltyp {type(model).__name__} implementiert.")
+        
+        results.update(model_artifacts)
 
+        # Schritt 3: Modellgröße ermitteln und zur Konfiguration hinzufügen
+        # (Dies geschieht NACHDEM das Modell gespeichert wurde)
+        model_path = results.get("model_path")
+        if model_path and os.path.exists(model_path):
+            try:
+                model_size_bytes = os.path.getsize(model_path)
+                model_size_mb = round(model_size_bytes / (1024 * 1024), 4)
+                self.config['model_size_MB'] = model_size_mb
+                logging.info(f"✅ Modellgröße ermittelt: {model_size_mb} MB")
+            except Exception as e:
+                logging.error(f"❌ Fehler beim Ermitteln der Modellgröße: {e}")
+        else:
+            logging.warning("⚠️ Modellpfad nach dem Speichern nicht gefunden. Größe wird nicht in die Konfiguration geschrieben.")
+
+        # Schritt 4: Konfiguration als JSON speichern (jetzt mit der Modellgröße)
+        config_path = os.path.join(self.paths.get("Models"), "training_config.json")
         saved_config_path = self._save_config_as_json(config_path)
         if saved_config_path:
             results["training_config_path"] = saved_config_path
         
-        # Smart Dispatch zu den modellspezifischen Speicher-Methoden
-        if isinstance(model, tf.keras.Model):
-            results.update(self._save_keras_artifacts(model, **kwargs))
-        elif isinstance(model, xgb.XGBRegressor):
-            results.update(self._save_xgboost_model(model))
-        elif isinstance(model, (RandomForestRegressor, MultiOutputRegressor)):
-            results.update(self._save_sklearn_model(model))
-        else:
-            print(f"⚠️ Warnung: Kein spezifischer Speicherpfad für Modelltyp {type(model).__name__} implementiert.")
-            
+        # Schritt 5: Weitere Artefakte speichern
         results.update(self._save_edge_artifacts())
+        
         return results
 
     def _ensure_output_dirs_exist(self, dir_keys: list):

@@ -149,7 +149,8 @@ if __name__ == "__main__":
         "features_path": "trained_rf_features.joblib",
         "model_path": "trained_rf_model.joblib",
         # Wichtiger Schlüssel für die DataPipeline2D
-        "loading_strategy": "live_mqtt" #"split", "separate_csv", "live_mqtt"
+        "loading_strategy": "live_mqtt", #"split", "separate_csv", "live_mqtt"
+        "inference_mode": "load_artifacts_path"
     })
     
     # Führe das Training aus und speichere die Artefakte standardmäßig

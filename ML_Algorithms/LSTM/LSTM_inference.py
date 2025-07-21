@@ -6,6 +6,7 @@ import threading
 import logging
 import sys
 import os
+import argparse 
 
 # --- Suppress scikit-learn feature name warnings ---
 import warnings
@@ -77,29 +78,39 @@ class LSTMInference(BaseInferenceProcessor):
 
 
 if __name__ == "__main__":
+    # --- Argument Parser Setup ---
+    parser = argparse.ArgumentParser(description="Standalone LSTM Inference")
+    parser.add_argument("--load_id", type=str, help="Optional: The specific run ID to load artifacts from (e.g., 2025-07-21_103000_1234).")
+    parser.add_argument("--model_filename", type=str, help="Optional: The specific model filename within the run folder (e.g., model.keras).")
+    args = parser.parse_args()
+
     logging.info("--- MODE: Standalone LSTM Inference (Console Output) ---")
     
     # --- Basiskonfiguration für den Test ---
-    # Nutzt die Logik aus dem Haupt-Inferenzskript
     infer_config = param_lstm_test.copy()
     infer_config.update(CONFIG_LOAD_ARTIFACTS)
     infer_config['paths'] = CONFIG_PATH['paths']
     
+    # --- Overwrite config with command-line arguments if provided ---
+    if args.load_id:
+        infer_config['load_id'] = args.load_id
+        infer_config['inference_mode'] = 'load_artifacts_path' # Force path mode
+        logging.info(f"Using command-line argument --load_id: {args.load_id}")
+    
+    if args.model_filename:
+        infer_config['model_filename'] = args.model_filename
+        logging.info(f"Using command-line argument --model_filename: {args.model_filename}")
+
     # Beispiel-Pfade für den 'fast' mode (müssen durch die Trainingsartefakte ersetzt werden)
     infer_config['model_path_static'] = "trained_lstm_model.keras" 
     infer_config['scaler_path_static'] = "trained_lstm_scaler.joblib"
     infer_config['features_path_static'] = "trained_lstm_features.joblib"
-
-
-    infer_config["inference_mode"] = "load_artifacts_path" # "load_artifacts_fast" oder "load_artifacts_path"
-    # infer_config["load_id"] = "2025-07-20_002945_8844" 
 
     # MQTT-Konfiguration
     mqtt_broker_ip = MQTT_CONFIG['MQTT_BROKER_IP']
     mqtt_port = MQTT_CONFIG['MQTT_PORT']
     mqtt_topic = MQTT_CONFIG['MQTT_TOPIC']
     
-    # run_standalone_inference(infer_config, mqtt_broker_ip, mqtt_port, mqtt_topic)
     # --- Inferenz starten ---
     processor = LSTMInference(infer_config, mqtt_broker_ip, mqtt_port, mqtt_topic, FOLDER_FLAG)
     processor.run()
