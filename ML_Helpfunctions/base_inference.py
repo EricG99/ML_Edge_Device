@@ -123,7 +123,7 @@ class BaseInferenceProcessor(ABC):
             
         logging.info("Inference loop has stopped.")
 
-    def _save_results(self, folder_flag: str):
+    def _save_results(self):
         """
         Speichert die detaillierten Vorhersagen und separat eine Zusammenfassung
         mit Metriken und Konfigurationen.
@@ -133,7 +133,7 @@ class BaseInferenceProcessor(ABC):
             return
 
         logging.info(f"\nSaving {len(self.results_buffer)} collected inference results...")
-        self.config, paths = Pipeline_Utils.setup_experiment(self.config, folder_flag=folder_flag, run_type='inference')
+        self.config, paths = Pipeline_Utils.setup_experiment(self.config, self.folder_flag, run_type='inference')
         
         results_df = pd.DataFrame(self.results_buffer)
 

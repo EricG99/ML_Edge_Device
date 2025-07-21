@@ -70,7 +70,7 @@ param_lstm_test = {
     "model_name": "lstm",
     "dataset": "train_data_sample.csv",
     "model_filename": "model_quant_float16.tflite", # model_quant_float16.tflite Wichtig für das Speichern
-    "load_id": "2025-07-20_171927_1631_train", # Beispiel-ID
+    "load_id": "2025-07-20_230601_4018_train", # Beispiel-ID
 
     "edge_device": True, #quamtisierung des Modells
 
