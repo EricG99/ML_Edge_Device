@@ -153,7 +153,7 @@ if __name__ == "__main__":
     })
     
     # Führe das Training aus und speichere die Artefakte standardmäßig
-    trainer = RandomForestTrainer(config=training_config)
+    trainer = RandomForestTrainer(config=training_config, folder_flag= FOLDER_FLAG)
     trainer.run(save_artifacts=True)  
     # run_training(config=training_config, save_artifacts=True)
     logging.info("\n✅ Training complete. Artifacts have been saved.")
