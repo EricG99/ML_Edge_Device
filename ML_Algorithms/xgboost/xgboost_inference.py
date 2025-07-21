@@ -3,7 +3,7 @@ import logging
 import sys
 import os
 import pandas as pd
-
+import argparse
 # --- Suppress scikit-learn feature name warnings ---
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning, message="X does not have valid feature names")
@@ -75,23 +75,27 @@ class XGBoostInference(BaseInferenceProcessor):
         return X_live_scaled, timestamp, true_value
 
 if __name__ == "__main__":
+    # NEU: Argument Parser Setup
+    parser = argparse.ArgumentParser(description="Standalone XGBoost Inference")
+    parser.add_argument("--load_id", type=str, help="Optional: The specific run ID to load artifacts from.")
+    parser.add_argument("--model_filename", type=str, help="Optional: The specific model filename (e.g., model.json).")
+    args = parser.parse_args()
+
     logging.info("--- MODE: Standalone XGBoost Inference (Console Output) ---")
     
-
-
-    # --- Basiskonfiguration für die Inferenz ---
+    # --- Basiskonfiguration laden ---
     infer_config = {**CONFIG_PATH, **CONFIG_LOAD_ARTIFACTS, **param_xgb_test}
 
-    # Statische Pfade für 'fast' mode
-    infer_config['model_path_static'] = "trained_xgb_model.joblib" 
-    infer_config['scaler_path_static'] = "trained_xgb_scaler.joblib"
-    infer_config['features_path_static'] = "trained_xgb_features.joblib"
+    # --- Konfiguration mit Kommandozeilenargumenten überschreiben ---
+    if args.load_id:
+        infer_config['load_id'] = args.load_id
+        infer_config['inference_mode'] = 'load_artifacts_path' # Erzwinge den Pfad-Modus
+        logging.info(f"Using command-line argument --load_id: {args.load_id}")
     
-    # Wichtige Schlüssel für Inferenz
-    # 'load_id' wird benötigt, wenn inference_mode = 'load_artifacts_path'
-    # infer_config['load_id'] = "2025-07-21_..." 
-    infer_config["inference_mode"] = "load_artifacts_path"
-    
+    if args.model_filename:
+        infer_config['model_filename'] = args.model_filename
+        logging.info(f"Using command-line argument --model_filename: {args.model_filename}")
+
     # MQTT-Konfiguration
     mqtt_broker_ip = MQTT_CONFIG['MQTT_BROKER_IP']
     mqtt_port = MQTT_CONFIG['MQTT_PORT']

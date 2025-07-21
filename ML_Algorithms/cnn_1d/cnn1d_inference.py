@@ -4,6 +4,8 @@ import sys
 import os
 import pandas as pd
 import numpy as np
+import argparse 
+
 
 # --- Project Path Setup ---
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
@@ -70,25 +72,33 @@ class CNN1DInference(BaseInferenceProcessor):
 
 
 if __name__ == "__main__":
+    # NEU: Argument Parser Setup
+    parser = argparse.ArgumentParser(description="Standalone 1D-CNN Inference")
+    parser.add_argument("--load_id", type=str, help="Optional: The specific run ID to load artifacts from.")
+    parser.add_argument("--model_filename", type=str, help="Optional: The specific model filename (e.g., model.keras).")
+    args = parser.parse_args()
+    
     logging.info("--- MODE: Standalone 1D-CNN Inference (Console Output) ---")
     
+    # Temporäre Config für die Inferenz
     param_cnn1d_test = {
         'model_name': 'cnn1d_test',
         'lags': 10,
         'base_features': ['Group4-2_S6_MassFlowRate'],
     }
 
-    # --- Basiskonfiguration für die Inferenz ---
+    # --- Basiskonfiguration laden ---
     infer_config = {**CONFIG_PATH, **CONFIG_LOAD_ARTIFACTS, **param_cnn1d_test}
 
-    # Statische Pfade für 'fast' mode
-    infer_config['model_path_static'] = "trained_cnn_model.keras" 
-    infer_config['scaler_path_static'] = "trained_cnn_scaler.joblib"
-    infer_config['features_path_static'] = "trained_cnn_features.joblib"
+    # --- Konfiguration mit Kommandozeilenargumenten überschreiben ---
+    if args.load_id:
+        infer_config['load_id'] = args.load_id
+        infer_config['inference_mode'] = 'load_artifacts_path' # Erzwinge den Pfad-Modus
+        logging.info(f"Using command-line argument --load_id: {args.load_id}")
     
-    # Für 'path' mode, eine ID von einem Trainingslauf eintragen
-    # infer_config['load_id'] = "IHRE_RUN_ID" 
-    infer_config["inference_mode"] = "load_artifacts_path"
+    if args.model_filename:
+        infer_config['model_filename'] = args.model_filename
+        logging.info(f"Using command-line argument --model_filename: {args.model_filename}")
     
     # MQTT-Konfiguration
     mqtt_broker_ip = MQTT_CONFIG['MQTT_BROKER_IP']

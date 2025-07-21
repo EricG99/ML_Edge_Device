@@ -101,6 +101,9 @@ if __name__ == "__main__":
         infer_config['model_filename'] = args.model_filename
         logging.info(f"Using command-line argument --model_filename: {args.model_filename}")
 
+    infer_config["inference_mode"] = "load_artifacts_path" # "load_artifacts_fast" oder "load_artifacts_path"
+
+
     # Beispiel-Pfade für den 'fast' mode (müssen durch die Trainingsartefakte ersetzt werden)
     infer_config['model_path_static'] = "trained_lstm_model.keras" 
     infer_config['scaler_path_static'] = "trained_lstm_scaler.joblib"
