@@ -7,6 +7,7 @@ param_rf_test = {
     "model_name": "rf_test",
     "dataset": "train_data_sample.csv",
     "model_filename": "model.joblib", # Wichtig für das Speichern
+    "load_id": "2025-07-20_230601_4018_train",
 
     # Modellparameter
     "n_estimators": 5,
