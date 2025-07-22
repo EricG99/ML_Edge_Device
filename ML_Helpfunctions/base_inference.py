@@ -79,6 +79,13 @@ class BaseInferenceProcessor(ABC):
         self.is_running = True
         logging.info("🚀 Starting inference loop...")
         
+        # Holen des Ziel-Index für die inverse Transformation
+        try:
+            target_index = self.feature_list.index(self.target_feature)
+        except (ValueError, AttributeError):
+            logging.warning(f"Target-Feature '{self.target_feature}' nicht in Feature-Liste gefunden. Inverse Transformation könnte fehlschlagen. Setze Index auf 0.")
+            target_index = 0
+
         while self.is_running:
             start_time = time.time()
             
@@ -90,18 +97,28 @@ class BaseInferenceProcessor(ABC):
                 input_data, timestamp, true_value = self._prepare_input_data()
 
             if input_data is not None:
-                prediction, inference_time_ms = Pipeline_Utils.run_timed_inference(
+                # Schritt 1: Skalierte Vorhersage erhalten
+                prediction_scaled, inference_time_ms = Pipeline_Utils.run_timed_inference(
                     model=self.model, input_data=input_data
                 )
                 cpu_load = Pipeline_Utils.get_cpu_usage()
                 
-                prediction_value = prediction[0] if isinstance(prediction, (list, np.ndarray)) and prediction.ndim > 1 else prediction
-                prediction_list = prediction_value.tolist() if hasattr(prediction_value, 'tolist') else [prediction_value]
+                # Schritt 2: Vorhersage zurücktransformieren
+                # Die Vorhersage kann mehrschrittig sein (z.B. shape [1, 5]), daher als 2D-Array behandeln
+                prediction_unscaled = Pipeline_Utils.safe_inverse_transform(
+                    scaler=self.scaler,
+                    array=prediction_scaled.reshape(1, -1), # Stellt sicher, dass es 2D ist
+                    target_index=target_index
+                )
+                
+                # prediction_unscaled ist jetzt ein 2D-Array, wir wollen die 1D-Liste der Werte
+                prediction_list = prediction_unscaled.flatten().tolist()
 
                 self.step_counter += 1
-                logging.info(f"Step {self.step_counter}: Prediction at {timestamp.isoformat()}: {prediction_list} | Time: {inference_time_ms:.2f}ms | CPU: {cpu_load:.1f}%")
+                # Logge die KORREKTEN, unskalierten Werte
+                logging.info(f"Step {self.step_counter}: Prediction at {timestamp.isoformat()}: {[f'{p:.2f}' for p in prediction_list]} | Time: {inference_time_ms:.2f}ms | CPU: {cpu_load:.1f}%")
 
-                # KORREKTUR: Alle Vorhersageschritte dynamisch zum Ergebnis hinzufügen
+                # Speichere die KORREKTEN, unskalierten Werte im Ergebnis-Puffer
                 result_entry = {
                     "datetime": timestamp,
                     "true_value": true_value,

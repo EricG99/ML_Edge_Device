@@ -7,23 +7,23 @@ param_rf_test = {
     "model_name": "rf_test",
     "dataset": "train_data_sample.csv",
     "model_filename": "model.joblib", # Wichtig für das Speichern
-    "load_id": "2025-07-20_230601_4018_train",
+    "load_id": "2025-07-22_160652_7540_train",
 
     # Modellparameter
-    "n_estimators": 5,
+    "n_estimators": 20,
     "max_depth": 3,
     "random_state": 42,
     "n_jobs": 1,
 
     # Zeitreihenparameter
-    "lags": 2,
-    "horizon": 5,
+    "lags": 5,
+    "horizon": 1,
     "train_fraction": 0.3,
     "rolling_window_size": 4,
 
     # Features
     "base_features": ['Group4-2_S6_MassFlowRate'],
-    "time_features": ['hour', 'day_of_week'],
+    "time_features": [],
     "include_roll_mean": True,
     "include_roll_std": False,
     "scale_other_features": True, # Für RF oft nicht nötig, aber zur Konsistenz

@@ -101,7 +101,7 @@ def prepare_inference(config: dict, algorithm: str):
             if algorithm == 'random_forest':
                 from ML_Algorithms.Random_Forest.rf_inference import RFInference
                 processor_class = RFInference
-                FOLDER_FLAG = "random_forest"
+                FOLDER_FLAG = "RandomForest"
             elif algorithm == 'lstm':
                 from ML_Algorithms.LSTM.lstm_inference import LSTMInference
                 processor_class = LSTMInference
