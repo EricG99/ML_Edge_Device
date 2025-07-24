@@ -8,16 +8,16 @@ import pandas as pd
 import numpy as np
 from abc import ABC, abstractmethod
 
+# GEÄNDERT: Zusätzliche Importe für Batch-Verarbeitung und saubere Struktur
 from ML_Helpfunctions import Pipeline_Utils
+from ML_Helpfunctions import Load_Prepare_Data 
 from ML_Helpfunctions.MQTT_Client import MqttInferenceClient
-
 
 
 class BaseInferenceProcessor(ABC):
     """
     Abstrakte Basisklasse für Inferenz-Pipelines.
-    Kapselt die Logik zum Laden von Artefakten, MQTT-Kommunikation,
-    Inferenzschleife und das Speichern der Ergebnisse.
+    GEÄNDERT: Unterstützt jetzt sowohl Live-Inferenz (MQTT) als auch Batch-Inferenz (CSV).
     """
     def __init__(self, config: dict, broker_ip: str, port: int, topic: str, folder_flag:str):
         self.config = config
@@ -27,7 +27,6 @@ class BaseInferenceProcessor(ABC):
         self.folder_flag = folder_flag
         
         self.training_config = None
-        
         self.model, self.scaler, self.feature_list = None, None, None
         self.is_running = False
         self.lock = threading.Lock()
@@ -35,10 +34,7 @@ class BaseInferenceProcessor(ABC):
         self._live_data_buffer = pd.DataFrame()
         self.latest_payload = None
         
-        # Puffer für Ergebnisse
         self.results_buffer = []
-
-        # NEU: Zähler und Limit für Inferenzschritte
         self.inference_steps = self.config.get("inference_steps", "infinite")
         self.step_counter = 0
         
@@ -47,14 +43,14 @@ class BaseInferenceProcessor(ABC):
         else:
             logging.info("Inference will run indefinitely until stopped manually.")
 
-
     def load_artifacts(self):
         """Lädt die für die Inferenz benötigten Artefakte."""
         try:
             logging.info("Loading inference artifacts...")
-            # ERWEITERT: Unpackt jetzt vier Werte
             self.scaler, self.feature_list, self.model, self.training_config = \
                 Pipeline_Utils.load_model_artifacts_for_inference(self.config, self.folder_flag )
+            # Die Ziel-Variable wird aus der Konfiguration geholt
+            self.target_feature = self.config.get('base_features', [None])[0]
             logging.info("✅ Artifacts loaded successfully.")
         except (FileNotFoundError, ValueError) as e:
             logging.error(f"Fatal error loading artifacts: {e}")
@@ -62,179 +58,163 @@ class BaseInferenceProcessor(ABC):
 
     @abstractmethod
     def _prepare_input_data(self):
-        """
-        Muss von der Subklasse implementiert werden.
-        Bereitet die Eingabedaten (Vektor/Tensor) für das spezifische Modell vor.
-        Sollte (input_data, timestamp, current_true_value) zurückgeben.
-        """
+        """Muss von der Subklasse implementiert werden."""
         pass
 
     def update_latest_data(self, data: dict):
-        """Callback, um die neueste MQTT-Nachricht zu erhalten."""
+        """Callback, um die neueste Nachricht zu erhalten."""
         with self.lock:
             self.latest_payload = data
-            
-    def _run_inference_loop(self):
-        """Die Kernschleife, die periodisch die Inferenz ausführt."""
-        self.is_running = True
-        logging.info("🚀 Starting inference loop...")
-        
-        # Holen des Ziel-Index für die inverse Transformation
-        try:
-            target_index = self.feature_list.index(self.target_feature)
-        except (ValueError, AttributeError):
-            logging.warning(f"Target-Feature '{self.target_feature}' nicht in Feature-Liste gefunden. Inverse Transformation könnte fehlschlagen. Setze Index auf 0.")
-            target_index = 0
 
+    # NEU: Diese Methode kapselt die Logik für eine einzelne Vorhersage
+    def _run_single_prediction(self):
+        """
+        Führt eine einzelne Vorhersage aus, transformiert das Ergebnis zurück und speichert es.
+        Gibt True zurück, wenn die Inferenz gestoppt werden soll.
+        """
+        if self.latest_payload is None:
+            return False
+
+        input_data, timestamp, true_value = self._prepare_input_data()
+
+        if input_data is not None:
+            prediction_scaled, inference_time_ms = Pipeline_Utils.run_timed_inference(
+                model=self.model, input_data=input_data
+            )
+            cpu_load = Pipeline_Utils.get_cpu_usage()
+            
+            try:
+                target_index = self.feature_list.index(self.target_feature)
+            except (ValueError, AttributeError):
+                target_index = 0
+
+            prediction_unscaled = Pipeline_Utils.safe_inverse_transform(
+                scaler=self.scaler, array=prediction_scaled.reshape(1, -1), target_index=target_index
+            )
+            prediction_list = prediction_unscaled.flatten().tolist()
+
+            self.step_counter += 1
+            logging.info(f"Step {self.step_counter}: Prediction for {timestamp.isoformat()}: {[f'{p:.2f}' for p in prediction_list]}")
+
+            result_entry = { "datetime": timestamp, "true_value": true_value, "cpu_load_percent": cpu_load, "inference_time_ms": inference_time_ms }
+            for i, pred_val in enumerate(prediction_list):
+                result_entry[f"prediction_step_{i+1}"] = pred_val
+            self.results_buffer.append(result_entry)
+            
+            if isinstance(self.inference_steps, int) and self.step_counter >= self.inference_steps:
+                logging.info(f"--- ✅ Reached configured inference limit of {self.inference_steps} steps. ---")
+                return True # Signal zum Stoppen
+        return False # Signal zum Weitermachen
+
+    # GEÄNDERT: Die Logik der alten `_run_inference_loop` wurde hierher verschoben und leicht angepasst.
+    def _live_inference_loop(self):
+        """Die Kernschleife, die periodisch die Live-Inferenz ausführt."""
+        self.is_running = True
+        logging.info("🚀 Starting live inference loop...")
         while self.is_running:
             start_time = time.time()
-            
             with self.lock:
-                if self.latest_payload is None:
-                    time.sleep(self.config.get("inference_interval_sec", 1.0))
-                    continue
-                
-                input_data, timestamp, true_value = self._prepare_input_data()
-
-            if input_data is not None:
-                # Schritt 1: Skalierte Vorhersage erhalten
-                prediction_scaled, inference_time_ms = Pipeline_Utils.run_timed_inference(
-                    model=self.model, input_data=input_data
-                )
-                cpu_load = Pipeline_Utils.get_cpu_usage()
-                
-                # Schritt 2: Vorhersage zurücktransformieren
-                # Die Vorhersage kann mehrschrittig sein (z.B. shape [1, 5]), daher als 2D-Array behandeln
-                prediction_unscaled = Pipeline_Utils.safe_inverse_transform(
-                    scaler=self.scaler,
-                    array=prediction_scaled.reshape(1, -1), # Stellt sicher, dass es 2D ist
-                    target_index=target_index
-                )
-                
-                # prediction_unscaled ist jetzt ein 2D-Array, wir wollen die 1D-Liste der Werte
-                prediction_list = prediction_unscaled.flatten().tolist()
-
-                self.step_counter += 1
-                # Logge die KORREKTEN, unskalierten Werte
-                logging.info(f"Step {self.step_counter}: Prediction at {timestamp.isoformat()}: {[f'{p:.2f}' for p in prediction_list]} | Time: {inference_time_ms:.2f}ms | CPU: {cpu_load:.1f}%")
-
-                # Speichere die KORREKTEN, unskalierten Werte im Ergebnis-Puffer
-                result_entry = {
-                    "datetime": timestamp,
-                    "true_value": true_value,
-                    "cpu_load_percent": cpu_load,
-                    "inference_time_ms": inference_time_ms
-                }
-                for i, pred_val in enumerate(prediction_list):
-                    result_entry[f"prediction_step_{i+1}"] = pred_val
-                
-                self.results_buffer.append(result_entry)
-                
-                if isinstance(self.inference_steps, int) and self.step_counter >= self.inference_steps:
-                    logging.info(f"--- ✅ Reached configured inference limit of {self.inference_steps} steps. Stopping loop. ---")
-                    self.is_running = False
-
+                should_stop = self._run_single_prediction()
+            if should_stop:
+                self.is_running = False
             elapsed = time.time() - start_time
             sleep_for = max(0, self.config.get("inference_interval_sec", 1.0) - elapsed)
             time.sleep(sleep_for)
-            
-        logging.info("Inference loop has stopped.")
+        logging.info("Live inference loop has stopped.")
 
-    def _save_results(self):
-        """
-        Speichert die detaillierten Vorhersagen und separat eine Zusammenfassung
-        mit Metriken und Konfigurationen.
-        """
-        if not self.results_buffer:
-            logging.warning("No results were collected, nothing to save.")
+    def _run_batch_inference(self):
+        """Führt eine Batch-Inferenz auf dem Test-Split der CSV-Datei aus."""
+        logging.info("--- 🚀 Running BATCH Inference on Test-Split from CSV ---")
+        
+        # KORREKTUR 1: Lade die Daten, aber lasse 'datetime' als normale Spalte.
+        test_df = Load_Prepare_Data.load_test_data_by_fraction(
+            config=self.config,
+            train_fraction=self.config.get("train_fraction", 0.75),
+            make_date_as_index=False 
+        )
+
+        if test_df.empty:
+            logging.warning("Test DataFrame is empty. Nothing to process.")
             return
 
-        logging.info(f"\nSaving {len(self.results_buffer)} collected inference results...")
-        self.config, paths = Pipeline_Utils.setup_experiment(self.config, self.folder_flag, run_type='inference')
-        
-        results_df = pd.DataFrame(self.results_buffer)
-
-        # --- Schritt 1: Detaillierte Vorhersage-Datei mit allen Spalten speichern ---
-        try:
-            pred_filename = f"inference_results_{self.config['run_id']}.csv"
-            pred_output_path = os.path.join(paths.get("Prediction_Data"), pred_filename)
+        # KORREKTUR 2: Iteriere durch die Zeilen und erstelle ein sauberes Dictionary.
+        # 'to_dict("records")' ist perfekt dafür geeignet.
+        for payload_dict in test_df.to_dict("records"):
+            # Der Payload enthält jetzt garantiert einen 'datetime'-Schlüssel.
+            self.latest_payload = payload_dict
             
-            # KORREKTUR: Speichere den gesamten DataFrame ohne Spaltenfilter
-            results_df.to_csv(pred_output_path, index=False, date_format='%Y-%m-%dT%H:%M:%S.%f')
-            
-            logging.info(f"✅ Detailed prediction results saved to: {pred_output_path}")
+            should_stop = self._run_single_prediction()
+            if should_stop:
+                break
+        logging.info("✅ Batch inference complete.")
 
-        except Exception as e:
-            logging.error(f"Failed to save detailed prediction results: {e}", exc_info=True)
-
-        # --- Schritt 2: Gesamtmetriken für die Zusammenfassung berechnen ---
-        # Die Metriken werden standardmäßig auf den ersten Schritt berechnet
-        if "true_value" in results_df.columns and "prediction_step_1" in results_df.columns:
-            y_true = results_df["true_value"].to_numpy()
-            y_pred = results_df["prediction_step_1"].to_numpy()
-            
-            valid_indices = ~np.isnan(y_true) & ~np.isnan(y_pred)
-            if np.sum(valid_indices) > 0:
-                metrics = Pipeline_Utils.evaluate_all_metrics(
-                    y_true=y_true[valid_indices],
-                    y_pred=y_pred[valid_indices]
-                )
-                logging.info(f"Overall Inference Metrics for summary: {metrics}")
-            else:
-                metrics = {}
-                logging.warning("Could not compute metrics for summary file (not enough valid data).")
-        else:
-            metrics = {}
-            logging.warning("Skipping metrics calculation: 'true_value' or 'prediction_step_1' not in results.")
-
-
-        # --- Schritt 3: Zentrale Zusammenfassungs-Datei speichern/aktualisieren ---
-        try:
-            Pipeline_Utils.save_metrics_summary(
-                metrics=metrics,
-                infer_config=self.config,
-                train_config=self.training_config,
-                paths=paths
-            )
-        except Exception as e:
-            logging.error(f"Failed to save metrics summary file: {e}", exc_info=True)
-
-
-    def run(self):
-        """Startet den gesamten Inferenzprozess."""
-        self.load_artifacts()
-        
-        inference_thread = threading.Thread(target=self._run_inference_loop, daemon=True)
-        
+    # NEU: Eigene Methode, die den MQTT-Client und den Thread startet
+    def _run_live_mode(self):
+        """Startet den gesamten Inferenzprozess für den Live-Modus."""
+        inference_thread = threading.Thread(target=self._live_inference_loop, daemon=True)
         mqtt_client = MqttInferenceClient(
             broker_ip=self.broker_ip, port=self.port, topic=self.topic,
             on_message_callback=self.update_latest_data
         )
-        
         try:
-            logging.info("Starting MQTT client...")
+            logging.info("🚀 Starting MQTT client for LIVE inference...")
             mqtt_client.run()
             inference_thread.start()
-            
-            # Die Schleife wartet entweder auf den Interrupt oder darauf,
-            # dass der Inferenz-Thread self.is_running auf False setzt.
-            while inference_thread.is_alive() and self.is_running:
+            while inference_thread.is_alive():
                 time.sleep(0.5)
-
         except KeyboardInterrupt:
             logging.info("\n🚨 Shutdown signal (KeyboardInterrupt) received.")
-            self.is_running = False
         finally:
-            logging.info("Stopping services...")
+            self.is_running = False
             if inference_thread.is_alive():
                 inference_thread.join()
-            
             mqtt_client.client.loop_stop()
             mqtt_client.client.disconnect()
-            
-            if not self.folder_flag:
-                logging.warning("Kein 'folder_flag' übergeben, Ergebnisse können nicht gespeichert werden.")
-            else:
-                self._save_results()
+            logging.info("MQTT client stopped.")
 
-            logging.info("✅ Shutdown complete.")
+    def _save_results(self):
+        """Speichert die gesammelten Ergebnisse am Ende des Laufs."""
+        if not self.results_buffer:
+            logging.warning("No results were collected, nothing to save.")
+            return
+
+        logging.info(f"\n💾 Saving {len(self.results_buffer)} collected inference results...")
+        self.config, paths = Pipeline_Utils.setup_experiment(self.config, self.folder_flag, run_type='inference')
+        results_df = pd.DataFrame(self.results_buffer)
+
+        pred_filename = f"inference_results_{self.config.get('loading_strategy')}_{self.config['run_id']}.csv"
+        pred_output_path = os.path.join(paths.get("Prediction_Data"), pred_filename)
+        results_df.to_csv(pred_output_path, index=False, date_format='%Y-%m-%dT%H:%M:%S.%f')
+        logging.info(f"✅ Detailed prediction results saved to: {pred_output_path}")
+
+        if "true_value" in results_df.columns and "prediction_step_1" in results_df.columns:
+            y_true = results_df["true_value"].to_numpy(); y_pred = results_df["prediction_step_1"].to_numpy()
+            valid_indices = ~np.isnan(y_true) & ~np.isnan(y_pred)
+            metrics = Pipeline_Utils.evaluate_all_metrics(y_true=y_true[valid_indices], y_pred=y_pred[valid_indices]) if np.sum(valid_indices) > 0 else {}
+            Pipeline_Utils.save_metrics_summary(metrics=metrics, infer_config=self.config, train_config=self.training_config, paths=paths)
+        else:
+            logging.warning("Could not compute metrics: 'true_value' or 'prediction_step_1' not in results.")
+
+    def run(self):
+        """
+        Startet den gesamten Inferenzprozess basierend auf der Lade-Strategie
+        aus der Konfiguration.
+        """
+
+        # Die ursprüngliche `run` Methode wird durch diesen Dispatcher ersetzt.
+        # Der Code wird nicht gelöscht, sondern in die neuen Methoden refaktorisiert.
+        self.load_artifacts()
+        strategy = self.config.get("loading_strategy")
+        logging.info(f"Executing inference with strategy: '{strategy}'")
+
+        if strategy == "split":
+            self._run_batch_inference()
+        elif strategy == "live_mqtt":
+            self._run_live_mode()
+        else:
+            logging.error(f"Unknown loading_strategy: '{strategy}'. Aborting.")
+            return
+        
+        # Das Speichern der Ergebnisse erfolgt nach Abschluss des jeweiligen Modus.
+        self._save_results()
+        logging.info("✅ Inference task complete.")

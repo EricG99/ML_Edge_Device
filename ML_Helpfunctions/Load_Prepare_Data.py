@@ -105,26 +105,30 @@ def _load_full_timeseries(config: dict,
     file_path = _get_file_path(config)
     df = pd.read_csv(file_path, sep=",")
     
-    # KORREKTUR: Alle Instanzen von "Datetime" zu "datetime" geändert
+    if "datetime" not in df.columns:
+        raise ValueError(f"Die CSV-Datei '{file_path}' muss eine 'datetime'-Spalte enthalten.")
+        
     df["datetime"] = pd.to_datetime(df["datetime"])
     df = df.sort_values("datetime")
 
+    # WICHTIG: 'idx' ist eine pandas Series. Wir greifen über .dt zu.
+    idx = df["datetime"]
+
+    # KORREKTUR: Verwende den .dt Accessor für alle Zeit-Features
+    df["millisecond"] = idx.dt.microsecond // 1000
+    df["second"] = idx.dt.second
+    df["minute"] = idx.dt.minute
+    df["hour"] = idx.dt.hour
+    df["day"] = idx.dt.day
+    df["weekday"] = idx.dt.dayofweek
+    df["week"] = idx.dt.isocalendar().week.astype(int)
+    df["month"] = idx.dt.month
+    df["year"] = idx.dt.year
+
+    # Setze den Index erst am Ende, wenn es verlangt wird
     if make_date_as_index:
         df = df.set_index("datetime")
-        idx = df.index
-    else:
-        idx = pd.to_datetime(df["datetime"])
-
-    df["millisecond"] = idx.microsecond // 1000
-    df["second"] = idx.second
-    df["minute"] = idx.minute
-    df["hour"] = idx.hour
-    df["day"] = idx.day
-    df["weekday"] = idx.dayofweek
-    df["week"] = idx.isocalendar().week.astype(int)
-    df["month"] = idx.month
-    df["year"] = idx.year
-
+    
     print(f"Geladen: {len(df)} Zeilen aus '{file_path}' mit Zeitfeatures")
     return df
 
@@ -551,7 +555,7 @@ class DataPipelineBase:
         strategy = self.config.get("loading_strategy", "split")
         print(f"\nLade Daten im Modus '{mode}' mit Strategie '{strategy}'...")
 
-        if strategy == "split":
+        if strategy == "split":            
             train_df = load_train_data_by_fraction(config=self.config, make_date_as_index=True)
             test_df = load_test_data_by_fraction(config=self.config, make_date_as_index=True)
             return train_df, test_df

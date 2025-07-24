@@ -1,4 +1,5 @@
 # rf_inference.py
+#python ML_Algorithms/Random_Forest/rf_inference.py --load_id 2025-07-22_230939_1176_train
 import time
 import pandas as pd
 import threading
@@ -103,7 +104,11 @@ if __name__ == "__main__":
     infer_config['model_path_static'] = "trained_rf_model.joblib" 
     infer_config['scaler_path_static'] = "trained_rf_scaler.joblib"
     infer_config['features_path_static'] = "trained_rf_features.joblib"
-    
+    infer_config.update({
+        'loading_strategy': 'split',
+        "dataset": "mqtt_data_rate_limited.csv",
+        "inference_steps": "infinite",  
+    })
     # MQTT-Konfiguration
     mqtt_broker_ip = MQTT_CONFIG['MQTT_BROKER_IP']
     mqtt_port = MQTT_CONFIG['MQTT_PORT']
