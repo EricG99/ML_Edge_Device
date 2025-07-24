@@ -80,6 +80,8 @@ if __name__ == "__main__":
     # Setze das vollständig verschmolzene Pfad-Wörterbuch in der finalen Konfiguration
     training_config["paths"] = merged_paths
     training_config["inference_mode"] = "load_artifacts_path" # "load_artifacts_fast" oder "load_artifacts_path"
+    #update triainng config, startegy = split
+    # training_config["loading_strategy"] = "l"  # "split", "separate
 
 
     # Debug-Ausgabe zur Überprüfung der finalen Pfade
