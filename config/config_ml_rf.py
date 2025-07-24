@@ -18,15 +18,14 @@ param_rf_test = {
     # Zeitreihenparameter
     "lags": 5,
     "horizon": 1,
-    "train_fraction": 0.3,
+    "train_fraction": 0.8,
     "rolling_window_size": 4,
-
     # Features
     "base_features": ['Group4-2_S6_MassFlowRate'],
     "time_features": [],
     "include_roll_mean": True,
     "include_roll_std": False,
-    "scale_other_features": True, # Für RF oft nicht nötig, aber zur Konsistenz
+    "scale_other_features": False, # Für RF oft nicht nötig, aber zur Konsistenz
     "scale_target": True,
 }
 
