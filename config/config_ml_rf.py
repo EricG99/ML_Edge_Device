@@ -26,7 +26,7 @@ param_rf_test = {
     "include_roll_mean": True,
     "include_roll_std": False,
     "scale_other_features": False, # Für RF oft nicht nötig, aber zur Konsistenz
-    "scale_target": True,
+    "scale_target": False,
 }
 
 # Eine robustere Konfiguration für das eigentliche Training auf dem Server.
