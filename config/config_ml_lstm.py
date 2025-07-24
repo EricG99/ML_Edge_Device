@@ -68,7 +68,7 @@ param_lstm_edge = {
 
 param_lstm_test = {
     "model_name": "lstm",
-    "dataset": "mqtt_data.csv",
+    "dataset": "mqtt_data_rate_limited.csv",
     "model_filename": "model_quant_float16.tflite", # model_quant_float16.tflite Wichtig für das Speichern
     "load_id": "2025-07-20_230601_4018_train", # Beispiel-ID
 
@@ -96,7 +96,7 @@ param_lstm_test = {
 
     # Features
     "base_features": ['Group4-2_S6_MassFlowRate'],
-    "time_features": ['hour', 'day_of_week'],
+    "time_features": [],
     "include_roll_mean": True,
     "include_roll_std": False,
     "scale_other_features": True, 
