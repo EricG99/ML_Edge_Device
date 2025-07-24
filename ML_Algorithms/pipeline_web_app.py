@@ -122,7 +122,7 @@ def prepare_inference(config: dict, algorithm: str):
             elif algorithm == 'lstm':
                 from ML_Algorithms.LSTM.LSTM_inference import LSTMInference
                 processor_class = LSTMInference
-                FOLDER_FLAG = "lstm"
+                FOLDER_FLAG = "LSTM"
 
             else:
                 raise ValueError(f"Unknown algorithm: {algorithm}")
