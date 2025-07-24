@@ -5,7 +5,7 @@
 param_rf_test = {
     # Experimentinformationen
     "model_name": "rf_test",
-    "dataset": "train_data_sample.csv",
+    "dataset": "mqtt_data_rate_limited.csv",
     "model_filename": "model.joblib", # Wichtig für das Speichern
     "load_id": "2025-07-22_160652_7540_train",
 
