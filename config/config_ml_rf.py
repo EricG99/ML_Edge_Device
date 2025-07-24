@@ -10,23 +10,25 @@ param_rf_test = {
     "load_id": "2025-07-22_160652_7540_train",
 
     # Modellparameter
-    "n_estimators": 20,
-    "max_depth": 3,
+    "n_estimators": 100,
+    "max_depth": 10,
+    "min_samples_split": 5,
+    "min_samples_leaf": 3,
     "random_state": 42,
     "n_jobs": 1,
 
     # Zeitreihenparameter
-    "lags": 5,
-    "horizon": 1,
+    "lags": 10,
+    "horizon": 10,
     "train_fraction": 0.8,
-    "rolling_window_size": 4,
+    "rolling_window_size": 10,
     # Features
     "base_features": ['Group4-2_S6_MassFlowRate'],
-    "time_features": [],
+    "time_features": ["second_sin", "second_cos", "minute_sin", "minute_cos"],
     "include_roll_mean": True,
-    "include_roll_std": False,
-    "scale_other_features": False, # Für RF oft nicht nötig, aber zur Konsistenz
-    "scale_target": False,
+    "include_roll_std": True,
+    "scale_other_features": True, # Für RF oft nicht nötig, aber zur Konsistenz
+    "scale_target": True,
 }
 
 # Eine robustere Konfiguration für das eigentliche Training auf dem Server.
