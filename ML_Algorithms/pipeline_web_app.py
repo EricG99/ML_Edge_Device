@@ -52,7 +52,7 @@ def run_inference_background_task(config):
         )
 
     # Start MQTT (non-blocking) and the inference loop thread
-    inference_thread = threading.Thread(target=inference_processor._run_inference_loop, daemon=True)
+    inference_thread = threading.Thread(target=inference_processor._live_inference_loop, daemon=True)
     
     mqtt_client.run()  # Starts the non-blocking MQTT loop
     inference_thread.start()
