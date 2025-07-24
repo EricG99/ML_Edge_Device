@@ -1,73 +1,71 @@
-import argparse
+import subprocess
+import shlex
 import os
-from paramiko import SSHClient
-from scp import SCPClient
-import getpass
 
-def send_file(local_path, remote_path, hostname, username, password=None):
-    """
-    Stellt eine SSH-Verbindung zu einem Host her und sendet eine Datei per SCP.
+# --- Konfiguration ---
+REMOTE_USER = "pi"
+REMOTE_HOST = "RevPi100364121487"
 
-    Args:
-        local_path (str): Der Pfad zur lokalen Datei, die gesendet werden soll.
-        remote_path (str): Der Zielpfad auf dem Remote-Gerät.
-        hostname (str): Der Hostname oder die IP-Adresse des RevPi.
-        username (str): Der Benutzername für die SSH-Verbindung.
-        password (str, optional): Das Passwort für die SSH-Verbindung. 
-                                  Wenn nicht angegeben, wird es abgefragt.
-    """
-    if not os.path.exists(local_path):
-        print(f"Fehler: Die Quelldatei '{local_path}' wurde nicht gefunden.")
-        return
+# Basis-Pfade auf dem lokalen PC und dem RevPi
+LOCAL_BASE_DIR = r"C:\DEV\RevPi_ML\ML_Edge_Device\Output\RandomForest\2025-07-22_160652_7540_train"
+REMOTE_BASE_DIR = "/home/pi/ML_Edge_Device/Output/RandomForest/2025-07-22_160652_7540_train"
 
+# HIER SIND DIE NEUEN DATEIEN HINZUGEFÜGT
+# Format: (Lokaler Unterordner, Dateiname, Ziel-Unterordner)
+DATEIEN_ZUM_SENDEN = [
+    ("Models", "model.joblib", "Models"),
+    ("Models", "features.joblib", "Models"),
+    ("Models", "training_config.json", "Models"),
+    ("Scalers", "scaler.joblib", "Scalers") 
+]
+# --------------------
+
+def run_command(command):
+    """Führt einen Shell-Befehl aus und prüft auf Fehler."""
     try:
-        # Erstellt ein SSH-Client-Objekt
-        ssh = SSHClient()
-        # Lädt bekannte Hosts (optional, aber empfohlen)
-        ssh.load_system_host_keys()
-        # Fügt neue Hosts automatisch hinzu (vereinfacht, aber weniger sicher)
-        # Für höhere Sicherheit verwenden Sie stattdessen ssh.load_system_host_keys()
-        # und stellen Sie sicher, dass der Host-Schlüssel bekannt ist.
-        ssh.set_missing_host_key_policy(ssh.WarningPolicy())
+        print(f"▶️  Führe aus: {' '.join(command)}")
+        subprocess.run(command, check=True, shell=False)
+        print("✅ Befehl erfolgreich ausgeführt.")
+    except subprocess.CalledProcessError as e:
+        print(f"❌ Fehler bei der Ausführung des Befehls: {e}")
+        exit(1)
+    except FileNotFoundError:
+        print(f"❌ Fehler: Der Befehl '{command[0]}' wurde nicht gefunden.")
+        print("Stellen Sie sicher, dass OpenSSH auf Ihrem System installiert und im PATH ist.")
+        exit(1)
 
-        print(f"Verbinde mit {hostname}...")
-        
-        # Stellt die Verbindung her
-        if password:
-            ssh.connect(hostname, username=username, password=password)
-        else:
-            # Fragt nach dem Passwort, wenn keines übergeben wurde
-            password = getpass.getpass(f"Passwort für {username}@{hostname}: ")
-            ssh.connect(hostname, username=username, password=password)
+def sende_datei(local_base, remote_base, datei_info):
+    """Erstellt den Zielordner und kopiert eine einzelne Datei."""
+    local_subdir, filename, remote_subdir = datei_info
+    
+    source_file = os.path.join(local_base, local_subdir, filename)
+    remote_full_path = f"{remote_base}/{remote_subdir}"
+    remote_destination = f"{REMOTE_USER}@{REMOTE_HOST}:{remote_full_path}/"
+    
+    print(f"\n--- Verarbeite: {filename} ---")
 
-        print("Verbindung hergestellt.")
+    print(f"Schritt 1: Erstelle Zielordner '{remote_full_path}'")
+    mkdir_command = [
+        "ssh",
+        f"{REMOTE_USER}@{REMOTE_HOST}",
+        f"mkdir -p {shlex.quote(remote_full_path)}"
+    ]
+    run_command(mkdir_command)
 
-        # Verwendet SCPClient, um die Datei zu übertragen
-        with SCPClient(ssh.get_transport()) as scp:
-            print(f"Übertrage '{local_path}' nach '{hostname}:{remote_path}'...")
-            scp.put(local_path, remote_path)
-            print("Dateiübertragung erfolgreich abgeschlossen.")
+    print(f"Schritt 2: Sende '{filename}'")
+    scp_command = [
+        "scp",
+        source_file,
+        remote_destination
+    ]
+    run_command(scp_command)
 
-    except Exception as e:
-        print(f"Ein Fehler ist aufgetreten: {e}")
-    finally:
-        # Schließt die SSH-Verbindung
-        if 'ssh' in locals() and ssh.get_transport() and ssh.get_transport().is_active():
-            ssh.close()
-            print("Verbindung geschlossen.")
+def main():
+    """Hauptfunktion, die den Transfer für alle definierten Dateien startet."""
+    for datei_info in DATEIEN_ZUM_SENDEN:
+        sende_datei(LOCAL_BASE_DIR, REMOTE_BASE_DIR, datei_info)
+
+    print("\n🎉 Alle Kopiervorgänge erfolgreich abgeschlossen!")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Sendet eine Datei per SSH an einen RevPi.",
-        formatter_class=argparse.RawTextHelpFormatter
-    )
-    
-    # parser.add_argument("input", help="Der Pfad zur lokalen Datei, die gesendet werden soll.")
-    # parser.add_argument("output", help="Der Zielpfad auf dem RevPi.")
-    # parser.add_argument("--host", required=True, help="Der Hostname oder die IP-Adresse des RevPi.")
-    # parser.add_argument("--user", required=True, help="Der Benutzername für die SSH-Verbindung.")
-    # parser.add_argument("--password", help="Das Passwort für die SSH-Verbindung. \nWenn nicht angegeben, wird es interaktiv abgefragt.", nargs='?')
-
-    # args = parser.parse_args()
-
-    send_file(args.input, args.output, args.host, args.user, args.password)
+    main()

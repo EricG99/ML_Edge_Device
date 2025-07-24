@@ -237,7 +237,10 @@ def main():
     log = logging.getLogger('werkzeug')
     log.setLevel(logging.WARNING)
     
-    logging.info("\n🚀 Web server starting. Open http://127.0.0.1:5001 in your browser.")
+    # Die Start-Nachricht anpassen, um die korrekte Nutzung anzuzeigen
+    logging.info("\n🚀 Web server starting. Open http://<IP_DES_Inference-Device>:5001 in your browser.")
+    
+    # Den Server starten, damit er im Netzwerk erreichbar ist
     app.run(host='0.0.0.0', port=5001, debug=False, use_reloader=False)
 
 if __name__ == "__main__":
