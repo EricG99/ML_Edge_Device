@@ -33,7 +33,7 @@ MQTT_CONFIG = {
 CONFIG_LOAD_ARTIFACTS = {
     "inference_mode": "load_artifacts_path", # "load_artifacts_fast" oder "load_artifacts_path"
     "inference_steps" : 500,
-    "inference_interval_sec": 0.5,
+    "inference_interval_sec": 1,
     "artifacts_base_path": ARTIFACTS_OUTPUT_PATH,
 
     "loading_strategy": "live_mqtt", #"split", "separate_csv", "live_mqtt"

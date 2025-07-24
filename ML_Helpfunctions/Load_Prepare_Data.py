@@ -108,7 +108,7 @@ def _load_full_timeseries(config: dict,
     if "datetime" not in df.columns:
         raise ValueError(f"Die CSV-Datei '{file_path}' muss eine 'datetime'-Spalte enthalten.")
         
-    df["datetime"] = pd.to_datetime(df["datetime"])
+    df["datetime"] = pd.to_datetime(df["datetime"], format='mixed')
     df = df.sort_values("datetime")
 
     # WICHTIG: 'idx' ist eine pandas Series. Wir greifen über .dt zu.
