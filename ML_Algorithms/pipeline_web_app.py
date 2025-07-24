@@ -3,6 +3,7 @@ import logging
 import argparse
 import sys
 import threading
+import socket
 import os
 from flask import Flask, jsonify, render_template, request
 import pandas as pd
@@ -26,6 +27,22 @@ app_lock = threading.Lock()
 inference_processor = None
 mqtt_client = None
 
+def get_local_ip():
+    """Ermittelt die lokale IP-Adresse des Geräts, um den Zugriffslink anzuzeigen."""
+    s = None
+    try:
+        # Erstellt einen Dummy-Socket, um die vom System gewählte IP-Adresse zu finden
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        # Verbindung zu einem externen Server (muss nicht erreichbar sein)
+        s.connect(("8.8.8.8", 80))
+        ip_address = s.getsockname()[0]
+    except Exception:
+        # Fallback, falls keine Netzwerkverbindung besteht
+        ip_address = "127.0.0.1"
+    finally:
+        if s:
+            s.close()
+    return ip_address
 
 def run_inference_background_task(config):
     """
@@ -103,7 +120,7 @@ def prepare_inference(config: dict, algorithm: str):
                 processor_class = RFInference
                 FOLDER_FLAG = "RandomForest"
             elif algorithm == 'lstm':
-                from ML_Algorithms.LSTM.lstm_inference import LSTMInference
+                from ML_Algorithms.LSTM.LSTM_inference import LSTMInference
                 processor_class = LSTMInference
                 FOLDER_FLAG = "lstm"
 
@@ -143,6 +160,8 @@ def prepare_inference(config: dict, algorithm: str):
 def main():
     parser = argparse.ArgumentParser(description="General ML Pipeline with Web Visualization")
     parser.add_argument('--algorithm', type=str, required=True, choices=['random_forest', 'lstm'])
+    parser.add_argument("--load_id", type=str, help="Optional: The specific run ID to load artifacts from (e.g., 2025-07-21_103000_1234).")
+    parser.add_argument("--model_filename", type=str, help="Optional: The specific model filename within the run folder (e.g., model.joblib or model.keras).")
     args = parser.parse_args()
 
     logging.info(f"--- MODE: infer (Web App) | ALGORITHM: {args.algorithm} ---")
@@ -161,10 +180,17 @@ def main():
     base_config.update(MQTT_CONFIG)
     base_config['paths'] = CONFIG_PATH['paths']
     
-    # Set a finite number of steps for the web app demo
+    if args.load_id:
+        base_config['load_id'] = args.load_id
+        base_config['inference_mode'] = 'load_artifacts_path'
+        logging.info(f"Using command-line argument --load_id: {args.load_id}")
+    
+    if args.model_filename:
+        base_config['model_filename'] = args.model_filename
+        logging.info(f"Using command-line argument --model_filename: {args.model_filename}")
+
     base_config['inference_steps'] = base_config.get('inference_steps', 100)
     
-    # Start preparation in a background thread
     preparation_thread = threading.Thread(target=prepare_inference, args=(base_config, args.algorithm), daemon=True)
     preparation_thread.start()
     
@@ -189,19 +215,13 @@ def main():
         if not inference_processor or step >= len(inference_processor.results_buffer):
             return jsonify({"status": "waiting"}), 200
 
-        # --- Korrigierte Logik zum Erstellen der JSON-Antwort ---
-
-        # 1. Rohdaten für den aktuellen Schritt holen
         raw_data = inference_processor.results_buffer[step]
-
-        # 2. Die komplette Liste der Vorhersageschritte rekonstruieren
         predictions_list = []
         i = 1
         while f"prediction_step_{i}" in raw_data:
             predictions_list.append(raw_data[f"prediction_step_{i}"])
             i += 1
 
-        # 3. Die zukünftigen Zeitstempel für den Graphen berechnen
         timestamp_obj = raw_data["datetime"]
         interval_sec = inference_processor.config.get("inference_interval_sec", 1.0)
         future_dates = [
@@ -209,13 +229,12 @@ def main():
             for i in range(len(predictions_list))
         ]
 
-        # 4. Das finale JSON-Objekt im von der Web-App erwarteten Format erstellen
         output_data = {
             "date": timestamp_obj.isoformat(),
             "true_value": raw_data["true_value"],
             "predicted_value_step_1": predictions_list[0] if predictions_list else None,
             "predicted_value_step_n": predictions_list[-1] if predictions_list else None,
-            "future_forecast": {"dates": future_dates, "values": predictions_list}, # Entscheidender Teil für den Graphen
+            "future_forecast": {"dates": future_dates, "values": predictions_list},
             "cpu_load": raw_data["cpu_load_percent"],
             "inference_time_ms": raw_data["inference_time_ms"]
         }
@@ -237,11 +256,13 @@ def main():
     log = logging.getLogger('werkzeug')
     log.setLevel(logging.WARNING)
     
-    # Die Start-Nachricht anpassen, um die korrekte Nutzung anzuzeigen
-    logging.info("\n🚀 Web server starting. Open http://<IP_DES_Inference-Device>:5001 in your browser.")
+    # GEÄNDERT: Die IP-Adresse wird dynamisch ermittelt und in der Nachricht angezeigt
+    local_ip = get_local_ip()
+    logging.info(f"\n🚀 Web server starting. Open http://{local_ip}:5001 in your browser.")
     
-    # Den Server starten, damit er im Netzwerk erreichbar ist
+    # Den Server starten, damit er im Netzwerk erreichbar ist (host='0.0.0.0')
     app.run(host='0.0.0.0', port=5001, debug=False, use_reloader=False)
+
 
 if __name__ == "__main__":
     main()
