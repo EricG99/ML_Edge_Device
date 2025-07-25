@@ -89,18 +89,18 @@ param_lstm_test = {
     "early_stopping_patience": 10,
     "loss": "huber",    
     # Zeitreihenparameter
-    "lags": 1,
+    "lags": 6,
     "horizon": 5,
-    "train_fraction": 0.3,
-    "rolling_window_size": 1,
+    "train_fraction": 0.7,
+    "rolling_window_size": 6,
 
     # Features
     "base_features": ['Group4-2_S6_MassFlowRate'],
     "time_features": [],
     "include_roll_mean": True,
-    "include_roll_std": False,
-    "scale_other_features": False, 
-    "scale_target": False,
+    "include_roll_std": True,
+    "scale_other_features": True, 
+    "scale_target": True,
     
     # Inferenz
     "inference_interval_sec": 1.0,

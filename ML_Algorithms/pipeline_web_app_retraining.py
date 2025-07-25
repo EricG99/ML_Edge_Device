@@ -89,7 +89,11 @@ def retraining_thread_task(current_model, scaler, features, retraining_data, con
     PIPELINE_STATE["retraining_status"] = "training"
     try:
         retraining_data_featured, _ = fe.add_all_features(retraining_data, config)
-        retraining_data_featured.dropna(inplace=True)
+        
+        # *** KORREKTUR: Sicherere Operation ohne 'inplace=True' ***
+        # Erstellt eine neue Kopie des DataFrames, die nur die gültigen Zeilen enthält.
+        retraining_data_featured = retraining_data_featured.dropna()
+
         scaled_data = scaler.transform(retraining_data_featured[features])
         X_retrain, y_retrain = LoadPrepareData.convert_data_to_sliding_window(
             scaled_data, lag_horizon=config["lags"], forecast_horizon=config["horizon"]
@@ -173,7 +177,6 @@ def inference_and_retraining_manager(config: dict):
         logging.info(f"--- Zyklus {cycle + 1}/{max_cycles}: Starte Datensammlung. ---")
 
         for step in range(steps_per_cycle):
-            # *** KORRIGIERTE LOGIK: Dynamische Taktung ***
             start_cycle_time = time.perf_counter()
 
             while PIPELINE_STATE["is_paused"]:
@@ -183,7 +186,7 @@ def inference_and_retraining_manager(config: dict):
             
             if inference_processor.latest_payload is None:
                 logging.warning("Keine neuen MQTT-Daten verfügbar. Warte auf nächsten Zyklus.")
-                time.sleep(target_interval_sec) # Warten, um eine Endlosschleife zu vermeiden
+                time.sleep(target_interval_sec)
                 continue
 
             with shared_resource_lock:
@@ -203,7 +206,6 @@ def inference_and_retraining_manager(config: dict):
                 
                 rolling_preds = run_rolling_forecast(inference_processor.model, inference_processor.scaler, input_data, config, inference_processor.feature_list)
 
-            # Die gesamte Verarbeitungszeit wird aus der Zykluszeit berechnet
             total_processing_time_ms = (time.perf_counter() - start_cycle_time) * 1000
             cpu_load = PipelineUtils.get_cpu_usage()
 
@@ -233,7 +235,6 @@ def inference_and_retraining_manager(config: dict):
 
             inference_processor.latest_payload = None
 
-            # Dynamische Wartezeit am Ende der Schleife
             cycle_duration = time.perf_counter() - start_cycle_time
             sleep_duration = target_interval_sec - cycle_duration
             if sleep_duration > 0:
@@ -318,7 +319,6 @@ def main():
                 logging.info("UI-Aktion: Pipeline fortgesetzt.")
         return jsonify({"status": "ok", "is_paused": PIPELINE_STATE['is_paused']})
 
-    # Deaktiviert die Standard-Logs von Flask/Werkzeug
     log = logging.getLogger('werkzeug')
     log.setLevel(logging.WARNING)
 
