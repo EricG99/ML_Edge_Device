@@ -12,7 +12,6 @@ from copy import deepcopy
 from datetime import datetime, timedelta
 import tensorflow as tf
 
-
 # --- Systempfad-Setup ---
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 if project_root not in sys.path:
@@ -42,7 +41,7 @@ PIPELINE_STATE = {
     "steps_in_cycle": 0,
     "total_steps": 0,
     "total_cycles": 0,
-    "is_paused": True, # Startet im Pausenmodus
+    "is_paused": False,
     "is_finished": False,
 }
 shared_resource_lock = threading.Lock()
@@ -79,8 +78,8 @@ def initial_training(config: dict) -> None:
         shared_model["scaler"] = scaler
         shared_model["features"] = features
         shared_model["config"] = config
-        PIPELINE_STATE["status"] = "ready_for_inference" # Geändert für die Button-Logik
-    logging.info("--- PHASE 1: Initiales Training abgeschlossen. Bereit für Inferenz. ---")
+        PIPELINE_STATE["status"] = "inference_running"
+    logging.info("--- PHASE 1: Initiales Training abgeschlossen. Starte Inferenz automatisch. ---")
 
 
 def retraining_thread_task(current_model, scaler, features, retraining_data, config):
@@ -90,7 +89,11 @@ def retraining_thread_task(current_model, scaler, features, retraining_data, con
     PIPELINE_STATE["retraining_status"] = "training"
     try:
         retraining_data_featured, _ = fe.add_all_features(retraining_data, config)
-        retraining_data_featured.dropna(inplace=True)
+        
+        # *** KORREKTUR: Sicherere Operation ohne 'inplace=True' ***
+        # Erstellt eine neue Kopie des DataFrames, die nur die gültigen Zeilen enthält.
+        retraining_data_featured = retraining_data_featured.dropna()
+
         scaled_data = scaler.transform(retraining_data_featured[features])
         X_retrain, y_retrain = LoadPrepareData.convert_data_to_sliding_window(
             scaled_data, lag_horizon=config["lags"], forecast_horizon=config["horizon"]
@@ -114,33 +117,26 @@ def retraining_thread_task(current_model, scaler, features, retraining_data, con
 
 
 def run_rolling_forecast(model, scaler, start_window, config, feature_list):
-    """
-    Erzeugt eine rollierende Vorhersage für den definierten Horizont.
-    """
+    """Erzeugt eine rollierende Vorhersage für den definierten Horizont."""
     horizon = config.get("horizon", 1)
     if horizon <= 1:
         return [], []
 
     future_preds_unscaled = []
-    current_window = deepcopy(start_window) # Start mit dem letzten echten Datenfenster
+    current_window = deepcopy(start_window)
 
-    for _ in range(horizon):
-        # Vorhersage für den nächsten Schritt
+    for _ in range(horizon - 1):
         prediction_scaled = model.predict(current_window, verbose=0)
         
-        # Rücktransformation der Vorhersage
         target_index = feature_list.index(config['base_features'][0])
         prediction_unscaled = PipelineUtils.safe_inverse_transform(
             scaler, prediction_scaled.reshape(1, -1), target_index
         ).flatten()[0]
         future_preds_unscaled.append(prediction_unscaled)
 
-        # Update des Fensters für den nächsten Schritt
-        # Erstelle einen Platzhalter für alle Features und setze den neuen vorhergesagten Wert
-        next_step_features_scaled = current_window[0, -1, :].copy() # Kopiere die Features des letzten Zeitschritts
-        next_step_features_scaled[target_index] = prediction_scaled[0, 0] # Ersetze den Zielwert durch die neue Vorhersage
+        next_step_features_scaled = current_window[0, -1, :].copy()
+        next_step_features_scaled[target_index] = prediction_scaled[0, 0]
         
-        # Hänge den neuen Zeitschritt an das Fenster an und entferne den ältesten
         new_window_step = np.expand_dims(next_step_features_scaled, axis=0)
         current_window = np.append(current_window[:, 1:, :], np.expand_dims(new_window_step, axis=0), axis=1)
 
@@ -151,13 +147,15 @@ def inference_and_retraining_manager(config: dict):
     """Haupt-Controller für Inferenz, Datensammlung und Retraining."""
     global inference_processor, retraining_data_buffer, all_predictions
     
-    while PIPELINE_STATE["status"] != "ready_for_inference":
+    while PIPELINE_STATE["status"] == "initializing":
         time.sleep(1)
         
-    logging.info("--- PHASE 2: Inferenz-Manager ist bereit. Warte auf Startsignal vom UI. ---")
+    logging.info("--- PHASE 2: Inferenz-Manager startet. ---")
     
     max_cycles = config.get("retraining_cycles", 5)
-    steps_per_cycle = config.get("retraining_interval_steps", 20)
+    steps_per_cycle = config.get("retraining_interval_steps", 40)
+    target_interval_sec = config.get("inference_cycle_sec", 1.0) 
+    
     PIPELINE_STATE["total_cycles"] = max_cycles
     PIPELINE_STATE["total_steps"] = steps_per_cycle
 
@@ -179,37 +177,53 @@ def inference_and_retraining_manager(config: dict):
         logging.info(f"--- Zyklus {cycle + 1}/{max_cycles}: Starte Datensammlung. ---")
 
         for step in range(steps_per_cycle):
+            start_cycle_time = time.perf_counter()
+
             while PIPELINE_STATE["is_paused"]:
                 time.sleep(0.5)
 
             PIPELINE_STATE["steps_in_cycle"] = step + 1
             
-            while inference_processor.latest_payload is None:
-                time.sleep(0.1)
+            if inference_processor.latest_payload is None:
+                logging.warning("Keine neuen MQTT-Daten verfügbar. Warte auf nächsten Zyklus.")
+                time.sleep(target_interval_sec)
+                continue
 
             with shared_resource_lock:
                 inference_processor.model = shared_model["model"]
             
             input_data, timestamp, true_value = inference_processor._prepare_input_data()
             
+            prediction_unscaled = None
+            model_inference_time_ms = 0
             if input_data is not None:
-                prediction_scaled, inference_time = PipelineUtils.run_timed_inference(model=inference_processor.model, input_data=input_data)
-                cpu_load = PipelineUtils.get_cpu_usage()
+                prediction_scaled, model_inference_time_ms = PipelineUtils.run_timed_inference(model=inference_processor.model, input_data=input_data)
                 
                 target_index = inference_processor.feature_list.index(inference_processor.target_feature)
                 prediction_unscaled = PipelineUtils.safe_inverse_transform(
                     scaler=inference_processor.scaler, array=prediction_scaled.reshape(1, -1), target_index=target_index
                 ).flatten()[0]
                 
-                # Rolling Forecast durchführen
                 rolling_preds = run_rolling_forecast(inference_processor.model, inference_processor.scaler, input_data, config, inference_processor.feature_list)
 
-                log_msg = f"Step [{step+1}/{steps_per_cycle}] Pred: {prediction_unscaled:.2f}, True: {true_value:.2f}, Time: {inference_time:.2f}ms, CPU: {cpu_load:.1f}%"
+            total_processing_time_ms = (time.perf_counter() - start_cycle_time) * 1000
+            cpu_load = PipelineUtils.get_cpu_usage()
+
+            if prediction_unscaled is not None:
+                log_msg = (
+                    f"Step [{step+1}/{steps_per_cycle}] Pred: {prediction_unscaled:.2f}, True: {true_value:.2f}, "
+                    f"Model Time: {model_inference_time_ms:.2f}ms, Total Time: {total_processing_time_ms:.2f}ms, CPU: {cpu_load:.1f}%"
+                )
                 logging.info(log_msg)
+
+                if (total_processing_time_ms / 1000) > target_interval_sec:
+                    logging.warning(f"ZEITÜBERSCHREITUNG! Verarbeitung ({total_processing_time_ms:.0f}ms) dauerte länger als das Zielintervall ({target_interval_sec*1000:.0f}ms).")
 
                 prediction_entry = {
                     "datetime": timestamp, "prediction": prediction_unscaled, "true_value": true_value,
-                    "cpu_load": cpu_load, "inference_time_ms": inference_time,
+                    "cpu_load": cpu_load,
+                    "total_processing_time_ms": total_processing_time_ms,
+                    "model_inference_time_ms": model_inference_time_ms,
                     "rolling_forecast": rolling_preds
                 }
                 all_predictions.append(prediction_entry)
@@ -220,7 +234,11 @@ def inference_and_retraining_manager(config: dict):
                 retraining_data_buffer = pd.concat([retraining_data_buffer, new_row])
 
             inference_processor.latest_payload = None
-            time.sleep(config.get("inference_interval_sec", 1.0))
+
+            cycle_duration = time.perf_counter() - start_cycle_time
+            sleep_duration = target_interval_sec - cycle_duration
+            if sleep_duration > 0:
+                time.sleep(sleep_duration)
 
         logging.info(f"--- Zyklus {cycle + 1}: Datensammlung abgeschlossen. Starte Nachtraining. ---")
         with shared_resource_lock:
@@ -257,6 +275,7 @@ def main():
     config.update(CONFIG_LOAD_ARTIFACTS)
     config.update(MQTT_CONFIG)
     config['paths'] = CONFIG_PATH['paths']
+    config['inference_cycle_sec'] = config.get('inference_cycle_sec', 1.0) 
     
     threading.Thread(target=initial_training, args=(config,), name="InitialTrainingThread", daemon=True).start()
     threading.Thread(target=inference_and_retraining_manager, args=(config,), name="ManagerThread", daemon=True).start()
@@ -281,10 +300,8 @@ def main():
         if isinstance(latest_data['datetime'], (datetime, pd.Timestamp)):
             latest_data['datetime'] = latest_data['datetime'].isoformat()
         
-        # Erstelle zukünftige Zeitstempel für den Rolling Forecast
-        horizon = config.get("horizon", 1)
-        interval_sec = config.get("inference_interval_sec", 1.0)
-        future_dates = [(datetime.fromisoformat(latest_data['datetime']) + timedelta(seconds=i * interval_sec)).isoformat() for i in range(1, horizon)]
+        interval_sec = config.get("inference_cycle_sec", 1.0)
+        future_dates = [(datetime.fromisoformat(latest_data['datetime']) + timedelta(seconds=(i+1) * interval_sec)).isoformat() for i in range(len(latest_data.get("rolling_forecast", [])))]
         latest_data['rolling_forecast_dates'] = future_dates
 
         return jsonify({"status": "success", "data": latest_data})
@@ -294,13 +311,16 @@ def main():
         """Steuert den Pausen- und Startzustand der Pipeline."""
         action = request.json.get('action')
         with shared_resource_lock:
-            if action == 'start':
-                PIPELINE_STATE['is_paused'] = False
-                logging.info("UI-Aktion: Pipeline gestartet.")
-            elif action == 'pause':
+            if action == 'pause':
                 PIPELINE_STATE['is_paused'] = True
                 logging.info("UI-Aktion: Pipeline pausiert.")
+            elif action == 'resume':
+                PIPELINE_STATE['is_paused'] = False
+                logging.info("UI-Aktion: Pipeline fortgesetzt.")
         return jsonify({"status": "ok", "is_paused": PIPELINE_STATE['is_paused']})
+
+    log = logging.getLogger('werkzeug')
+    log.setLevel(logging.WARNING)
 
     local_ip = get_local_ip()
     logging.info(f"🚀 Web server starting. Open http://{local_ip}:5002 in your browser.")
