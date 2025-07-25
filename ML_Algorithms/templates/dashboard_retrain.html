@@ -3,231 +3,220 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Retraining Pipeline Dashboard</title>
+    <title>LSTM Retraining - Echtzeit Dashboard</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
         body { font-family: 'Inter', sans-serif; }
-        .status-dot {
-            height: 12px;
-            width: 12px;
-            border-radius: 50%;
-            display: inline-block;
-            animation: pulse 2s infinite;
+        .status-dot { height: 10px; width: 10px; border-radius: 50%; display: inline-block; }
+        .pulse { animation: pulse-animation 1.5s infinite; }
+        @keyframes pulse-animation {
+            0% { box-shadow: 0 0 0 0 rgba(52, 211, 153, 0.7); }
+            70% { box-shadow: 0 0 0 10px rgba(52, 211, 153, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(52, 211, 153, 0); }
         }
-        @keyframes pulse {
-            0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(52, 211, 153, 0.7); }
-            70% { transform: scale(1); box-shadow: 0 0 0 10px rgba(52, 211, 153, 0); }
-            100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(52, 211, 153, 0); }
-        }
-        .status-dot.idle { background-color: #6b7280; animation: none; }
-        .status-dot.collecting { background-color: #f59e0b; }
-        .status-dot.training { background-color: #3b82f6; }
-        .status-dot.error { background-color: #ef4444; animation: none; }
     </style>
 </head>
-<body class="bg-gray-100 text-gray-800">
+<body class="bg-gray-900 text-gray-200 flex flex-col items-center justify-center min-h-screen p-4">
 
-    <div class="container mx-auto p-4 md:p-8">
-        <header class="mb-8">
-            <h1 class="text-4xl font-bold text-gray-900">LSTM Retraining Pipeline</h1>
-            <p class="text-lg text-gray-600 mt-2">Live-Überwachung des Inferenz- und inkrementellen Trainingsprozesses.</p>
+    <div class="w-full max-w-6xl bg-gray-800 rounded-2xl shadow-2xl p-6 md:p-8 space-y-6 border border-gray-700">
+        
+        <header class="text-center">
+            <h1 class="text-3xl md:text-4xl font-bold text-white">LSTM Retraining Pipeline</h1>
+            <p class="text-gray-400 mt-2">Live-Überwachung des inkrementellen Trainingsprozesses</p>
         </header>
+        
+        <div id="status-container" class="text-center p-4 rounded-lg bg-gray-700 border border-gray-600">
+            <p id="status-text" class="text-lg font-semibold">Initialisiere...</p>
+        </div>
 
-        <!-- Status & Control Panel -->
-        <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
-            <div class="bg-white p-6 rounded-xl shadow-md flex items-center justify-between">
-                <div>
-                    <p class="text-sm font-medium text-gray-500">Pipeline Status</p>
-                    <p id="pipeline-status" class="text-2xl font-semibold">Initialisierung...</p>
-                </div>
-                <div id="status-indicator-main" class="w-8 h-8 bg-yellow-400 rounded-full"></div>
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-4 text-center">
+            <div class="bg-gray-700/50 p-4 rounded-lg">
+                <p class="text-sm text-gray-400">CPU Last</p>
+                <p id="cpu-load" class="text-2xl font-semibold">- %</p>
             </div>
-            <div class="bg-white p-6 rounded-xl shadow-md">
-                <p class="text-sm font-medium text-gray-500">Retraining Status</p>
-                <div class="flex items-center mt-2">
-                     <div id="retraining-dot" class="status-dot idle mr-3"></div>
-                     <p id="retraining-status" class="text-2xl font-semibold">Inaktiv</p>
+            <div class="bg-gray-700/50 p-4 rounded-lg">
+                <p class="text-sm text-gray-400">Inferenzzeit</p>
+                <p id="inference-time" class="text-2xl font-semibold">- ms</p>
+            </div>
+            <div class="bg-gray-700/50 p-4 rounded-lg">
+                <p class="text-sm text-gray-400">Retraining</p>
+                <div class="flex items-center justify-center space-x-2 mt-2">
+                    <div id="retraining-dot" class="status-dot bg-gray-500"></div>
+                    <p id="retraining-status" class="text-lg font-semibold">Inaktiv</p>
                 </div>
             </div>
-            <div class="bg-white p-6 rounded-xl shadow-md">
-                <p class="text-sm font-medium text-gray-500">Fortschritt</p>
-                 <p id="progress-text" class="text-2xl font-semibold">Zyklus 0 / 0</p>
-                 <div class="w-full bg-gray-200 rounded-full h-2.5 mt-3">
-                    <div id="progress-bar" class="bg-blue-600 h-2.5 rounded-full" style="width: 0%"></div>
-                </div>
+            <div class="bg-gray-700/50 p-4 rounded-lg">
+                <p class="text-sm text-gray-400">Inferenzschritt</p>
+                <p id="progress-text" class="text-lg font-semibold mt-2">0 / 0</p>
             </div>
         </div>
 
-        <!-- Error Display -->
-        <div id="error-banner" class="hidden bg-red-100 border-l-4 border-red-500 text-red-700 p-4 mb-8 rounded-md" role="alert">
-            <p class="font-bold">Ein Fehler ist aufgetreten</p>
-            <p id="error-message">Details zum Fehler werden hier angezeigt.</p>
+        <div class="w-full bg-gray-700 rounded-full h-2.5">
+            <div id="progress-bar" class="bg-blue-600 h-2.5 rounded-full transition-all duration-500" style="width: 0%"></div>
         </div>
 
-        <!-- Live Chart -->
-        <div class="bg-white p-6 rounded-xl shadow-md">
-            <h2 class="text-2xl font-semibold mb-4">Live Vorhersage vs. Echte Werte</h2>
-            <canvas id="liveChart"></canvas>
+        <div class="relative h-64 md:h-96 bg-gray-900/50 p-4 rounded-xl border border-gray-700">
+            <canvas id="inferenceChart"></canvas>
         </div>
-
+        
+        <div class="flex flex-col sm:flex-row items-center justify-center gap-4 pt-4">
+            <button id="pauseResumeButton" class="w-full sm:w-auto bg-yellow-500 hover:bg-yellow-600 text-white font-bold py-3 px-6 rounded-lg transition-transform transform hover:scale-105 disabled:bg-gray-500 disabled:cursor-not-allowed" disabled>Pause</button>
+            <button id="resetButton" class="w-full sm:w-auto bg-red-600 hover:bg-red-700 text-white font-bold py-3 px-6 rounded-lg transition-transform transform hover:scale-105">Reset</button>
+        </div>
     </div>
 
     <script>
-        const pipelineStatusEl = document.getElementById('pipeline-status');
-        const statusIndicatorMainEl = document.getElementById('status-indicator-main');
-        const retrainingStatusEl = document.getElementById('retraining-status');
-        const retrainingDotEl = document.getElementById('retraining-dot');
-        const progressTextEl = document.getElementById('progress-text');
-        const progressBarEl = document.getElementById('progress-bar');
-        const errorBannerEl = document.getElementById('error-banner');
-        const errorMessageEl = document.getElementById('error-message');
+        document.addEventListener('DOMContentLoaded', () => {
+            const dom = {
+                statusText: document.getElementById('status-text'),
+                cpuLoad: document.getElementById('cpu-load'),
+                inferenceTime: document.getElementById('inference-time'),
+                retrainingStatus: document.getElementById('retraining-status'),
+                retrainingDot: document.getElementById('retraining-dot'),
+                progressText: document.getElementById('progress-text'),
+                progressBar: document.getElementById('progress-bar'),
+                pauseResumeButton: document.getElementById('pauseResumeButton'),
+                resetButton: document.getElementById('resetButton'),
+                chartCanvas: document.getElementById('inferenceChart').getContext('2d')
+            };
 
-        const statusColors = {
-            initializing: 'bg-gray-400',
-            initial_training_complete: 'bg-blue-500',
-            inference_running: 'bg-green-500',
-            finished: 'bg-gray-600',
-            error: 'bg-red-500'
-        };
-        
-        const retrainingClasses = {
-            idle: { text: 'Inaktiv', dot: 'idle' },
-            collecting: { text: 'Sammelt Daten', dot: 'collecting' },
-            training: { text: 'Trainiert...', dot: 'training' }
-        };
+            let chart;
+            let lastDataTimestamp = null;
+            const HORIZON = {{ config.get("horizon", 1) }};
 
-        // --- Chart.js Setup ---
-        const ctx = document.getElementById('liveChart').getContext('2d');
-        const liveChart = new Chart(ctx, {
-            type: 'line',
-            data: {
-                labels: [],
-                datasets: [{
-                    label: 'Echter Wert',
-                    data: [],
-                    borderColor: 'rgb(54, 162, 235)',
-                    backgroundColor: 'rgba(54, 162, 235, 0.5)',
-                    borderWidth: 2,
-                    pointRadius: 4,
-                    tension: 0.1
-                }, {
-                    label: 'Vorhersage',
-                    data: [],
-                    borderColor: 'rgb(255, 99, 132)',
-                    backgroundColor: 'rgba(255, 99, 132, 0.5)',
-                    borderWidth: 2,
-                    pointRadius: 4,
-                    tension: 0.1
-                }]
-            },
-            options: {
-                scales: {
-                    x: {
-                        type: 'time',
-                        time: {
-                            unit: 'second',
-                            tooltipFormat: 'HH:mm:ss',
-                            displayFormats: {
-                                second: 'HH:mm:ss'
-                            }
-                        },
-                        title: {
-                            display: true,
-                            text: 'Zeit'
-                        }
+            const statusMapping = {
+                initializing: "Initialisiere Pipeline...",
+                inference_running: "Inferenz & Datensammlung läuft...",
+                finished: "Pipeline abgeschlossen.",
+                error: "Fehler in der Pipeline!"
+            };
+            const retrainingMapping = {
+                idle: { text: "Inaktiv", color: "bg-gray-500", pulse: false },
+                collecting: { text: "Sammelt Daten", color: "bg-yellow-500", pulse: true },
+                training: { text: "Trainiert...", color: "bg-blue-500", pulse: true }
+            };
+
+            function initializeChart() {
+                if (chart) chart.destroy();
+                chart = new Chart(dom.chartCanvas, {
+                    type: 'line',
+                    data: {
+                        labels: [], 
+                        datasets: [
+                            { label: 'Echter Wert', data: [], borderColor: 'rgb(59, 130, 246)', tension: 0.2, pointRadius: 2 }, 
+                            { label: 'Vorhersage (t+1)', data: [], borderColor: 'rgb(234, 179, 8)', tension: 0.2, pointRadius: 2 },
+                            { label: `Zukunftsprognose (rollierend)`, data: [], borderColor: 'rgb(34, 197, 94)', borderDash: [5, 5], tension: 0.2, pointRadius: 3, pointStyle: 'rectRot' },
+                        ]
                     },
-                    y: {
-                        beginAtZero: false,
-                        title: {
-                            display: true,
-                            text: 'Wert'
-                        }
+                    options: {
+                        responsive: true, maintainAspectRatio: false,
+                        scales: {
+                            x: { type: 'time', time: { unit: 'second', tooltipFormat: 'HH:mm:ss' }, ticks: { color: '#9CA3AF' }, grid: { color: 'rgba(255, 255, 255, 0.1)' } },
+                            y: { ticks: { color: '#9CA3AF' }, grid: { color: 'rgba(255, 255, 255, 0.1)' } }
+                        },
+                        plugins: { legend: { labels: { color: '#D1D5DB' } } }
                     }
-                },
-                animation: {
-                    duration: 500
-                }
-            }
-        });
-
-        function addDataToChart(label, trueValue, predValue) {
-            liveChart.data.labels.push(label);
-            liveChart.data.datasets[0].data.push(trueValue);
-            liveChart.data.datasets[1].data.push(predValue);
-
-            // Chart auf eine maximale Anzahl von Datenpunkten beschränken
-            const maxDataPoints = 50;
-            if (liveChart.data.labels.length > maxDataPoints) {
-                liveChart.data.labels.shift();
-                liveChart.data.datasets.forEach(dataset => {
-                    dataset.data.shift();
                 });
             }
-            liveChart.update();
-        }
+            
+            function addDataToChart(dataPoint) {
+                const { datetime, true_value, prediction, rolling_forecast, rolling_forecast_dates } = dataPoint;
+                chart.data.labels.push(datetime);
+                chart.data.datasets[0].data.push(true_value);
+                chart.data.datasets[1].data.push(prediction);
 
-        // --- API Polling ---
-        async function fetchStatus() {
-            try {
-                const response = await fetch('/api/status');
-                const data = await response.json();
+                const forecastPoints = [];
+                forecastPoints.push({ x: datetime, y: prediction });
+                if (rolling_forecast && rolling_forecast_dates) {
+                    for (let i = 0; i < rolling_forecast.length; i++) {
+                        forecastPoints.push({ x: rolling_forecast_dates[i], y: rolling_forecast[i] });
+                    }
+                }
+                chart.data.datasets[2].data = forecastPoints;
 
-                // Hauptstatus aktualisieren
-                pipelineStatusEl.textContent = data.status.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
-                statusIndicatorMainEl.className = `w-8 h-8 rounded-full ${statusColors[data.status] || 'bg-gray-400'}`;
+                const maxDataPoints = 100;
+                if (chart.data.labels.length > maxDataPoints) {
+                    chart.data.labels.shift();
+                    chart.data.datasets[0].data.shift();
+                    chart.data.datasets[1].data.shift();
+                }
+                chart.update('none');
+            }
 
-                // Retraining-Status aktualisieren
-                const retrainInfo = retrainingClasses[data.retraining_status] || retrainingClasses.idle;
-                retrainingStatusEl.textContent = retrainInfo.text;
-                retrainingDotEl.className = `status-dot ${retrainInfo.dot} mr-3`;
-                
-                // Fortschritt aktualisieren
-                const totalCycles = 5; // Replace with actual value or fetch dynamically
-                const stepsPerCycle = 100; // Replace with actual value or fetch dynamically
-                progressTextEl.textContent = `Zyklus ${data.cycle_count} / ${totalCycles} | Schritt ${data.steps_in_cycle} / ${stepsPerCycle}`;
-                
-                const progressPercentage = (data.steps_in_cycle / stepsPerCycle) * 100;
-                progressBarEl.style.width = `${progressPercentage}%`;
+            async function fetchApi(endpoint, options = {}) {
+                try {
+                    const response = await fetch(endpoint, options);
+                    return response.json();
+                } catch (error) {
+                    console.error(`API Fehler bei ${endpoint}:`, error);
+                    dom.statusText.textContent = 'Verbindung zum Server verloren.';
+                }
+            }
+            
+            function updateUI(state) {
+                dom.statusText.textContent = statusMapping[state.status] || "Unbekannter Status";
+                const retrainInfo = retrainingMapping[state.retraining_status] || retrainingMapping.idle;
+                dom.retrainingStatus.textContent = retrainInfo.text;
+                dom.retrainingDot.className = `status-dot ${retrainInfo.color}`;
+                dom.retrainingDot.classList.toggle('pulse', retrainInfo.pulse);
 
+                const progressText = `Zyklus ${state.cycle_count}/${state.total_cycles} | Schritt ${state.steps_in_cycle}/${state.total_steps}`;
+                dom.progressText.textContent = progressText;
+                const progressPercentage = state.total_steps > 0 ? (state.steps_in_cycle / state.total_steps) * 100 : 0;
+                dom.progressBar.style.width = `${progressPercentage}%`;
 
-                if (data.status === 'error') {
-                    errorMessageEl.textContent = data.error_message;
-                    errorBannerEl.classList.remove('hidden');
+                dom.pauseResumeButton.disabled = state.status !== 'inference_running' || state.is_finished;
+                if (state.is_paused) {
+                    dom.pauseResumeButton.textContent = 'Fortsetzen';
+                    dom.pauseResumeButton.classList.replace('bg-yellow-500', 'bg-green-600');
+                    dom.pauseResumeButton.classList.replace('hover:bg-yellow-600', 'hover:bg-green-700');
                 } else {
-                    errorBannerEl.classList.add('hidden');
+                    dom.pauseResumeButton.textContent = 'Pause';
+                    dom.pauseResumeButton.classList.replace('bg-green-600', 'bg-yellow-500');
+                    dom.pauseResumeButton.classList.replace('hover:bg-green-700', 'hover:bg-yellow-600');
                 }
-
-            } catch (error) {
-                console.error('Fehler beim Abrufen des Status:', error);
-                pipelineStatusEl.textContent = 'Verbindung verloren';
-                statusIndicatorMainEl.className = 'w-8 h-8 bg-red-500 rounded-full';
             }
-        }
 
-        let lastDataTimestamp = null;
-        async function fetchData() {
-            try {
-                const response = await fetch('/api/data');
-                const result = await response.json();
+            async function pollStatus() {
+                const state = await fetchApi('/api/status');
+                if (state) updateUI(state);
+            }
 
-                if (result.status === 'success' && result.data.datetime !== lastDataTimestamp) {
-                    lastDataTimestamp = result.data.datetime;
-                    addDataToChart(result.data.datetime, result.data.true_value, result.data.prediction);
+            async function pollData() {
+                const state = await fetchApi('/api/status');
+                if (state && !state.is_paused && !state.is_finished) {
+                    const result = await fetchApi('/api/data');
+                    if (result && result.status === 'success' && result.data.datetime !== lastDataTimestamp) {
+                        lastDataTimestamp = result.data.datetime;
+                        addDataToChart(result.data);
+                        dom.cpuLoad.textContent = `${result.data.cpu_load.toFixed(1)} %`;
+                        dom.inferenceTime.textContent = `${result.data.inference_time_ms.toFixed(2)} ms`;
+                    }
                 }
-            } catch (error) {
-                console.error('Fehler beim Abrufen der Daten:', error);
             }
-        }
 
-        // --- Interval Timers ---
-        setInterval(fetchStatus, 1000); // Status jede Sekunde abrufen
-        setInterval(fetchData, 1000); // Replace with actual interval or fetch dynamically
-        
-        // Initialer Aufruf
-        fetchStatus();
-        fetchData();
+            async function sendControl(action) {
+                await fetchApi('/api/control', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ action })
+                });
+                pollStatus();
+            }
+
+            dom.pauseResumeButton.addEventListener('click', () => {
+                const action = dom.pauseResumeButton.textContent === 'Pause' ? 'pause' : 'resume';
+                sendControl(action);
+            });
+            dom.resetButton.addEventListener('click', () => window.location.reload());
+
+            initializeChart();
+            setInterval(pollStatus, 1000);
+            setInterval(pollData, 1000);
+        });
     </script>
 </body>
 </html>
