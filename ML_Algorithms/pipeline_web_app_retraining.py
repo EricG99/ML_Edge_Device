@@ -49,7 +49,7 @@ shared_resource_lock = threading.Lock()
 # --- Globale Objekte für das Modell und die Daten ---
 shared_model = { "model": None, "scaler": None, "features": None, "config": None }
 inference_processor = None
-retraining_data_buffer = pd.DataFrame()
+retraining_data_list = [] 
 all_predictions = []
 
 
@@ -145,8 +145,8 @@ def run_rolling_forecast(model, scaler, start_window, config, feature_list):
 
 def inference_and_retraining_manager(config: dict):
     """Haupt-Controller für Inferenz, Datensammlung und Retraining."""
-    global inference_processor, retraining_data_buffer, all_predictions
-    
+    global inference_processor, all_predictions, retraining_data_list
+        
     while PIPELINE_STATE["status"] == "initializing":
         time.sleep(1)
         
@@ -228,10 +228,8 @@ def inference_and_retraining_manager(config: dict):
                 }
                 all_predictions.append(prediction_entry)
                 
-                new_row = pd.DataFrame([inference_processor.latest_payload])
-                new_row['datetime'] = pd.to_datetime(new_row['datetime'])
-                new_row = new_row.set_index('datetime')
-                retraining_data_buffer = pd.concat([retraining_data_buffer, new_row])
+                retraining_data_list.append(inference_processor.latest_payload)
+
 
             inference_processor.latest_payload = None
 
@@ -246,9 +244,13 @@ def inference_and_retraining_manager(config: dict):
                 shared_model["model"], deepcopy(shared_model["scaler"]), 
                 shared_model["features"][:], deepcopy(shared_model["config"])
             )
-        retraining_thread = threading.Thread(target=retraining_thread_task, args=(model_copy, scaler_copy, features_copy, retraining_data_buffer.copy(), config_copy), name=f"RetrainingThread-{cycle+1}")
-        retraining_thread.start()
-        retraining_data_buffer = pd.DataFrame()
+            retraining_data_buffer = pd.DataFrame(retraining_data_list)
+            retraining_data_buffer['datetime'] = pd.to_datetime(retraining_data_buffer['datetime'])
+            retraining_data_buffer = retraining_data_buffer.set_index('datetime')
+
+            retraining_thread = threading.Thread(target=retraining_thread_task, args=(model_copy, scaler_copy, features_copy, retraining_data_buffer.copy(), config_copy), name=f"RetrainingThread-{cycle+1}")
+            retraining_thread.start()
+            retraining_data_list = [] # Reset der Liste
 
     if 'retraining_thread' in locals() and retraining_thread.is_alive():
         retraining_thread.join()

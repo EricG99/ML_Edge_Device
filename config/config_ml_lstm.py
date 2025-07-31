@@ -83,14 +83,14 @@ param_lstm_test = {
 
     
     # Training
-    "epochs": 50,
+    "epochs":  1,
     "batch_size": 32,
     "validation_fraction": 0.2,
     "early_stopping_patience": 10,
     "loss": "huber",    
     # Zeitreihenparameter
-    "lags": 6,
-    "horizon": 5,
+    "lags": 5,
+    "horizon": 1,
     "train_fraction": 0.7,
     "rolling_window_size": 6,
 
