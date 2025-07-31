@@ -37,10 +37,14 @@
                 <p class="text-sm text-gray-400">CPU Last</p>
                 <p id="cpu-load" class="text-2xl font-semibold">- %</p>
             </div>
-            <div class="bg-gray-700/50 p-4 rounded-lg">
-                <p class="text-sm text-gray-400">Inferenzzeit</p>
-                <p id="inference-time" class="text-2xl font-semibold">- ms</p>
+            
+            <div class="bg-gray-700/50 p-4 rounded-lg flex flex-col justify-center">
+                <p class="text-sm text-gray-400">Gesamt- / Inferenzzeit</p>
+                <p class="text-xl font-semibold mt-1">
+                    <span id="total-time-val">-</span> / <span id="inference-time-val">-</span> ms
+                </p>
             </div>
+
             <div class="bg-gray-700/50 p-4 rounded-lg">
                 <p class="text-sm text-gray-400">Retraining</p>
                 <div class="flex items-center justify-center space-x-2 mt-2">
@@ -70,10 +74,12 @@
 
     <script>
         document.addEventListener('DOMContentLoaded', () => {
+            // GEÄNDERT: DOM-Elemente an die neue Struktur angepasst
             const dom = {
                 statusText: document.getElementById('status-text'),
                 cpuLoad: document.getElementById('cpu-load'),
-                inferenceTime: document.getElementById('inference-time'),
+                totalTimeVal: document.getElementById('total-time-val'),
+                inferenceTimeVal: document.getElementById('inference-time-val'),
                 retrainingStatus: document.getElementById('retraining-status'),
                 retrainingDot: document.getElementById('retraining-dot'),
                 progressText: document.getElementById('progress-text'),
@@ -85,6 +91,8 @@
 
             let chart;
             let lastDataTimestamp = null;
+            
+            // Die Konstanten für HORIZON, statusMapping und retrainingMapping bleiben unverändert.
             const HORIZON = {{ config.get("horizon", 1) }};
 
             const statusMapping = {
@@ -193,7 +201,10 @@
                         lastDataTimestamp = result.data.datetime;
                         addDataToChart(result.data);
                         dom.cpuLoad.textContent = `${result.data.cpu_load.toFixed(1)} %`;
-                        dom.inferenceTime.textContent = `${result.data.inference_time_ms.toFixed(2)} ms`;
+                        
+                        // GEÄNDERT: Neue DOM-Elemente für die Zeitmessung aktualisieren
+                        dom.totalTimeVal.textContent = result.data.total_processing_time_ms.toFixed(2);
+                        dom.inferenceTimeVal.textContent = result.data.model_inference_time_ms.toFixed(2);
                     }
                 }
             }
