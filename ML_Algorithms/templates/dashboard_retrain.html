@@ -21,7 +21,7 @@
 </head>
 <body class="bg-gray-900 text-gray-200 flex flex-col items-center justify-center min-h-screen p-4">
 
-    <div class="w-full max-w-6xl bg-gray-800 rounded-2xl shadow-2xl p-6 md:p-8 space-y-6 border border-gray-700">
+    <div class="w-full max-w-8xl bg-gray-800 rounded-2xl shadow-2xl p-6 md:p-8 space-y-6 border border-gray-700">
         
         <header class="text-center">
             <h1 class="text-3xl md:text-4xl font-bold text-white">LSTM Retraining Pipeline</h1>
@@ -74,7 +74,6 @@
 
     <script>
         document.addEventListener('DOMContentLoaded', () => {
-            // GEÄNDERT: DOM-Elemente an die neue Struktur angepasst
             const dom = {
                 statusText: document.getElementById('status-text'),
                 cpuLoad: document.getElementById('cpu-load'),
@@ -92,7 +91,6 @@
             let chart;
             let lastDataTimestamp = null;
             
-            // Die Konstanten für HORIZON, statusMapping und retrainingMapping bleiben unverändert.
             const HORIZON = {{ config.get("horizon", 1) }};
 
             const statusMapping = {
@@ -132,12 +130,15 @@
             
             function addDataToChart(dataPoint) {
                 const { datetime, true_value, prediction, rolling_forecast, rolling_forecast_dates } = dataPoint;
+                
+                // Neuen Datenpunkt zu den Datensätzen hinzufügen
                 chart.data.labels.push(datetime);
                 chart.data.datasets[0].data.push(true_value);
                 chart.data.datasets[1].data.push(prediction);
 
+                // Zukunftsprognose aktualisieren
                 const forecastPoints = [];
-                forecastPoints.push({ x: datetime, y: prediction });
+                forecastPoints.push({ x: datetime, y: prediction }); // Startpunkt der Prognose
                 if (rolling_forecast && rolling_forecast_dates) {
                     for (let i = 0; i < rolling_forecast.length; i++) {
                         forecastPoints.push({ x: rolling_forecast_dates[i], y: rolling_forecast[i] });
@@ -145,12 +146,19 @@
                 }
                 chart.data.datasets[2].data = forecastPoints;
 
-                const maxDataPoints = 100;
-                if (chart.data.labels.length > maxDataPoints) {
+                // GEÄNDERT: Maximale Anzahl der sichtbaren Datenpunkte auf 20 setzen
+                const MAX_DATA_POINTS = 20;
+
+                // WICHTIG: Diese Logik sorgt für den Aufbau und das anschließende "Sliding Window"
+                // Solange weniger als 20 Punkte da sind, wird der Graph nur aufgebaut.
+                // Sobald der 21. Punkt kommt, wird der erste (.shift()) entfernt.
+                if (chart.data.labels.length > MAX_DATA_POINTS) {
                     chart.data.labels.shift();
                     chart.data.datasets[0].data.shift();
                     chart.data.datasets[1].data.shift();
                 }
+
+                // Chart ohne Animation aktualisieren für eine flüssige Darstellung
                 chart.update('none');
             }
 
@@ -201,8 +209,6 @@
                         lastDataTimestamp = result.data.datetime;
                         addDataToChart(result.data);
                         dom.cpuLoad.textContent = `${result.data.cpu_load.toFixed(1)} %`;
-                        
-                        // GEÄNDERT: Neue DOM-Elemente für die Zeitmessung aktualisieren
                         dom.totalTimeVal.textContent = result.data.total_processing_time_ms.toFixed(2);
                         dom.inferenceTimeVal.textContent = result.data.model_inference_time_ms.toFixed(2);
                     }
