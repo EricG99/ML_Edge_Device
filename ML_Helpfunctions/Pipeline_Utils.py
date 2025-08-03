@@ -10,6 +10,7 @@ import json
 import logging
 import traceback
 from pathlib import Path
+import socket
 
 import psutil
 import time
@@ -100,6 +101,20 @@ def create_timeseries_validation_split(X_train, y_train, config):
         # Wenn keine Validierung stattfinden soll, gib die Originaldaten und None zurück.
         print("Kein Validierungs-Split durchgeführt.")
         return X_train, y_train, None, None
+    
+def get_local_ip():
+    """Ermittelt die lokale IP-Adresse des Geräts, um den Zugriffslink anzuzeigen."""
+    s = None
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip_address = s.getsockname()[0]
+    except Exception:
+        ip_address = "127.0.0.1"
+    finally:
+        if s:
+            s.close()
+    return ip_address
 
 def safe_inverse_transform(scaler, array, target_index=0):
     """
