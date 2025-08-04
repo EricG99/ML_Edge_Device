@@ -95,7 +95,7 @@ param_lstm_test = {
     "rolling_window_size": 6,
 
     # Features
-    "base_features": ['Group4-2_S6_MassFlowRate'],
+    "base_features": ['group4-2_s6_massflowrate'],
     "time_features": [],
     "include_roll_mean": True,
     "include_roll_std": True,

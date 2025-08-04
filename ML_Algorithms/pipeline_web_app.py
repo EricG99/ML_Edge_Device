@@ -1,3 +1,11 @@
+#python pipeline_web_app.py --retraining --algorithm random_forest
+#python pipeline_web_app.py --retraining --algorithm lstm
+#python pipeline_web_app.py --no-retraining --algorithm random_forest
+#python pipeline_web_app.py --no-retraining --algorithm lstm
+#python pipeline_web_app.py --no-retraining --algorithm random_forest --load_id <IHRE_RUN_ID>
+#python pipeline_web_app.py --no-retraining --algorithm lstm --load_id <IHRE_RUN_ID>
+
+
 import time
 import logging
 import argparse
@@ -139,12 +147,8 @@ def initial_training(config: dict, trainer_class, folder_flag: str):
     logging.info(f"--- PHASE 1: Initiales Training für {folder_flag} startet ---")
     trainer = trainer_class(config=config, folder_flag=folder_flag)
     
-    # Wichtig für RF: Das Laden der initialen Daten, um sie für das Nachtraining zu behalten
-    # Wir nehmen an, dass der Trainer eine Pipeline hat, die die Daten lädt
+    # Lade die initialen Daten, um sie für das spätere Nachtraining zu behalten
     pipeline = trainer._setup_pipeline()
-    
-    # KORREKTUR: Die Methode benötigt den 'mode'-Parameter und gibt ein Tupel zurück.
-    # Wir benötigen nur den ersten Teil (die Trainingsdaten) des Tupels.
     initial_data_df, _ = pipeline._load_data(mode='train')
 
     model, scaler, features = trainer.run(save_artifacts=False)
@@ -210,15 +214,16 @@ def retraining_thread_task(retraining_data_df: pd.DataFrame, algorithm: str):
             # Erstelle einen temporären Trainer, um die `run`-Logik wiederzuverwenden
             temp_trainer = RandomForestTrainer(config=config, folder_flag="RF_retrain")
             
-            # Rufe die `run`-Methode des Trainers auf, aber mit den kombinierten Daten im Speicher
-            # HINWEIS: Dies erfordert, dass die `run`-Methode des Trainers optional ein DataFrame akzeptiert.
-            # Da wir die Trainer-Klassen nicht ändern können, speichern wir eine temporäre Datei.
+            # Speichere die kombinierten Daten in einer temporären Datei.
+            # Der Trainer wird so konfiguriert, dass er diese Datei liest.
             temp_csv_path = os.path.join(config['paths']['Experiment_Runs'], "temp_retraining_data.csv")
             combined_data.to_csv(temp_csv_path)
             
-            # Konfiguration anpassen, um die temporäre Datei zu verwenden
+            # Konfiguration anpassen, um die temporäre Datei als einzige Datenquelle zu verwenden
             temp_trainer.config['dataset'] = os.path.basename(temp_csv_path)
             temp_trainer.config['paths']['Datasets'] = os.path.dirname(temp_csv_path)
+            # WICHTIG: Stelle sicher, dass der gesamte Datensatz für das Training verwendet wird
+            temp_trainer.config['train_fraction'] = 1.0 
 
             logging.info(f"RETRAINING THREAD (RF): Trainiere neues Modell mit {len(combined_data)} Datenpunkten.")
             new_model, new_scaler, new_features = temp_trainer.run(save_artifacts=False)
@@ -310,8 +315,18 @@ def inference_and_retraining_manager(config: dict, inference_class, folder_flag:
                     prediction_unscaled = PipelineUtils.safe_inverse_transform(
                         scaler=inference_processor.scaler, array=prediction_scaled.reshape(1, -1), target_index=target_index
                     ).flatten()[0]
-                else: # RF
-                    prediction_unscaled = inference_processor.scaler.inverse_transform(prediction_scaled.reshape(1, -1))[0,0]
+                elif algorithm == "rf":
+                    try:
+                        target_index = inference_processor.feature_list.index(inference_processor.target_feature)
+                    except (ValueError, AttributeError):
+                        # Fallback to 0 if feature list is not available or target not found
+                        target_index = 0
+
+                    prediction_unscaled = PipelineUtils.safe_inverse_transform(
+                        scaler=inference_processor.scaler, 
+                        array=prediction_scaled.reshape(1, -1), 
+                        target_index=target_index
+                    ).flatten()[0]
 
 
                 rolling_preds = run_rolling_forecast(
@@ -343,8 +358,13 @@ def inference_and_retraining_manager(config: dict, inference_class, folder_flag:
 
         logging.info(f"--- Zyklus {cycle + 1}: Datensammlung abgeschlossen. Starte Nachtraining. ---")
         retraining_data_buffer = pd.DataFrame(retraining_data_list)
+
+        # NEU: Auch hier die Spaltennamen standardisieren, um den KeyError zu beheben
+        retraining_data_buffer.columns = retraining_data_buffer.columns.str.lower()
+        
         retraining_data_buffer['datetime'] = pd.to_datetime(retraining_data_buffer['datetime'])
         retraining_data_buffer = retraining_data_buffer.set_index('datetime')
+
         
         retraining_thread = threading.Thread(target=retraining_thread_task, args=(retraining_data_buffer.copy(), algorithm), name=f"RetrainingThread-{cycle+1}")
         retraining_thread.start()
@@ -402,29 +422,36 @@ def main():
     if args.model_filename:
         config['model_filename'] = args.model_filename
 
-    # --- Starte den entsprechenden Pipeline-Flow ---
-    if args.retraining:
+    if args.load_id:
+        # FALL 1: Eine load_id wurde übergeben -> Reiner Inferenz-Modus mit geladenem Modell
+        logging.info(f"--- MODUS: Inferenz mit geladenem Modell (ID: {args.load_id}) ---")
+        config['inference_steps'] = config.get('inference_steps', 500)
+        # Das Laden der Artefakte wird in einem eigenen Thread gestartet
+        threading.Thread(target=prepare_standard_inference, args=(config, args.algorithm), daemon=True).start()
+        port = 5001
+
+    else:
+        # FALL 2: Keine load_id übergeben -> Standardmodus mit initialem Training und anschließendem Retraining
+        logging.info("--- MODUS: Initiales Training & Retraining ---")
         if args.algorithm == 'lstm':
-             config['inference_cycle_sec'] = config.get('inference_cycle_sec', 1.0)
+                config['inference_cycle_sec'] = config.get('inference_cycle_sec', 1.0)
         else: # RF training is slower
-             config['inference_cycle_sec'] = config.get('inference_cycle_sec', 2.0)
+                config['inference_cycle_sec'] = config.get('inference_cycle_sec', 2.0)
         
-        logging.info("--- MODUS: Retraining aktiviert ---")
-        # Setup temp folder for retraining artifacts if needed
+        # Setup der Ordner für die Trainingsläufe
         _, paths = PipelineUtils.setup_experiment(config, f"{folder_flag}_retrain", run_type='train')
         config['paths'] = paths
 
+        # Starte das initiale Training und den Manager für die Inferenz/Retraining-Zyklen
         threading.Thread(target=initial_training, args=(config, trainer_class, folder_flag), name="InitialTrainingThread", daemon=True).start()
         threading.Thread(target=inference_and_retraining_manager, args=(config, inference_class, folder_flag, args.algorithm), name="ManagerThread", daemon=True).start()
         port = 5002
-    else:
-        logging.info(f"--- MODUS: Standard-Inferenz ---")
-        config['inference_steps'] = config.get('inference_steps', 100)
-        threading.Thread(target=prepare_standard_inference, args=(config, args.algorithm), daemon=True).start()
-        port = 5001
-        
+
     # --- Flask-App erstellen und konfigurieren ---
+    # (Der Rest der main-Funktion ab hier bleibt unverändert)
     template_folder = os.path.join(project_root, 'ML_Algorithms', 'templates')
+    app = Flask(__name__, template_folder=template_folder)
+        
     app = Flask(__name__, template_folder=template_folder)
 
     @app.route('/')

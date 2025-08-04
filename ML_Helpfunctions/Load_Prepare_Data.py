@@ -104,17 +104,21 @@ def _load_full_timeseries(config: dict,
                           make_date_as_index: bool = True) -> pd.DataFrame:
     file_path = _get_file_path(config)
     df = pd.read_csv(file_path, sep=",")
+    df.columns = df.columns.str.lower()
     
-    if "datetime" not in df.columns:
-        raise ValueError(f"Die CSV-Datei '{file_path}' muss eine 'datetime'-Spalte enthalten.")
-        
-    df["datetime"] = pd.to_datetime(df["datetime"], format='mixed')
+
+    # anstelle der fehleranfälligen 'datetime'-String-Spalte.
+    if "time" not in df.columns:
+        raise ValueError(f"Die CSV-Datei '{file_path}' muss eine 'time'-Spalte mit Unix-Timestamps enthalten.")
+    
+    # Wandle den Unix-Timestamp in ein Datetime-Objekt um und weise es der 'datetime'-Spalte zu.
+    df["datetime"] = pd.to_datetime(df["time"], unit='ms')
+    
     df = df.sort_values("datetime")
 
-    # WICHTIG: 'idx' ist eine pandas Series. Wir greifen über .dt zu.
+    # Der restliche Code, der Zeit-Features aus der 'datetime'-Spalte extrahiert,
+    # kann nun unverändert bleiben, da die Spalte jetzt korrekte Werte enthält.
     idx = df["datetime"]
-
-    # KORREKTUR: Verwende den .dt Accessor für alle Zeit-Features
     df["millisecond"] = idx.dt.microsecond // 1000
     df["second"] = idx.dt.second
     df["minute"] = idx.dt.minute
@@ -125,13 +129,11 @@ def _load_full_timeseries(config: dict,
     df["month"] = idx.dt.month
     df["year"] = idx.dt.year
 
-    # Setze den Index erst am Ende, wenn es verlangt wird
     if make_date_as_index:
         df = df.set_index("datetime")
     
     print(f"Geladen: {len(df)} Zeilen aus '{file_path}' mit Zeitfeatures")
     return df
-
 
 # ---------------------------------------------------
 # TRAIN / TEST SPLIT NACH FRAKTION

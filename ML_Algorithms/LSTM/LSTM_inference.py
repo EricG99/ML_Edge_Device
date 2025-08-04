@@ -72,7 +72,9 @@ class LSTMInference(BaseInferenceProcessor):
         
         # Metadaten für das Logging und die Speicherung extrahieren
         timestamp = window_df.index[-1]
-        true_value = self.latest_payload.get(self.target_feature)
+        # Standardisiere die Schlüssel des rohen Payloads, um den true_value sicher zu finden
+        payload_lower = {k.lower(): v for k, v in self.latest_payload.items()}
+        true_value = payload_lower.get(self.target_feature)
         
         return inference_window, timestamp, true_value
 

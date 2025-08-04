@@ -19,25 +19,22 @@ class RealTimeDataProcessor:
     def __init__(self, config: dict):
         """
         Initialisiert den Prozessor.
-
-        Args:
-            config (dict): Das Konfigurationswörterbuch, das die Parameter für die
-                           Datenverarbeitung enthält (z.B. Lags, Fenstergrößen für Features).
         """
         self.config = config
         self._buffer = pd.DataFrame()
 
-        # Berechnet die maximal notwendige Größe des Puffers.
-        # Diese Größe ist entscheidend, um alle rollierenden Features korrekt berechnen zu können.
-        self._max_buffer_size = self.config.get('max_fe_window', 50) + self.config.get('lags', 10)
-        
-        # Die minimal benötigte Anzahl an Datenpunkten, bevor eine gültige Feature-Berechnung
-        # und Inferenz möglich ist.
-        self._min_data_points = self.config.get('lags', 10)
+        # KORREKTUR: Bestimme die wahre minimale Anzahl an Datenpunkten, die für alle Features benötigt wird.
+        # Dies ist das Maximum aus der Lag-Anzahl und der Fenstergröße für rollierende Features.
+        min_for_lags = self.config.get('lags', 1)
+        min_for_rolling_features = self.config.get('rolling_window_size', 1)
+        self._min_data_points = max(min_for_lags, min_for_rolling_features)
 
+        # Die Puffergröße muss groß genug sein für die minimalen Datenpunkte und die Lags für das LSTM.
+        self._max_buffer_size = self.config.get('max_fe_window', 50) + self.config.get('lags', 1)
+        
         logging.info(
             f"RealTimeDataProcessor initialisiert. "
-            f"Puffergröße: {self._max_buffer_size}, "
+            f"Maximale Puffergröße: {self._max_buffer_size}, "
             f"Minimale Datenpunkte für Start: {self._min_data_points}"
         )
 
@@ -50,7 +47,7 @@ class RealTimeDataProcessor:
 
         Returns:
             pd.DataFrame | None: Ein DataFrame mit den neu berechneten Features, wenn genügend
-                                 Daten vorhanden sind. Andernfalls None.
+            Daten vorhanden sind. Andernfalls None.
         """
         if not isinstance(new_data_point, dict):
             logging.warning("Ungültiger Datenpunkt empfangen. Erwartet wurde ein Dictionary.")
@@ -59,6 +56,10 @@ class RealTimeDataProcessor:
         # 1. Neuen Datenpunkt in einen DataFrame umwandeln und an den Puffer anhängen
         try:
             new_row = pd.DataFrame([new_data_point])
+            # NEU: Alle Spaltennamen auf Kleinbuchstaben standardisieren
+            new_row.columns = new_row.columns.str.lower()
+            
+            # Jetzt kann sicher auf 'datetime' zugegriffen werden
             new_row['datetime'] = pd.to_datetime(new_row['datetime'])
             new_row = new_row.set_index('datetime')
         except KeyError:

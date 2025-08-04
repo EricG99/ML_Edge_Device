@@ -76,26 +76,35 @@ def add_lag_features(df: pd.DataFrame, config: dict) -> tuple[pd.DataFrame, dict
 
 def add_rolling_features(df: pd.DataFrame, config: dict) -> tuple[pd.DataFrame, dict]:
     base_features = config["base_features"]
-    window_size = config["rolling_window_size"]
-    include_roll_mean = config["include_roll_mean"]
-    include_roll_std = config["include_roll_std"]
+    window_size = config.get("rolling_window_size", 1)
+    include_roll_mean = config.get("include_roll_mean", False)
+    include_roll_std = config.get("include_roll_std", False)
 
     feature_dict = {"rolling": []}
 
     for feature in base_features:
         if include_roll_mean:
             mean_name = f'{feature}_roll_mean_{window_size}'
-            df[mean_name] = df[feature].rolling(window=window_size).mean().shift(1)
+            df[mean_name] = df[feature].rolling(window=window_size).mean() # OHNE .shift(1)
             feature_dict["rolling"].append(mean_name)
+
         if include_roll_std:
-            std_name = f'{feature}_roll_std_{window_size}'
-            df[std_name] = df[feature].rolling(window=window_size).std().shift(1)
-            feature_dict["rolling"].append(std_name)
+            if window_size >= 2:
+                std_name = f'{feature}_roll_std_{window_size}'
+                df[std_name] = df[feature].rolling(window=window_size).std() # OHNE .shift(1)
+                feature_dict["rolling"].append(std_name)
+            else:
+                print(f"[WARNUNG] 'rolling_window_size' ist {window_size}. "
+                      f"Rollierende Standardabweichung wird übersprungen, da Fenstergröße >= 2 sein muss.")
 
     return df, feature_dict
 
 
 def add_all_features(df: pd.DataFrame, config: dict) -> tuple[pd.DataFrame, dict]:
+    """
+    Führt alle Schritte des Feature Engineerings aus.
+    MODIFIZIERTE DEBUG-VERSION.
+    """
     feature_dict = {
         "base": config["base_features"].copy(),
         "lagged": [],
@@ -103,20 +112,24 @@ def add_all_features(df: pd.DataFrame, config: dict) -> tuple[pd.DataFrame, dict
         "time": [],
     }
 
-    # Zeit-Features
+    # Schritt 1: Zeit-Features (falls konfiguriert)
     df, time_dict = add_time_features(df, config)
     feature_dict["time"] = time_dict["time"]
 
-    # Lag-Features
+    # Schritt 2: Lag-Features
     df, lag_dict = add_lag_features(df, config)
     feature_dict["lagged"] = lag_dict["lagged"]
 
-    # Rolling-Features
+    # Schritt 3: Rolling-Features
     df, roll_dict = add_rolling_features(df, config)
     feature_dict["rolling"] = roll_dict["rolling"]
 
-    # Entferne Zeilen mit NaNs (durch shift/rolling)
-    df = df.dropna()
+    # --- WICHTIGER DEBUG-SCHRITT ---
+    # Wir kommentieren den dropna()-Befehl aus, um zu sehen, ob die Daten
+    # mit NaN-Werten an die nächste Funktion weitergegeben werden.
+    # df = df.dropna()
+    # --- ENDE DEBUG-SCHRITT ---
+
 
     # Alle Features zusammenführen
     all_features = (
@@ -126,6 +139,10 @@ def add_all_features(df: pd.DataFrame, config: dict) -> tuple[pd.DataFrame, dict
         + feature_dict["time"]
     )
     feature_dict["all"] = all_features
+
+    # Debug-Ausgabe, um den Zustand des DataFrames zu prüfen
+    print(f"[DEBUG in add_all_features] DataFrame hat {len(df)} Zeilen VOR dem Verlassen der Funktion.")
+    print(f"[DEBUG in add_all_features] Anzahl der NaN-Werte pro Spalte:\n{df.isnull().sum()}")
 
     return df, feature_dict
 
