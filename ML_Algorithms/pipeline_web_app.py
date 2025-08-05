@@ -366,7 +366,9 @@ def inference_manager(config: dict, inference_class, folder_flag: str, algorithm
             if prediction_dir and os.path.isdir(os.path.dirname(prediction_dir)):
                 # Sicherstellen, dass das Zielverzeichnis existiert
                 os.makedirs(prediction_dir, exist_ok=True)
-                final_pred_path = os.path.join(prediction_dir, f"final_predictions_{run_id}.csv")
+# Erstellt einen Zeitstempel im Format YYYY-MM-DD_HHMMSS
+                timestamp_str = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+                final_pred_path = os.path.join(prediction_dir, f"{timestamp_str}__{run_id}.csv")
                 pd.DataFrame(all_predictions).to_csv(final_pred_path, index=False)
                 logging.info(f"Finale Vorhersagen gespeichert unter: {final_pred_path}")
             else:
@@ -439,6 +441,8 @@ if __name__ == "__main__":
     parser.add_argument('--retraining', action=argparse.BooleanOptionalAction, default=False, help="Aktiviert den Retraining-Modus.")
     parser.add_argument('--algorithm', type=str, default='lstm', choices=['random_forest', 'lstm'], help="Zu verwendender Algorithmus.")
     parser.add_argument("--load_id", type=str, help="Optionale Run ID zum Laden von Artefakten anstelle von Training.")
+    parser.add_argument("--model_filename", type=str, help="Optional: Name der zu ladenden Modelldatei (z.B. 'quantized_model.tflite').")
+
     args = parser.parse_args()
 
     # Konfiguration basierend auf Algorithmus laden
@@ -462,31 +466,56 @@ if __name__ == "__main__":
     config.update(CONFIG_LOAD_ARTIFACTS)
     config.update(MQTT_CONFIG)
     config['paths'] = CONFIG_PATH['paths']
-    if args.load_id: config['load_id'] = args.load_id
 
     # Modus bestimmen
     mode = "retraining" if args.retraining else "no_retraining"
     port = 5002 if mode == "retraining" else 5001
     
     log_msg = f"--- MODUS: {mode.replace('_', ' ')} | ALGORITHMUS: {args.algorithm} ---"
-    if args.load_id:
-        log_msg += f" | Lade Modell von Run ID: {args.load_id}"
-    logging.info(log_msg)
 
-    # Initialisierungsthread starten (entweder Training oder Laden)
+    if args.model_filename:
+        config['model_filename'] = args.model_filename
+
     if args.load_id:
-        # Wenn eine ID gegeben ist, wird nicht trainiert.
-        PIPELINE_STATE["status"] = "ready_for_inference"
+        config['load_id'] = args.load_id
+        config['run_id'] = args.load_id  # Wichtig für die Benennung der finalen Datei
+        log_msg += f" | Lade Modell von Run ID: {args.load_id}"
+
+        # Wir müssen das 'paths'-Dictionary manuell mit den vollständigen, versionierten
+        # Pfaden des zu ladenden Laufs aktualisieren, damit das Speichern am Ende funktioniert.
+        logging.info(f"Konfiguriere Pfade für das Laden von Run ID: {args.load_id}...")
+        
+        base_output_path = config['paths'].get('output')
+        run_dir = os.path.join(base_output_path, folder_flag, args.load_id)
+
+        # Das 'paths'-Dictionary mit den spezifischen Unterordnern aktualisieren.
+        # Dies spiegelt die Struktur wider, die setup_experiment() beim Training erstellt.
+        config['paths'].update({
+            "run_dir": run_dir,
+            "Models": os.path.join(run_dir, "Models"),
+            "Scalers": os.path.join(run_dir, "Scalers"),
+            "Prediction_Data": os.path.join(run_dir, "Prediction_Data"),
+            "Error_Metrics": os.path.join(run_dir, "Error_Metrics")
+        })
+        logging.info(f"Speicherpfad für Vorhersagen gesetzt auf: {config['paths']['Prediction_Data']}")
+
     else:
-        # === KORREKTUR HIER ===
-        # Der Experiment-Name ist jetzt nur noch der Algorithmus-Name.
+        # Dieser Pfad wird nur beim Training ausgeführt
         exp_name = folder_flag 
         _, paths = PipelineUtils.setup_experiment(config, exp_name, run_type='train')
         config['paths'] = paths
+    
+    logging.info(log_msg)
+
+    # Initialisierungsthread starten (nur wenn NICHT geladen wird)
+    if not args.load_id:
         threading.Thread(
             target=initial_training, args=(config, trainer_class, folder_flag),
             name="InitialTrainingThread", daemon=True
         ).start()
+    else:
+        # Wenn wir laden, ist das Modell sofort bereit für die Inferenz
+        PIPELINE_STATE["status"] = "ready_for_inference"
 
     # Inferenz-Manager-Thread starten
     threading.Thread(

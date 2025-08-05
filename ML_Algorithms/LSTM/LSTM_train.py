@@ -57,37 +57,39 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     # --- Lade die Konfigurationen ---
-    # 1. Importiere die allgemeine Basiskonfiguration (enthält die korrekten Pfade)
     from config.config_general import CONFIG_PATH
-    # 2. Importiere die modellspezifischen LSTM-Parameter
     from config.config_ml_lstm import param_lstm_test
 
     logging.info("Merging general and model-specific configurations...")
-
-    # --- Intelligente Verschmelzung der Konfigurationen ---
-    # Starte mit einer Kopie der modellspezifischen Parameter
     training_config = param_lstm_test.copy()
+    
+    # Die Basis-Pfade aus der allgemeinen Konfiguration holen
+    training_config["paths"] = CONFIG_PATH.get("paths", {})
+    
+    # WICHTIG: Setze die Strategie für das Laden der Trainingsdaten
+    # Dies ist für die DataPipeline3D entscheidend
+    training_config["loading_strategy"] = "split" 
 
-    # Hole die allgemeinen Pfade und die spezifischen Pfade
-    general_paths = CONFIG_PATH.get("paths", {})
-    model_specific_paths = training_config.get("paths", {})
+    # ==============================================================================
+    # === ENTSCHEIDENDE KORREKTUR: Experiment-Setup explizit aufrufen ===
+    # ==============================================================================
+    # Diese Funktion erstellt die versionierten Ordner und gibt die vollständigen Pfade zurück
+    logging.info("Setting up experiment directory structure...")
+    exp_name = FOLDER_FLAG
 
-    # Verschmelze die Pfad-Wörterbücher.
-    # Allgemeine Pfade dienen als Basis. Spezifische Pfade können sie überschreiben.
-    # Wichtig: Der Schlüssel 'input' aus CONFIG_PATH bleibt so erhalten.
-    merged_paths = {**general_paths, **model_specific_paths}
-
-    # Setze das vollständig verschmolzene Pfad-Wörterbuch in der finalen Konfiguration
-    training_config["paths"] = merged_paths
-    training_config["inference_mode"] = "load_artifacts_path" # "load_artifacts_fast" oder "load_artifacts_path"
-    #update triainng config, startegy = split
-    # training_config["loading_strategy"] = "l"  # "split", "separate
-
+    final_config, versioned_paths = Pipeline_Utils.setup_experiment(
+        training_config, 
+        exp_name, 
+        run_type='train'
+    )
+    
+    # Stelle sicher, dass die Konfiguration die neuen, vollständigen Pfade enthält
+    final_config['paths'] = versioned_paths
+    # ==============================================================================
 
     # Debug-Ausgabe zur Überprüfung der finalen Pfade
-    logging.info(f"Final paths for experiment: {training_config['paths']}")
+    logging.info(f"Final paths for experiment: {final_config['paths']}")
     
-    # Führe die gesamte Pipeline mit der korrekten Konfiguration aus
-    # run_training_pipeline_3d(config=training_config)
-    trainer = LSTMTrainer(config=training_config, folder_flag= FOLDER_FLAG)
+    # Führe die gesamte Pipeline mit der korrekten, vollständigen Konfiguration aus
+    trainer = LSTMTrainer(config=final_config, folder_flag=FOLDER_FLAG)
     trainer.run(save_artifacts=True)
