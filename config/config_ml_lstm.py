@@ -75,8 +75,8 @@ param_lstm_test = {
     "edge_device": True, #quamtisierung des Modells
 
     # Modellarchitektur
-    "num_layers": 2,
-    "initial_units": 64,
+    "num_layers": 3,
+    "initial_units": 128,
     "dropout": 0.2,
 
     "train_fraction": 0.3,
@@ -89,10 +89,10 @@ param_lstm_test = {
     "early_stopping_patience": 10,
     "loss": "huber",    
     # Zeitreihenparameter
-    "lags": 5,
-    "horizon": 1,
+    "lags": 1,
+    "horizon": 20,
     "train_fraction": 0.7,
-    "rolling_window_size": 6,
+    "rolling_window_size": 2,
 
     # Features
     "base_features": ['group4-2_s6_massflowrate'],

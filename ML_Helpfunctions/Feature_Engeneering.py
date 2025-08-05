@@ -124,13 +124,6 @@ def add_all_features(df: pd.DataFrame, config: dict) -> tuple[pd.DataFrame, dict
     df, roll_dict = add_rolling_features(df, config)
     feature_dict["rolling"] = roll_dict["rolling"]
 
-    # --- WICHTIGER DEBUG-SCHRITT ---
-    # Wir kommentieren den dropna()-Befehl aus, um zu sehen, ob die Daten
-    # mit NaN-Werten an die nächste Funktion weitergegeben werden.
-    # df = df.dropna()
-    # --- ENDE DEBUG-SCHRITT ---
-
-
     # Alle Features zusammenführen
     all_features = (
         feature_dict["base"]
@@ -140,9 +133,9 @@ def add_all_features(df: pd.DataFrame, config: dict) -> tuple[pd.DataFrame, dict
     )
     feature_dict["all"] = all_features
 
-    # Debug-Ausgabe, um den Zustand des DataFrames zu prüfen
-    print(f"[DEBUG in add_all_features] DataFrame hat {len(df)} Zeilen VOR dem Verlassen der Funktion.")
-    print(f"[DEBUG in add_all_features] Anzahl der NaN-Werte pro Spalte:\n{df.isnull().sum()}")
+    # # Debug-Ausgabe, um den Zustand des DataFrames zu prüfen
+    # print(f"[DEBUG in add_all_features] DataFrame hat {len(df)} Zeilen VOR dem Verlassen der Funktion.")
+    # print(f"[DEBUG in add_all_features] Anzahl der NaN-Werte pro Spalte:\n{df.isnull().sum()}")
 
     return df, feature_dict
 

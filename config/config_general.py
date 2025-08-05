@@ -32,7 +32,7 @@ MQTT_CONFIG = {
 # aber die statischen Namen für den "Fast-Mode" können hier bleiben.
 CONFIG_LOAD_ARTIFACTS = {
     "inference_mode": "load_artifacts_path", # "load_artifacts_fast" oder "load_artifacts_path"
-    "inference_steps" : 500,
+    "inference_steps" : 20,
     "inference_interval_sec": 1,
     "artifacts_base_path": ARTIFACTS_OUTPUT_PATH,
 

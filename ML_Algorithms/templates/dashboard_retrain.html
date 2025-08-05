@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>LSTM Retraining - Echtzeit Dashboard</title>
+    <title>ML Pipeline - Echtzeit Dashboard</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
@@ -21,11 +21,11 @@
 </head>
 <body class="bg-gray-900 text-gray-200 flex flex-col items-center justify-center min-h-screen p-4">
 
-    <div class="w-full max-w-8xl bg-gray-800 rounded-2xl shadow-2xl p-6 md:p-8 space-y-6 border border-gray-700">
+    <div class="w-full max-w-7xl bg-gray-800 rounded-2xl shadow-2xl p-6 md:p-8 space-y-6 border border-gray-700">
         
         <header class="text-center">
-            <h1 class="text-3xl md:text-4xl font-bold text-white">LSTM Retraining Pipeline</h1>
-            <p class="text-gray-400 mt-2">Live-Überwachung des inkrementellen Trainingsprozesses</p>
+            <h1 class="text-3xl md:text-4xl font-bold text-white"><span id="algorithm-name">{{ config.model_name | default('ML', true) }}</span> Pipeline</h1>
+            <p class="text-gray-400 mt-2">Live-Überwachung des Inferenz- und Trainingsprozesses</p>
         </header>
         
         <div id="status-container" class="text-center p-4 rounded-lg bg-gray-700 border border-gray-600">
@@ -33,11 +33,22 @@
         </div>
 
         <div class="grid grid-cols-2 md:grid-cols-4 gap-4 text-center">
-            <div class="bg-gray-700/50 p-4 rounded-lg">
-                <p class="text-sm text-gray-400">CPU Last</p>
-                <p id="cpu-load" class="text-2xl font-semibold">- %</p>
-            </div>
             
+            <div class="bg-gray-700/50 p-4 rounded-lg space-y-3">
+                <div>
+                    <p class="text-sm text-gray-400">CPU Last</p>
+                    <p id="cpu-load" class="text-2xl font-semibold">- %</p>
+                </div>
+                <div class="border-t border-gray-600/50"></div>
+                <div>
+                    <p class="text-sm text-gray-400">RAM Auslastung</p>
+                    <p class="text-xl font-semibold">
+                        <span id="ram-usage-percent">--</span>%
+                        (<span id="ram-usage-values">--/-- GB</span>)
+                    </p>
+                </div>
+            </div>
+
             <div class="bg-gray-700/50 p-4 rounded-lg flex flex-col justify-center">
                 <p class="text-sm text-gray-400">Gesamt- / Inferenzzeit</p>
                 <p class="text-xl font-semibold mt-1">
@@ -53,7 +64,7 @@
                 </div>
             </div>
             <div class="bg-gray-700/50 p-4 rounded-lg">
-                <p class="text-sm text-gray-400">Inferenzschritt</p>
+                <p class="text-sm text-gray-400">Fortschritt</p>
                 <p id="progress-text" class="text-lg font-semibold mt-2">0 / 0</p>
             </div>
         </div>
@@ -85,14 +96,12 @@
                 progressBar: document.getElementById('progress-bar'),
                 pauseResumeButton: document.getElementById('pauseResumeButton'),
                 resetButton: document.getElementById('resetButton'),
-                chartCanvas: document.getElementById('inferenceChart').getContext('2d')
+                chartCanvas: document.getElementById('inferenceChart').getContext('2d'),
+                ramUsagePercent: document.getElementById('ram-usage-percent'),
+                ramUsageValues: document.getElementById('ram-usage-values')
             };
 
             let chart;
-            let lastDataTimestamp = null;
-            
-            const HORIZON = {{ config.get("horizon", 1) }};
-
             const statusMapping = {
                 initializing: "Initialisiere Pipeline...",
                 inference_running: "Inferenz & Datensammlung läuft...",
@@ -131,14 +140,14 @@
             function addDataToChart(dataPoint) {
                 const { datetime, true_value, prediction, rolling_forecast, rolling_forecast_dates } = dataPoint;
                 
-                // Neuen Datenpunkt zu den Datensätzen hinzufügen
                 chart.data.labels.push(datetime);
                 chart.data.datasets[0].data.push(true_value);
                 chart.data.datasets[1].data.push(prediction);
 
-                // Zukunftsprognose aktualisieren
                 const forecastPoints = [];
-                forecastPoints.push({ x: datetime, y: prediction }); // Startpunkt der Prognose
+                if (prediction != null) {
+                    forecastPoints.push({ x: datetime, y: prediction }); 
+                }
                 if (rolling_forecast && rolling_forecast_dates) {
                     for (let i = 0; i < rolling_forecast.length; i++) {
                         forecastPoints.push({ x: rolling_forecast_dates[i], y: rolling_forecast[i] });
@@ -146,25 +155,24 @@
                 }
                 chart.data.datasets[2].data = forecastPoints;
 
-                // GEÄNDERT: Maximale Anzahl der sichtbaren Datenpunkte auf 20 setzen
-                const MAX_DATA_POINTS = 20;
-
-                // WICHTIG: Diese Logik sorgt für den Aufbau und das anschließende "Sliding Window"
-                // Solange weniger als 20 Punkte da sind, wird der Graph nur aufgebaut.
-                // Sobald der 21. Punkt kommt, wird der erste (.shift()) entfernt.
+                const MAX_DATA_POINTS = 60;
                 if (chart.data.labels.length > MAX_DATA_POINTS) {
                     chart.data.labels.shift();
                     chart.data.datasets[0].data.shift();
                     chart.data.datasets[1].data.shift();
                 }
 
-                // Chart ohne Animation aktualisieren für eine flüssige Darstellung
                 chart.update('none');
             }
 
             async function fetchApi(endpoint, options = {}) {
                 try {
                     const response = await fetch(endpoint, options);
+                    if (!response.ok) {
+                        console.error(`API Fehler bei ${endpoint}: Status ${response.status}`);
+                        dom.statusText.textContent = 'Serverfehler.';
+                        return null;
+                    }
                     return response.json();
                 } catch (error) {
                     console.error(`API Fehler bei ${endpoint}:`, error);
@@ -173,7 +181,11 @@
             }
             
             function updateUI(state) {
-                dom.statusText.textContent = statusMapping[state.status] || "Unbekannter Status";
+                dom.statusText.textContent = statusMapping[state.status] || state.status || "Unbekannter Status";
+                if(state.error_message) {
+                    dom.statusText.textContent += ` | Fehler: ${state.error_message}`;
+                }
+
                 const retrainInfo = retrainingMapping[state.retraining_status] || retrainingMapping.idle;
                 dom.retrainingStatus.textContent = retrainInfo.text;
                 dom.retrainingDot.className = `status-dot ${retrainInfo.color}`;
@@ -181,6 +193,7 @@
 
                 const progressText = `Zyklus ${state.cycle_count}/${state.total_cycles} | Schritt ${state.steps_in_cycle}/${state.total_steps}`;
                 dom.progressText.textContent = progressText;
+                
                 const progressPercentage = state.total_steps > 0 ? (state.steps_in_cycle / state.total_steps) * 100 : 0;
                 dom.progressBar.style.width = `${progressPercentage}%`;
 
@@ -196,43 +209,85 @@
                 }
             }
 
-            async function pollStatus() {
-                const state = await fetchApi('/api/status');
-                if (state) updateUI(state);
-            }
-
-            async function pollData() {
-                const state = await fetchApi('/api/status');
-                if (state && !state.is_paused && !state.is_finished) {
-                    const result = await fetchApi('/api/data');
-                    if (result && result.status === 'success' && result.data.datetime !== lastDataTimestamp) {
-                        lastDataTimestamp = result.data.datetime;
-                        addDataToChart(result.data);
-                        dom.cpuLoad.textContent = `${result.data.cpu_load.toFixed(1)} %`;
-                        dom.totalTimeVal.textContent = result.data.total_processing_time_ms.toFixed(2);
-                        dom.inferenceTimeVal.textContent = result.data.model_inference_time_ms.toFixed(2);
-                    }
-                }
-            }
-
             async function sendControl(action) {
                 await fetchApi('/api/control', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ action })
                 });
-                pollStatus();
+                // Rufen Sie pollServer einmalig sofort auf, um die UI direkt zu aktualisieren,
+                // anstatt auf das nächste Intervall zu warten.
+                pollServer();
             }
 
+            // =============================================================================
+            // === NEUE, VEREINHEITLICHTE POLLING-LOGIK ===
+            // =============================================================================
+            let currentStep = 0; // Der Zähler für die Datenpunkte
+            let pollingInterval;   // Variable für unser Intervall
+
+            async function pollServer() {
+                // 1. Immer den neuesten Status vom Server holen
+                const state = await fetchApi('/api/status');
+                
+                if (!state) {
+                    // Wenn kein Status empfangen wird (z.B. Server down), nichts weiter tun.
+                    // fetchApi sollte bereits einen Fehler in der Konsole geloggt haben.
+                    return; 
+                }
+
+                // 2. Immer die komplette UI mit dem frischen Status aktualisieren
+                updateUI(state);
+
+                // 3. Prüfen, ob wir neue Datenpunkte abrufen sollen
+                // Wir fragen nur nach neuen Daten, wenn die Inferenz aktiv ist und nicht pausiert wurde.
+                if (state.status === 'inference_running' && !state.is_paused) {
+                    
+                    // Fordere den nächsten Datenpunkt an, den wir noch nicht haben
+                    const result = await fetchApi(`/api/data?step=${currentStep}`);
+
+                    if (result && result.status === 'success') {
+                        // Wir haben erfolgreich neue Daten erhalten!
+                        
+                        // a) Daten dem Diagramm hinzufügen
+                        addDataToChart(result.data);
+                        
+                        // b) Spezifische Metriken aus den neuen Daten aktualisieren
+                        dom.cpuLoad.textContent = `${result.data.cpu_load.toFixed(1)} %`;
+                        dom.totalTimeVal.textContent = result.data.total_processing_time_ms.toFixed(2);
+                        dom.inferenceTimeVal.textContent = result.data.model_inference_time_ms.toFixed(2);
+                        
+                        if (result.data.ram_usage) {
+                            const ram = result.data.ram_usage;
+                            dom.ramUsagePercent.textContent = ram.percent.toFixed(1);
+                            dom.ramUsageValues.textContent = `${ram.used_gb}/${ram.total_gb} GB`;
+                        }
+
+                        // c) WICHTIG: Zähler für den nächsten Schritt erhöhen
+                        currentStep++;
+                    }
+                    // Wenn result.status "waiting" ist, passiert nichts. Wir versuchen es im nächsten Intervall erneut für denselben `currentStep`.
+                }
+
+                // 4. Wenn die Pipeline abgeschlossen ist, das Polling stoppen
+                if (state.is_finished || state.status === 'error') {
+                    console.log("Pipeline beendet oder fehlerhaft. Polling wird gestoppt.");
+                    clearInterval(pollingInterval);
+                }
+            }
+            
+            // Event Listener
             dom.pauseResumeButton.addEventListener('click', () => {
                 const action = dom.pauseResumeButton.textContent === 'Pause' ? 'pause' : 'resume';
                 sendControl(action);
             });
             dom.resetButton.addEventListener('click', () => window.location.reload());
 
+            // Initialisierung
             initializeChart();
-            setInterval(pollStatus, 1000);
-            setInterval(pollData, 1000);
+            
+            // Starten Sie den zentralen Polling-Mechanismus
+            pollingInterval = setInterval(pollServer, 1000);
         });
     </script>
 </body>

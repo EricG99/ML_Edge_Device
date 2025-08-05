@@ -4,6 +4,7 @@ import os
 from sklearn.preprocessing import MinMaxScaler, RobustScaler
 from pathlib import Path
 import sys
+import logging
 
 # Feature Engineering-Modul (optional)
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
@@ -521,6 +522,22 @@ def create_timeseries_validation_split(X_train, y_train, config):
         return X_train, y_train, None, None
     
 
+def convert_data_to_multi_output_window(data: np.ndarray, config: dict):
+    """
+    Konvertiert einen 2D-Array in 3D-Fenster (für X) und 2D-Fenster (für y).
+    y enthält nun 'horizon' zukünftige Schritte.
+    """
+    lags = config.get('lags', 1)
+    horizon = config.get('horizon', 1)
+    
+    X, y = [], []
+    # Die Schleife muss früher enden, um Platz für den Horizont zu haben
+    for i in range(len(data) - lags - horizon + 1):
+        X.append(data[i:(i + lags)])
+        y.append(data[i + lags:(i + lags + horizon)])
+    
+    return np.array(X), np.array(y)
+
 class DataPipelineBase:
     """
     Eine abstrakte Basisklasse, die die gemeinsame Logik für Datenpipelines kapselt.
@@ -603,6 +620,9 @@ class DataPipeline2D(DataPipelineBase):
     """
     def __init__(self, config: dict):
         super().__init__(config)
+
+
+    
         
     def _prepare_and_scale_training_data(self, train_df_featured: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
         """
@@ -677,6 +697,23 @@ class DataPipeline3D(DataPipelineBase):
     """
     def __init__(self, config: dict):
         super().__init__(config)
+
+    def _create_windows(self, data, config):
+        """Erstellt 3D-Fenster für LSTM-Modelle mit Multi-Output-y."""
+        logging.info("Erstelle 3D-Fenster und Multi-Output-Zielvektoren...")
+        
+        X, y = convert_data_to_multi_output_window(data, config)
+    
+        # Die Form von y ist jetzt (samples, horizon), wir brauchen aber nur die Zielvariable
+        # Wir nehmen an, dass die Zielvariable die ERSTE Spalte im ursprünglichen Datensatz war.
+        target_col_index = 0 
+        y = y[:, :, target_col_index]
+
+        # Stellen Sie sicher, dass X 3D ist, auch wenn es nur einen Lag gibt.
+        if X.ndim == 2:
+            X = np.expand_dims(X, axis=2)
+            
+        return X, y
 
     def prepare_training_data(self) -> tuple[np.ndarray, np.ndarray]:
         """
