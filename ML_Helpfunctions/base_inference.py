@@ -197,14 +197,14 @@ class BaseInferenceProcessor(ABC):
 
     def run(self):
         """
-        Startet den gesamten Inferenzprozess basierend auf der Lade-Strategie
-        aus der Konfiguration.
+        Startet den gesamten Inferenzprozess basierend auf der Lade-Strategie...
         """
+        # NEU: Lade Artefakte nur, wenn sie nicht bereits im Speicher sind.
+        if self.model is None or self.scaler is None or self.feature_list is None:
+            self.load_artifacts()
 
-        # Die ursprüngliche `run` Methode wird durch diesen Dispatcher ersetzt.
-        # Der Code wird nicht gelöscht, sondern in die neuen Methoden refaktorisiert.
-        self.load_artifacts()
         strategy = self.config.get("loading_strategy")
+        # ... die restliche Logik der Methode bleibt unverändert
         logging.info(f"Executing inference with strategy: '{strategy}'")
 
         if strategy == "split":
@@ -215,6 +215,5 @@ class BaseInferenceProcessor(ABC):
             logging.error(f"Unknown loading_strategy: '{strategy}'. Aborting.")
             return
         
-        # Das Speichern der Ergebnisse erfolgt nach Abschluss des jeweiligen Modus.
         self._save_results()
         logging.info("✅ Inference task complete.")

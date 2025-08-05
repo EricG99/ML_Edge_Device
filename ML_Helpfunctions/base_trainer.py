@@ -68,13 +68,17 @@ class BaseTrainer(ABC):
         """Speichert die trainierten Artefakte (Modell, Scaler, Features)."""
         logging.info("\nStep 3: Saving artifacts for inference...")
         mode = self.config.get("inference_mode", "load_artifacts_path")
-        folder_flag = self.folder_flag
-        # Erstellt Ordnerstruktur für 'path' mode
-        self.config, paths = Pipeline_Utils.setup_experiment(self.config, folder_flag=folder_flag, run_type='train')
+        
+        # KORREKTUR: Die Ordnerstruktur wird bereits in pipeline_web_app.py erstellt.
+        # Wir rufen setup_experiment NICHT erneut auf, sondern verwenden die vorhandenen Pfade.
+        paths = self.config.get("paths")
+        if not paths:
+            logging.error("Pfade nicht in der Konfiguration gefunden. Artefakte können nicht gespeichert werden.")
+            return
 
         if mode == 'load_artifacts_fast':
+            # Diese Logik bleibt unverändert
             logging.info("Saving in 'fast' mode with static paths...")
-            # Statische Pfade werden direkt aus der Config gelesen
             static_paths = {
                 "scaler": self.config.get("scaler_path_static", "scaler.joblib"),
                 "features": self.config.get("features_path_static", "features.joblib"),
@@ -86,6 +90,7 @@ class BaseTrainer(ABC):
             logging.info(f"Artifacts saved to static paths: {static_paths}")
 
         elif mode == 'load_artifacts_path':
+            # Hier wird jetzt der korrekte, bereits erstellte Pfad verwendet.
             logging.info("Saving in 'path' mode with versioned directory...")
             saver = Pipeline_Utils.ModelScalerSaver(self.config, paths)
             saved_artifacts = saver.save_artifacts(model=self.model, scaler=self.scaler)

@@ -440,6 +440,31 @@ def get_cpu_usage() -> float:
     # Er misst die Auslastung seit dem letzten Aufruf.
     return psutil.cpu_percent(interval=None)
 
+def get_memory_usage():
+    """
+    Ermittelt die aktuelle System-RAM-Auslastung mithilfe von psutil.
+
+    Returns:
+        dict: Ein Dictionary mit den Werten für Gesamt-RAM (GB),
+              genutzten RAM (GB) und die prozentuale Auslastung.
+              Gibt 'N/A' zurück, falls psutil nicht verfügbar ist.
+    """
+    try:
+        mem = psutil.virtual_memory()
+        return {
+            "total_gb": round(mem.total / (1024**3), 2),
+            "used_gb": round(mem.used / (1024**3), 2),
+            "percent": mem.percent
+        }
+    except (ImportError, AttributeError):
+        # Fallback, falls psutil nicht installiert ist oder ein Fehler auftritt
+        logging.warning("psutil nicht gefunden oder Fehler beim Auslesen. RAM-Nutzung kann nicht ermittelt werden.")
+        return {
+            "total_gb": "N/A",
+            "used_gb": "N/A",
+            "percent": 0
+        }
+
 def _evaluate_model(
     predictions: np.ndarray,
     y_test: np.ndarray,
@@ -573,187 +598,6 @@ def save_loss_plot(history: dict, config: dict, paths: dict, output_path: str):
     finally:
         plt.close(fig) # Schließt die Figur, um Speicher freizugeben
 
-# def _quantize_and_save_tflite_model(model, directory, model_name, dataset, run_id, representative_dataset, timestamp=None):
-#     """
-#     Quantisiert ein Keras-Modell in ein TFLite-Modell (INT8) und speichert es.
-
-#     Args:
-#         model (tf.keras.Model): Das zu quantisierende Keras-Modell.
-#         directory (str): Das Verzeichnis, in dem das Modell gespeichert werden soll.
-#         model_name (str): Name des Modells (für den Dateinamen).
-#         dataset (str): Name des Datensatzes (für den Dateinamen).
-#         run_id (str): Eindeutige ID des Laufs (für den Dateinamen).
-#         representative_dataset (tf.data.Dataset oder Generator): Ein kleiner Datensatz zur Kalibrierung der Quantisierung.
-#         timestamp (str, optional): Optionaler Zeitstempel für den Dateinamen. Wird generiert, wenn None.
-
-#     Returns:
-#         str: Der Pfad zur gespeicherten TFLite-Modell-Datei.
-
-#     Raises:
-#         RuntimeError: Wenn das Quantisieren oder Speichern des Modells fehlschlägt.
-#     """
-#     timestamp = timestamp or datetime.now().strftime("%Y%m%d_%H%M%S")
-#     filename = f"Model_{run_id}_{model_name}_{dataset}_{timestamp}_quantized.tflite"
-#     model_path = os.path.join(directory, filename)
-
-#     logging.info(f"Beginne mit der Quantisierung des Modells und Speicherung nach: {model_path}")
-
-#     converter = tf.lite.TFLiteConverter.from_keras_model(model)
-#     converter.optimizations = [tf.lite.Optimize.DEFAULT]
-    
-#     # Der repräsentative Datensatz ist entscheidend für die vollständige Integer-Quantisierung
-#     converter.representative_dataset = lambda: iter(representative_dataset)
-
-#     converter.target_spec.supported_ops = [
-#             tf.lite.OpsSet.TFLITE_BUILTINS, # Standard-Operationen
-#             tf.lite.OpsSet.SELECT_TF_OPS    # Erlaube zusätzlich TensorFlow-Operationen
-#         ]
-#     converter._experimental_lower_tensor_list_ops = False
-
-#     try:
-#         tflite_model = converter.convert()
-#         with open(model_path, "wb") as f:
-#             f.write(tflite_model)
-#         logging.info(f"Quantisiertes TFLite-Modell erfolgreich gespeichert unter: {model_path}")
-#         return model_path
-#     except Exception as e:
-#         logging.error(f"Fehler beim Quantisieren und Speichern des TFLite-Modells: {e}", exc_info=True)
-#         raise RuntimeError(f"TFLite-Modell konnte nicht gespeichert werden: {e}")
-    
-
-# # -------------------------------------------
-# # Gemeinsame Ergebnisse speichern
-# # -------------------------------------------
-# def save_keras_artifacts(model: tf.keras.Model, 
-#                          history: dict, 
-#                          config: dict, 
-#                          paths: dict, 
-#                          representative_dataset) -> dict:
-#     """
-#     Speichert Keras-spezifische Artefakte: das Modell selbst (inkl. TFLite),
-#     die Modellstruktur als Bild und den Trainingsverlauf (Loss Plot).
-
-#     Args:
-#         model: Das trainierte Keras-Modell.
-#         history: Das History-Objekt von model.fit().
-#         config: Das Konfigurationsdictionary des Laufs.
-#         paths: Das Pfad-Dictionary des Laufs.
-#         representative_dataset: Dataset für die TFLite-Quantisierung.
-
-#     Returns:
-#         dict: Ein Dictionary mit den Pfaden zu den gespeicherten Artefakten.
-#     """
-#     results = {}
-
-#     # === Modell speichern (Keras .keras + TFLite .tflite) ===
-#     try:
-#         model_dir = paths.get("Models", os.path.join(paths.get("output"), "Models"))
-        
-#         # Annahme: save_model_with_version ist eine Ihrer Hilfsfunktionen
-#         normal_model_path, quantized_model_path = save_model_with_version(
-#             model=model,
-#             directory=model_dir,
-#             model_name=config["model_name"],
-#             dataset=config["dataset"],
-#             run_id=config.get("run_id", "run"),
-#             timestamp=config.get("time_stamp", "ts"),
-#             representative_dataset=representative_dataset
-#         )
-#         if normal_model_path:
-#             results["model_path"] = normal_model_path
-#             print(f"✅ Normales Keras-Modell gespeichert unter: {normal_model_path}")
-#         if quantized_model_path:
-#             results["quantized_model_path"] = quantized_model_path
-#             print(f"✅ TFLite-Modell gespeichert unter: {quantized_model_path}")
-#     except Exception as e:
-#         print(f"❌ Fehler beim Speichern des Modells: {e}")
-#         print(traceback.format_exc())
-
-#     # === Modellstruktur speichern ===
-#     try:
-#         structure_dir = paths.get("Model_Structures", os.path.join(paths.get("output"), "Model_Structures"))
-#         os.makedirs(structure_dir, exist_ok=True)
-#         structure_path = os.path.join(structure_dir, f"structure_{config['run_id']}_{config['time_stamp']}.png")
-
-#         tf.keras.utils.plot_model(model, to_file=structure_path, show_shapes=True, show_layer_activations=True)
-#         print(f"📊 Modellstruktur gespeichert unter: {structure_path}")
-#         results["model_structure_path"] = structure_path
-#     except Exception as e:
-#         print(f"❌ Fehler beim Speichern der Modellstruktur: {e}")
-#         print(traceback.format_exc())
-
-#     # === Loss Plot speichern ===
-
-#     try:
-#         plot_dir = paths.get("Loss_Plots", os.path.join(paths.get("output"), "Loss_Plots"))
-#         os.makedirs(plot_dir, exist_ok=True)
-#         loss_plot_path = os.path.join(plot_dir, f"loss_plot_{config['run_id']}_{config['time_stamp']}.png")
-        
-#         # Dieser Aufruf passt jetzt perfekt zur neuen Funktionsdefinition
-#         save_loss_plot(history, config, paths, loss_plot_path)
-        
-#         print(f"📉 Loss Plot gespeichert unter: {loss_plot_path}")
-#         results["loss_plot_path"] = loss_plot_path
-#     except Exception as e:
-#         print(f"❌ Fehler beim Speichern des Loss Plots: {e}")
-#         print(traceback.format_exc())
-        
-#     return results
-
-
-
-
-# def save_model_with_version(model, directory, model_name, dataset, run_id, timestamp=None, representative_dataset=None, quantized_output_dir=None):
-#     """
-#     Speichert ein Keras-Modell im normalen Zustand und optional als quantisiertes TFLite-Modell.
-
-#     Args:
-#         model (tf.keras.Model): Das zu speichernde Keras-Modell.
-#         directory (str): Das Verzeichnis, in dem das normale Keras-Modell gespeichert werden soll.
-#         model_name (str): Name des Modells (für den Dateinamen).
-#         dataset (str): Name des Datensatzes (für den Dateinamen).
-#         run_id (str): Eindeutige ID des Laufs (für den Dateinamen).
-#         timestamp (str, optional): Optionaler Zeitstempel für den Dateinamen. Wird generiert, wenn None.
-#         representative_dataset (tf.data.Dataset oder Generator, optional): Erforderlich für die Quantisierung.
-#         quantized_output_dir (str, optional): Spezifisches Verzeichnis für das quantisierte Modell.
-#                                               Verwendet 'directory', wenn None.
-
-#     Returns:
-#         tuple: (normal_model_path, quantized_model_path). Pfade zu den gespeicherten Modellen.
-#                quantized_model_path ist None, wenn Quantisierung nicht durchgeführt wurde/fehlschlug.
-#     """
-#     timestamp = timestamp or datetime.now().strftime("%Y%m%d_%H%M%S")
-    
-#     # --- Speichern des normalen Keras-Modells ---
-#     normal_filename = f"Model_{run_id}_{model_name}_{dataset}_{timestamp}.keras"
-#     normal_model_path = os.path.join(directory, normal_filename)
-#     try:
-#         model.save(normal_model_path)
-#         logging.info(f"Normales Keras-Modell erfolgreich gespeichert unter: {normal_model_path}")
-#     except Exception as e:
-#         logging.error(f"Fehler beim Speichern des normalen Keras-Modells: {e}", exc_info=True)
-#         normal_model_path = None # Setze auf None, wenn Speichern fehlschlägt
-
-#     # --- Speichern des quantisierten TFLite-Modells ---
-#     quantized_model_path = None
-#     if representative_dataset is not None:
-#         target_quantized_dir = quantized_output_dir if quantized_output_dir else directory
-#         os.makedirs(target_quantized_dir, exist_ok=True) # Stelle sicher, dass das Verzeichnis existiert
-#         try:
-#             quantized_model_path = _quantize_and_save_tflite_model(
-#                 model=model,
-#                 directory=target_quantized_dir, # Verwende spezifisches Verzeichnis für quantisiertes Modell
-#                 model_name=model_name,
-#                 dataset=dataset,
-#                 run_id=run_id,
-#                 representative_dataset=representative_dataset,
-#                 timestamp=timestamp
-#             )
-#         except Exception as e:
-#             logging.error(f"Quantisierung und Speicherung des TFLite-Modells fehlgeschlagen: {e}", exc_info=True)
-#             quantized_model_path = None
-
-#     return normal_model_path, quantized_model_path
 
 # -----------------------------------------------------------------------------
 # HELPER 1: VERZEICHNISSE SICHERSTELLEN
@@ -1297,34 +1141,7 @@ class ModelScalerSaver:
             traceback.print_exc()
             return None
 
-    # def _convert_and_quantize_tflite(self, model, representative_dataset_obj) -> str:
-    #     """Konvertiert, quantisiert und speichert ein Keras-Modell als .tflite-Datei."""
-    #     if not representative_dataset_obj: return None
-    #     try:
-    #         print("--- 🔬 Starte TFLite-Konvertierung und Quantisierung ---")
-            
-    #         # Workaround für Kompatibilitätsprobleme
-    #         model_config = model.get_config()
-    #         fresh_model = tf.keras.Sequential.from_config(model_config)
-    #         fresh_model.set_weights(model.get_weights())
-            
-    #         converter = tf.lite.TFLiteConverter.from_keras_model(fresh_model)
-    #         converter.optimizations = [tf.lite.Optimize.DEFAULT]
-    #         converter.representative_dataset = lambda: iter(representative_dataset_obj)
-            
-    #         if any(isinstance(layer, (tf.keras.layers.LSTM, tf.keras.layers.GRU)) for layer in fresh_model.layers):
-    #             converter.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS, tf.lite.OpsSet.SELECT_TF_OPS]
-    #             converter._experimental_lower_tensor_list_ops = False
 
-    #         tflite_model_quant = converter.convert()
-            
-    #         tflite_path = os.path.join(self.paths.get("Models"), f"{self.config['model_name']}_{self.config['dataset'].split('.')[0]}_{self.config['run_id']}.tflite")
-    #         with open(tflite_path, 'wb') as f: f.write(tflite_model_quant)
-    #         print(f"✅ TFLite-Modell (quantisiert) gespeichert unter: {tflite_path}")
-    #         return tflite_path
-    #     except Exception as e:
-    #         print(f"❌ Fehler bei der TFLite-Quantisierung: {e}", exc_info=True)
-    #         return None
     
     def _save_loss_plot(self, history, output_path: str):
         """
@@ -1391,48 +1208,6 @@ class ModelScalerSaver:
             plt.close(fig) # Schließt die Figur, um Speicher freizugeben und Konflikte zu vermeiden
 
 
-    # def _save_keras_model(self, model: tf.keras.Model, **kwargs) -> dict:
-    #     """
-    #     Orchestriert das Speichern eines Keras-Modells und aller zugehörigen Artefakte.
-    #     """
-    #     results = {}
-    #     history = kwargs.get("history")
-    #     base_filename = f"{self.config['model_name']}_{self.config['dataset'].split('.')[0]}_{self.config['run_id']}"
-
-    #     # 1. Normales Keras-Modell speichern (unverändert)
-    #     try:
-    #         model_path = os.path.join(self.paths.get("Models"), f"{base_filename}.keras")
-    #         model.save(model_path)
-    #         results["model_path"] = model_path
-    #         print(f"✅ Normales Keras-Modell gespeichert unter: {model_path}")
-    #     except Exception as e:
-    #         print(f"❌ Fehler beim Speichern des Keras-Modells: {e}")
-    #         traceback.print_exc()
-
-    #     # 2. Quantisiertes TFLite-Modell speichern (NUR wenn Flag gesetzt ist)
-    #     if self.config.get("edge_device", False):
-    #         # Der Aufruf ist jetzt viel einfacher
-    #         quantized_path = self._convert_and_quantize_tflite(
-    #             model=model,
-    #             representative_dataset_gen=kwargs.get("representative_dataset")
-    #         )
-    #         if quantized_path:
-    #             results["quantized_model_path"] = quantized_path
-
-    #     # 3. Plots speichern (unverändert)
-    #     if history:
-    #         plot_path = os.path.join(self.paths.get("Loss_Plots"), f"loss_plot_{self.config['run_id']}.png")
-    #         saved_plot_path = self._save_loss_plot(history, plot_path)
-    #         if saved_plot_path:
-    #             results["loss_plot_path"] = saved_plot_path
-        
-    #     struct_path = os.path.join(self.paths.get("Model_Structures"), f"structure_{self.config['run_id']}.png")
-    #     saved_struct_path = self._save_structure_plot(model, struct_path)
-    #     if saved_struct_path:
-    #         results["model_structure_path"] = saved_struct_path
-            
-    #     return results
-    
 
     def _save_sklearn_model(self, model) -> dict:
         """Speichert ein Scikit-learn-Modell."""

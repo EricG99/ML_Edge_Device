@@ -42,33 +42,37 @@ class RFInference(BaseInferenceProcessor):
     def _prepare_input_data(self):
         """
         Bereitet einen 2D-Feature-Vektor für das RF-Modell vor, indem der RealTimeDataProcessor genutzt wird.
-        Diese Methode ist jetzt deutlich schlanker und robuster.
         """
         if self.latest_payload is None:
             return None, None, None
 
-        # 1. Daten an den Prozessor übergeben und Features berechnen lassen
         featured_buffer = self.data_processor.update_and_process(self.latest_payload)
         
-        # Wenn der Prozessor nicht genügend Daten hat oder Fehler auftraten, gibt er None zurück
         if featured_buffer is None:
             return None, None, None
 
-        # 2. Letzten, vollständigen Feature-Vektor für die Inferenz extrahieren
-        # Auf NaN-Werte prüfen, die durch rollierende Berechnungen entstehen könnten
         if featured_buffer.empty or featured_buffer[self.feature_list].iloc[-1].isnull().values.any():
             logging.warning("NaNs im finalen Inferenz-Vektor entdeckt. Überspringe Schritt.")
             return None, None, None
 
-        # 3. Letzten Vektor extrahieren und skalieren (falls Skalierung aktiviert ist)
         last_vector_full = featured_buffer[self.feature_list].iloc[-1:]
-        
-        # Die Skalierung wird hier angenommen, da sie Teil des Trainingsprozesses war
         X_live_scaled = self.scaler.transform(last_vector_full.values)
         
-        # Metadaten für das Logging und die Speicherung extrahieren
         timestamp = last_vector_full.index[-1]
-        true_value = self.latest_payload.get(self.target_feature)
+        
+        payload_lower = {k.lower(): v for k, v in self.latest_payload.items()}
+        true_value = payload_lower.get(self.target_feature)
+
+        # =================================================================
+        # === BULLETPROOF DEBUG-LOGGER ===
+        # Dieser Block wird nur ausgeführt, wenn der Wert nicht gefunden wurde.
+        if true_value is None:
+            logging.warning("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+            logging.warning("FEHLER: 'true_value' konnte nicht gefunden werden!")
+            logging.warning(f"--> Gesuchter Schlüssel (aus config): '{self.target_feature}'")
+            logging.warning(f"--> Verfügbare Schlüssel (aus MQTT): {list(payload_lower.keys())}")
+            logging.warning("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+        # =================================================================
         
         return X_live_scaled, timestamp, true_value
 
