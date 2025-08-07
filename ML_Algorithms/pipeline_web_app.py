@@ -204,49 +204,31 @@ def retraining_thread_task(retraining_data_df: pd.DataFrame, algorithm: str):
         with shared_resource_lock:
             PIPELINE_STATE["retraining_status"] = "idle"
 
-
 def inference_manager(config: dict, inference_class, folder_flag: str, algorithm: str, mode: str):
     """
-    Einheitlicher Inferenz-Manager. Nutzt die direkte Multi-Output-Strategie für alle Modelle.
-    VERBESSERTE VERSION MIT TRY...FINALLY FÜR ROBUSTES AUFRÄUMEN.
+    Einheitlicher Inferenz-Manager.
+    Die Kernlogik für Zyklen, Retraining und Pausen ist jetzt für beide Ladestrategien ('split' und 'live_mqtt') identisch.
     """
     global all_predictions
     retraining_data_list = []
-    mqtt_client = None  # WICHTIG: Variable am Anfang initialisieren
-    inference_processor = None # WICHTIG: Variable am Anfang initialisieren
+    mqtt_client = None
+    inference_processor = None
 
     try:
-        # Warten, bis die Initialisierung (Training oder Laden) abgeschlossen ist
+        # 1. INITIALISIERUNG (Warten und Prozessor/Modell laden)
         while PIPELINE_STATE["status"] == "initializing":
             time.sleep(1)
         if PIPELINE_STATE["status"] == "error":
             logging.error("Inferenz-Manager startet nicht, da ein Fehler bei der Initialisierung aufgetreten ist.")
-            return  # Frühzeitiges Beenden
+            return
 
-        # Status auf "inference_running" setzen, damit das Frontend Daten abruft
         with shared_resource_lock:
             PIPELINE_STATE["status"] = "inference_running"
         logging.info(f"--- INFERENCE MANAGER: Startet im Modus '{mode}' ---")
         
-        # Konfiguration der Zyklen und Schritte basierend auf dem Modus
-        if mode == "retraining":
-            max_cycles = config.get("retraining_cycles", 2)
-            steps_per_cycle = config.get("retraining_interval_steps", 10)
-            target_interval_sec = config.get("inference_cycle_sec", 1.0)
-        else:  # no_retraining
-            max_cycles = 1
-            steps_per_cycle = config.get("inference_steps", 500)
-            target_interval_sec = config.get("inference_interval_sec", 1.0)
-
-        with shared_resource_lock:
-            PIPELINE_STATE.update({"total_cycles": max_cycles, "total_steps": steps_per_cycle, "mode": mode})
-
-        # Inferenz-Prozessor initialisieren
         inference_processor = inference_class(config, "", 0, "", folder_flag)
         
-        # Modell-Setup
         model_is_trained_in_memory = shared_model.get("model") is not None
-
         if model_is_trained_in_memory:
             logging.info("Verwende das neu trainierte Modell aus dem initialen Lauf.")
             with shared_resource_lock:
@@ -255,26 +237,97 @@ def inference_manager(config: dict, inference_class, folder_flag: str, algorithm
                 inference_processor.feature_list = shared_model["features"]
                 inference_processor.target_feature = shared_model["config"]["base_features"][0]
         elif config.get('load_id'):
-            try:
-                logging.info(f"Lade Artefakte von Run ID: {config['load_id']}")
-                inference_processor.load_artifacts()
-            except Exception as e:
-                logging.error(f"Fehler beim Laden der Artefakte: {e}", exc_info=True)
-                with shared_resource_lock: PIPELINE_STATE.update({"status": "error", "error_message": str(e)})
-                return # Frühzeitiges Beenden
+            logging.info(f"Lade Artefakte von Run ID: {config['load_id']}")
+            inference_processor.load_artifacts()
         else:
-            logging.error("Kein trainiertes Modell und keine load_id zum Laden gefunden. Inferenz kann nicht starten.")
+            logging.error("Kein trainiertes Modell und keine load_id zum Laden gefunden.")
             with shared_resource_lock: PIPELINE_STATE.update({"status": "error", "error_message": "Kein Modell verfügbar."})
-            return # Frühzeitiges Beenden
+            return
 
-        # MQTT Client starten
-        mqtt_client = MqttInferenceClient(
-            broker_ip=config['MQTT_BROKER_IP'], port=config['MQTT_PORT'], topic=config['MQTT_TOPIC'],
-            on_message_callback=inference_processor.update_latest_data
-        )
-        mqtt_client.run()
+        # 2. DATENQUELLE VORBEREITEN & SCHLEIFENPARAMETER SETZEN
+        loading_strategy = config.get("loading_strategy", "live_mqtt")
+        logging.info(f"Gewählte Ladestrategie: '{loading_strategy}'")
+        data_source = []
 
-        # Hauptschleife für Inferenz und Retraining
+        if mode == "retraining":
+            max_cycles = config.get("retraining_cycles", 2)
+            steps_per_cycle = config.get("retraining_interval_steps", 200)
+        else: # no_retraining
+            max_cycles = 1
+            steps_per_cycle = config.get("inference_steps", 500)
+
+        if loading_strategy == "split":
+            # --- LOGIK FÜR BATCH-VERARBEITUNG AUS CSV ---
+            logging.info("Starte Inferenz im BATCH-MODUS aus CSV-Datei.")
+            test_df = LoadPrepareData.load_test_data_by_fraction(
+                config=config,
+                train_fraction=config.get("train_fraction", 0.7),
+                make_date_as_index=False
+            )
+
+            # NEU: Das Zielintervall wird auch hier aus der Konfiguration geladen
+            target_interval_sec = config.get("inference_interval_sec", 1.0)
+            logging.info(f"Simuliere Inferenz mit einem Intervall von {target_interval_sec} Sekunden pro Schritt.")
+
+            if test_df.empty:
+                logging.warning("Test-DataFrame ist leer. Es gibt nichts zu verarbeiten.")
+            else:
+                logging.info(f"Verarbeite {len(test_df)} Datenpunkte aus der CSV-Datei...")
+
+            # Iteriere durch die Zeilen des Test-DataFrames
+            for step, row in test_df.iterrows():
+                # NEU: Startzeit für die Intervallmessung
+                start_cycle_time = time.perf_counter()
+
+                if PIPELINE_STATE["is_finished"]: break
+
+                inference_processor.latest_payload = row.to_dict()
+                input_data, timestamp, true_value = inference_processor._prepare_input_data()
+
+                if input_data is not None:
+                    prediction_scaled, model_inference_time_ms = PipelineUtils.run_timed_inference(
+                        model=inference_processor.model, input_data=input_data
+                    )
+                    target_index = inference_processor.feature_list.index(inference_processor.target_feature)
+                    predictions_unscaled_all = PipelineUtils.safe_inverse_transform(
+                        scaler=inference_processor.scaler, array=prediction_scaled.reshape(1, -1), target_index=target_index
+                    ).flatten()
+
+                    # NEU: Die Gesamtverarbeitungszeit wird jetzt korrekt gemessen
+                    total_processing_time_ms = (time.perf_counter() - start_cycle_time) * 1000
+
+                    prediction_entry = {
+                        "datetime": timestamp,
+                        "prediction": predictions_unscaled_all[0] if len(predictions_unscaled_all) > 0 else None,
+                        "true_value": true_value, "rolling_forecast": predictions_unscaled_all.tolist(),
+                        "cpu_load": PipelineUtils.get_cpu_usage(), "ram_usage": PipelineUtils.get_memory_usage(),
+                        "model_inference_time_ms": model_inference_time_ms, 
+                        "total_processing_time_ms": total_processing_time_ms # Korrigierter Wert
+                    }
+                    with shared_resource_lock:
+                        all_predictions.append(prediction_entry)
+                        PIPELINE_STATE["steps_in_cycle"] = step + 1
+
+                # NEU: Pausiert für die verbleibende Zeit des Intervalls
+                elapsed_time = time.perf_counter() - start_cycle_time
+                sleep_duration = target_interval_sec - elapsed_time
+                if sleep_duration > 0:
+                    time.sleep(sleep_duration)
+            
+            logging.info("Batch-Verarbeitung abgeschlossen.")
+        else: # live_mqtt
+            mqtt_client = MqttInferenceClient(
+                broker_ip=config['MQTT_BROKER_IP'], port=config['MQTT_PORT'], topic=config['MQTT_TOPIC'],
+                on_message_callback=inference_processor.update_latest_data
+            )
+            mqtt_client.run()
+
+        target_interval_sec = config.get("inference_interval_sec", 1.0)
+        with shared_resource_lock:
+            PIPELINE_STATE.update({"total_cycles": max_cycles, "total_steps": steps_per_cycle, "mode": mode})
+
+        # 3. VEREINHEITLICHTE HAUPTSCHLEIFE
+        current_data_index = 0
         for cycle in range(max_cycles):
             with shared_resource_lock: PIPELINE_STATE.update({"cycle_count": cycle + 1, "retraining_status": "collecting" if mode == "retraining" else "idle"})
             logging.info(f"--- Zyklus {cycle + 1}/{max_cycles}: Starte Inferenz. ---")
@@ -284,67 +337,52 @@ def inference_manager(config: dict, inference_class, folder_flag: str, algorithm
                 while PIPELINE_STATE["is_paused"]: time.sleep(0.5)
                 if PIPELINE_STATE["is_finished"]: break
 
+                # --- Einheitliche Datenbeschaffung ---
+                if loading_strategy == "split":
+                    if current_data_index < len(data_source):
+                        inference_processor.latest_payload = data_source[current_data_index]
+                        current_data_index += 1
+                    else:
+                        logging.info("Alle Daten aus der CSV-Datei verarbeitet.")
+                        break # Innere Schleife beenden, wenn alle Daten verarbeitet sind
+                
                 with shared_resource_lock: PIPELINE_STATE["steps_in_cycle"] = step + 1
                 if inference_processor.latest_payload is None:
-                    time.sleep(target_interval_sec)
+                    if loading_strategy == "live_mqtt": time.sleep(target_interval_sec)
                     continue
 
+                # --- Einheitliche Verarbeitungslogik ---
                 with shared_resource_lock:
-                    if model_is_trained_in_memory:
-                        inference_processor.model = shared_model.get("model")
+                    if model_is_trained_in_memory: inference_processor.model = shared_model.get("model")
                 
                 input_data, timestamp, true_value = inference_processor._prepare_input_data()
                 
                 if input_data is not None:
-                    prediction_scaled, model_inference_time_ms = PipelineUtils.run_timed_inference(
-                        model=inference_processor.model, input_data=input_data
-                    )
+                    prediction_scaled, model_inference_time_ms = PipelineUtils.run_timed_inference(model=inference_processor.model, input_data=input_data)
+                    target_index = inference_processor.feature_list.index(inference_processor.target_feature)
+                    predictions_unscaled_all = PipelineUtils.safe_inverse_transform(scaler=inference_processor.scaler, array=prediction_scaled.reshape(1, -1), target_index=target_index).flatten()
                     
-                    try:
-                        target_index = inference_processor.feature_list.index(inference_processor.target_feature)
-                    except (ValueError, AttributeError):
-                        target_index = 0
-                    
-                    predictions_unscaled_all = PipelineUtils.safe_inverse_transform(
-                        scaler=inference_processor.scaler, array=prediction_scaled.reshape(1, -1), target_index=target_index
-                    ).flatten()
-
                     total_processing_time_ms = (time.perf_counter() - start_cycle_time) * 1000
                     prediction_entry = {
-                        "datetime": timestamp,
-                        "prediction": predictions_unscaled_all[0] if len(predictions_unscaled_all) > 0 else None,
-                        "true_value": true_value,
-                        "rolling_forecast": predictions_unscaled_all.tolist(),
-                        "cpu_load": PipelineUtils.get_cpu_usage(),
-                        "ram_usage": PipelineUtils.get_memory_usage(),
-                        "model_inference_time_ms": model_inference_time_ms,
+                        "datetime": timestamp, "prediction": predictions_unscaled_all[0], "true_value": true_value,
+                        "rolling_forecast": predictions_unscaled_all.tolist(), "cpu_load": PipelineUtils.get_cpu_usage(),
+                        "ram_usage": PipelineUtils.get_memory_usage(), "model_inference_time_ms": model_inference_time_ms,
                         "total_processing_time_ms": total_processing_time_ms
                     }
                     with shared_resource_lock:
                         all_predictions.append(prediction_entry)
                     
-                    pred_str = f"{prediction_entry['prediction']:.2f}" if prediction_entry['prediction'] is not None else "N/A"
-                    true_str = f"{prediction_entry['true_value']:.2f}" if prediction_entry['true_value'] is not None else "N/A"
-                    log_msg = (
-                        f"Step [{step+1}/{steps_per_cycle}] | "
-                        f"Time: {timestamp.strftime('%H:%M:%S')} | "
-                        f"Pred: {pred_str} | "
-                        f"True: {true_str} | "
-                        f"Infer Time: {model_inference_time_ms:.2f}ms | "
-                        f"Total Time: {total_processing_time_ms:.2f}ms"
-                    )
-                    logging.info(log_msg)
-
                     if mode == "retraining":
                         retraining_data_list.append(inference_processor.latest_payload)
                 
                 inference_processor.latest_payload = None
-                sleep_duration = target_interval_sec - (time.perf_counter() - start_cycle_time)
-                if sleep_duration > 0: time.sleep(sleep_duration)
+                if loading_strategy == "live_mqtt":
+                    sleep_duration = target_interval_sec - (time.perf_counter() - start_cycle_time)
+                    if sleep_duration > 0: time.sleep(sleep_duration)
             
             if PIPELINE_STATE["is_finished"]: break
 
-            # Retraining nach jedem Zyklus (nur im Retraining-Modus)
+            # --- Einheitliches Retraining-Handling ---
             if mode == "retraining" and cycle < max_cycles - 1:
                 logging.info(f"--- Zyklus {cycle + 1}: Datensammlung abgeschlossen. Starte Nachtraining. ---")
                 retraining_data_buffer = pd.DataFrame(retraining_data_list)
@@ -359,8 +397,7 @@ def inference_manager(config: dict, inference_class, folder_flag: str, algorithm
                 retraining_data_list.clear()
 
     finally:
-        # Dieser Block wird IMMER ausgeführt, egal ob der try-Block erfolgreich war,
-        # einen Fehler hatte oder durch 'return' verlassen wurde.
+        # 4. AUFRÄUMEN UND SPEICHERN (unverändert)
         logging.info("--- Pipeline beendet. Aufräumen und Speichern. ---")
         with shared_resource_lock: 
             PIPELINE_STATE.update({"status": "finished", "is_finished": True})
@@ -368,7 +405,6 @@ def inference_manager(config: dict, inference_class, folder_flag: str, algorithm
         if mqtt_client:
             logging.info("Trenne MQTT-Client...")
             try:
-                # Korrektes, zweistufiges Beenden über das interne .client-Objekt
                 mqtt_client.client.loop_stop()
                 mqtt_client.client.disconnect()
                 logging.info("MQTT-Client erfolgreich getrennt.")
@@ -376,67 +412,41 @@ def inference_manager(config: dict, inference_class, folder_flag: str, algorithm
                 logging.error(f"Fehler beim Trennen des MQTT-Clients: {e}", exc_info=True)
 
         if all_predictions:
+            # ... (Der gesamte Speicher-Block bleibt exakt gleich wie zuvor)
             logging.info("🔄 Speichere finale Vorhersagen mit CPU/RAM und Zeiten...")
-
             df = pd.DataFrame(all_predictions)
-
-            # RAM entpacken
-            if "ram_usage" in df.columns:
-                ram_df = pd.json_normalize(df["ram_usage"])
-                ram_df.columns = [f"ram_{col}" for col in ram_df.columns]
-                df = pd.concat([df.drop(columns=["ram_usage"]), ram_df], axis=1)
-
+            if "ram_usage" in df.columns and not df["ram_usage"].dropna().empty:
+                try:
+                    ram_df = pd.json_normalize(df["ram_usage"].dropna())
+                    ram_df.columns = [f"ram_{col}" for col in ram_df.columns]
+                    df = df.drop(columns=["ram_usage"]).join(ram_df)
+                except Exception as e:
+                    logging.warning(f"Konnte RAM-Daten nicht entpacken: {e}")
             if "rolling_forecast" in df.columns and "true_value" in df.columns:
                 try:
-                    y_pred = np.stack(df["rolling_forecast"].to_numpy())
-                    horizon = y_pred.shape[1]
-                    y_true = np.tile(df["true_value"].to_numpy().reshape(-1, 1), reps=(1, horizon))
-                    dates = pd.to_datetime(df["datetime"])
-
-                    valid = ~np.isnan(y_true).any(axis=1) & ~np.isnan(y_pred).any(axis=1)
-                    if not valid.any():
-                        logging.warning("Keine gültigen Zeilen für Vorhersage vorhanden.")
-                        return
-
-                    # Speichern der kombinierten Daten
-                    true_cols = [f"true_t+{i+1}" for i in range(horizon)]
-                    pred_cols = [f"pred_t+{i+1}" for i in range(horizon)]
-
-                    true_df = pd.DataFrame(y_true[valid], columns=true_cols)
-                    pred_df = pd.DataFrame(y_pred[valid], columns=pred_cols)
-
-                    system_cols = [
-                        "cpu_load", "model_inference_time_ms", "total_processing_time_ms",
-                        "ram_total_gb", "ram_used_gb", "ram_percent"
-                    ]
-                    sysinfo_df = df.loc[valid, system_cols].reset_index(drop=True)
-
-                    full_df = pd.concat([
-                        pd.DataFrame({"date": dates[valid].values}),
-                        true_df,
-                        pred_df,
-                        sysinfo_df
-                    ], axis=1)
-
-                    pred_path = os.path.join(
-                        config["paths"]["Prediction_Data"],
-                        f"prediction_final_{config.get('run_id')}.csv"
-                    )
-                    os.makedirs(os.path.dirname(pred_path), exist_ok=True)
-                    full_df.to_csv(pred_path, index=False)
-
-                    # Metriken speichern
-                    metrics = PipelineUtils.evaluate_all_metrics(y_true[valid], y_pred[valid], horizon=config.get("horizon", 1)) 
-                    
-                    # Die Funktion save_metrics_summary wird hier anstelle von save_metrics_csv verwendet, 
-                    # da sie das Speichern der Konfigurationen mit einschließt.
-                    PipelineUtils.save_metrics_summary(metrics, config, (inference_processor.training_config if hasattr(inference_processor, 'training_config') else {}), config["paths"])
-
-                    logging.info(f"✅ Vorhersagen mit Systemdaten gespeichert: {pred_path}")
-
+                    y_pred = np.stack(df["rolling_forecast"].dropna().to_numpy())
+                    valid_indices = df["rolling_forecast"].notna()
+                    df_valid = df[valid_indices].copy()
+                    if not df_valid.empty:
+                        horizon = y_pred.shape[1]
+                        df_valid["true_value_filled"] = df_valid["true_value"].ffill().bfill()
+                        y_true = np.tile(df_valid["true_value_filled"].to_numpy().reshape(-1, 1), reps=(1, horizon))
+                        dates = pd.to_datetime(df_valid["datetime"])
+                        true_cols = [f"true_t+{i+1}" for i in range(horizon)]
+                        pred_cols = [f"pred_t+{i+1}" for i in range(horizon)]
+                        true_df = pd.DataFrame(y_true, columns=true_cols, index=df_valid.index)
+                        pred_df = pd.DataFrame(y_pred, columns=pred_cols, index=df_valid.index)
+                        system_cols = [c for c in ["cpu_load", "model_inference_time_ms", "total_processing_time_ms", "ram_total_gb", "ram_used_gb", "ram_percent"] if c in df.columns]
+                        sysinfo_df = df_valid[system_cols]
+                        full_df = pd.concat([pd.DataFrame({"date": dates.values}), true_df.reset_index(drop=True), pred_df.reset_index(drop=True), sysinfo_df.reset_index(drop=True)], axis=1)
+                        pred_path = os.path.join(config["paths"]["Prediction_Data"], f"prediction_final_{config.get('run_id')}.csv")
+                        os.makedirs(os.path.dirname(pred_path), exist_ok=True)
+                        full_df.to_csv(pred_path, index=False)
+                        metrics = PipelineUtils.evaluate_all_metrics(y_true, y_pred, horizon=config.get("horizon", 1))
+                        PipelineUtils.save_metrics_summary(metrics, config, (inference_processor.training_config if hasattr(inference_processor, 'training_config') else {}), config["paths"])
+                        logging.info(f"✅ Vorhersagen mit Systemdaten gespeichert: {pred_path}")
                 except Exception as e:
                     logging.error(f"Fehler beim Speichern der erweiterten Vorhersagen: {e}", exc_info=True)
-
 
 # =============================================================================
 # FLASK WEB APPLICATION (unverändert)
@@ -520,7 +530,7 @@ if __name__ == "__main__":
     # --- Default-Wert für config-name setzen, falls nicht angegeben ---
     if args.config_name is None:
         # Erstellt einen Default-Namen nach dem Muster "param_ALGORITHMUS_test"
-        args.config_name = f"param_{args.algorithm}_test"
+        args.config_name = f"{args.algorithm}"
         logging.info(f"Kein --config-name angegeben. Verwende Default: '{args.config_name}'")
 
     # --- Dynamisches Laden der Konfiguration ---

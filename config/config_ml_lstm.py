@@ -158,3 +158,59 @@ lstm = {
     # --- Inferenz (wird im "split"-Modus nicht verwendet) ---
     "inference_interval_sec": 1.0,
 }
+# =================================================================================
+# Vollständige Laufzeit-Konfiguration (Beispiel für LSTM)
+# =================================================================================
+# Dies ist die kombinierte Konfiguration, die nach dem Starten der App verwendet wird.
+full_runtime_config = {
+    
+    # --- Basis-Konfiguration (aus config/config_ml_lstm.py) ---
+    "model_name": "lstm_csv_split",
+    "dataset": "mqtt_data_rate_limited.csv",
+    "model_filename": "model_quant_float16.tflite",
+    "loading_strategy": "split", 
+    "train_fraction": 0.7,
+    "edge_device": True,
+    "num_layers": 3,
+    "initial_units": 128,
+    "dropout": 0.2,
+    "epochs": 1,
+    "batch_size": 32,
+    "validation_fraction": 0.2,
+    "early_stopping_patience": 10,
+    "loss": "huber",
+    "lags": 1,
+    "horizon": 20,
+    "rolling_window_size": 2,
+    "base_features": ['group4-2_s6_massflowrate'],
+    "time_features": [],
+    "include_roll_mean": True,
+    "include_roll_std": True,
+    "scale_other_features": True, 
+    "scale_target": True,
+    
+    # --- Inferenz- & Retraining-Steuerung ---
+    "inference_interval_sec": 1.0, # Zeit zwischen den Schritten im MQTT-Modus
+    # NEU: Anzahl der Inferenzschritte im "--no-retraining" Modus (wird bei MQTT genutzt)
+    "inference_steps": 500,
+    # NEU: Anzahl der Zyklen (Datensammeln + Nachtrainieren) im "--retraining" Modus
+    "retraining_cycles": 3,
+
+    # --- Artefakt-Ladekonfiguration (aus config_general.py -> CONFIG_LOAD_ARTIFACTS) ---
+    # Definiert, wie trainierte Modelle und Scaler für die Inferenz geladen werden.
+    "inference_mode": "load_artifacts_path", # Mögliche Werte: "load_artifacts_path", "load_artifacts_fast"
+
+    # --- MQTT-Konfiguration (aus config_general.py -> MQTT_CONFIG) ---
+    # Diese Werte werden verwendet, wenn loading_strategy = "live_mqtt" ist.
+    "MQTT_BROKER_IP": "192.168.0.101", # Beispiel-IP aus Ihren Logs
+    "MQTT_PORT": 1883,
+    "MQTT_TOPIC": "sim/data/20240341/S6", # Beispiel-Topic aus Ihren Logs
+
+    # --- Pfad-Konfiguration (aus config_general.py -> CONFIG_PATH) ---
+    # Die Basispfade für alle Ein- und Ausgaben.
+    "paths": {
+        "input": "C:/DEV/RevPi_ML/ML_Edge_Device/Input",   # Beispielpfad
+        "output": "C:/DEV/RevPi_ML/ML_Edge_Device/Output"  # Beispielpfad
+        # Weitere Pfade wie /Models, /Scalers etc. werden zur Laufzeit dynamisch hinzugefügt.
+    }
+}

@@ -10,7 +10,7 @@ class MqttInferenceClient:
     """
     Eine wiederverwendbare MQTT-Client-Klasse.
     Sie verbindet sich mit einem Broker, abonniert ein Topic und ruft bei jeder
-    eingehenden Nachricht eine übergebene Callback-Funktion auf.
+    eingehenden Nachricht eine übergebene Callback-Funktion auf.P
     """
     def __init__(self, broker_ip: str, port: int, topic: str, on_message_callback: callable):
         """
