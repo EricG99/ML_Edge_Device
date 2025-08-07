@@ -1,16 +1,10 @@
 # pipeline_web_app.py
 #
-# BEISPIEL-AUFRUFE:
+# BEISPIEL-AUFRUFE NEU:
 # -----------------
-# Modus: Retraining (Initiales Training + kontinuierliches Nachtraining)
-# > python pipeline_web_app.py --retraining --algorithm lstm
-# > python pipeline_web_app.py --retraining --algorithm random_forest
-#
-# Modus: No-Retraining (Einmaliges Training + lange Inferenzphase ohne Nachtraining)
-# > python pipeline_web_app.py --no-retraining --algorithm lstm
-#
-# Modus: No-Retraining (Laden eines existierenden Modells + lange Inferenzphase)
-# > python pipeline_web_app.py --no-retraining --algorithm lstm --load_id <IHRE_RUN_ID>
+# > python pipeline_web_app.py --algorithm lstm --config-name param_lstm_test --retraining
+# > python pipeline_web_app.py --algorithm random_forest --config-name param_rf_test --no-retraining
+# > python pipeline_web_app.py --algorithm lstm --config-name param_lstm_production --no-retraining --load_id <IHRE_RUN_ID>
 #
 
 import time
@@ -25,13 +19,13 @@ from flask import Flask, jsonify, render_template, request
 from copy import deepcopy
 from datetime import datetime, timedelta
 import tensorflow as tf
+import importlib # NEU: Für dynamische Imports
 
 # Benötigte Imports für das In-Memory-Retraining
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.preprocessing import MinMaxScaler, RobustScaler
 
 # --- Systempfad-Setup ---
-# Stellt sicher, dass die übergeordneten Projektverzeichnisse für Importe erreichbar sind
 try:
     project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
     if project_root not in sys.path:
@@ -68,8 +62,34 @@ shared_resource_lock = threading.Lock()
 shared_model = {"model": None, "scaler": None, "features": None, "config": None, "initial_training_data": None}
 all_predictions = [] # Speichert alle Vorhersagen für die Web-App
 
+
 # =============================================================================
-# CORE LOGIC: TRAINING, RETRAINING, AND INFERENCE
+# NEUE HILFSFUNKTION
+# =============================================================================
+def load_config_dynamically(algorithm: str, config_name: str) -> dict:
+    """
+    Lädt dynamisch eine Konfigurationsvariable aus einem Modul.
+
+    Args:
+        algorithm (str): Der Algorithmus (z.B. 'lstm'), der dem Dateinamen entspricht.
+        config_name (str): Der Name der Konfigurationsvariable in der Datei.
+
+    Returns:
+        dict: Das geladene Konfigurationswörterbuch.
+    """
+    try:
+        module_path = f"config.config_ml_{algorithm}"
+        config_module = importlib.import_module(module_path)
+        config_dict = getattr(config_module, config_name)
+        logging.info(f"Konfiguration '{config_name}' erfolgreich aus '{module_path}' geladen.")
+        return deepcopy(config_dict)
+    except (ImportError, AttributeError) as e:
+        logging.error(f"Fehler beim dynamischen Laden der Konfiguration '{config_name}' aus '{module_path}': {e}", exc_info=True)
+        sys.exit(1)
+
+
+# =============================================================================
+# CORE LOGIC: TRAINING, RETRAINING, AND INFERENCE (unverändert)
 # =============================================================================
 
 def initial_training(config: dict, trainer_class, folder_flag: str):
@@ -193,6 +213,7 @@ def inference_manager(config: dict, inference_class, folder_flag: str, algorithm
     global all_predictions
     retraining_data_list = []
     mqtt_client = None  # WICHTIG: Variable am Anfang initialisieren
+    inference_processor = None # WICHTIG: Variable am Anfang initialisieren
 
     try:
         # Warten, bis die Initialisierung (Training oder Laden) abgeschlossen ist
@@ -355,28 +376,70 @@ def inference_manager(config: dict, inference_class, folder_flag: str, algorithm
                 logging.error(f"Fehler beim Trennen des MQTT-Clients: {e}", exc_info=True)
 
         if all_predictions:
-            # === ÜBERARBEITETE SPEICHERLOGIK ===
-            # Speichert die Vorhersagen im Ordner des ursprünglichen Laufs, anstatt einen neuen "_final" Ordner zu erstellen.
-            logging.info("Speichere finale Vorhersagen...")
-            
-            # Die `config` Variable in diesem Scope enthält bereits die korrekten, versionierten Pfade vom initialen Lauf.
-            prediction_dir = config.get("paths", {}).get("Prediction_Data")
-            run_id = config.get("run_id", "final_run")
+            logging.info("🔄 Speichere finale Vorhersagen mit CPU/RAM und Zeiten...")
 
-            if prediction_dir and os.path.isdir(os.path.dirname(prediction_dir)):
-                # Sicherstellen, dass das Zielverzeichnis existiert
-                os.makedirs(prediction_dir, exist_ok=True)
-# Erstellt einen Zeitstempel im Format YYYY-MM-DD_HHMMSS
-                timestamp_str = datetime.now().strftime("%Y-%m-%d_%H%M%S")
-                final_pred_path = os.path.join(prediction_dir, f"{timestamp_str}__{run_id}.csv")
-                pd.DataFrame(all_predictions).to_csv(final_pred_path, index=False)
-                logging.info(f"Finale Vorhersagen gespeichert unter: {final_pred_path}")
-            else:
-                logging.warning(f"Pfad 'Prediction_Data' nicht in der Konfiguration für Run '{run_id}' gefunden. Speichern der Vorhersagen übersprungen.")
+            df = pd.DataFrame(all_predictions)
+
+            # RAM entpacken
+            if "ram_usage" in df.columns:
+                ram_df = pd.json_normalize(df["ram_usage"])
+                ram_df.columns = [f"ram_{col}" for col in ram_df.columns]
+                df = pd.concat([df.drop(columns=["ram_usage"]), ram_df], axis=1)
+
+            if "rolling_forecast" in df.columns and "true_value" in df.columns:
+                try:
+                    y_pred = np.stack(df["rolling_forecast"].to_numpy())
+                    horizon = y_pred.shape[1]
+                    y_true = np.tile(df["true_value"].to_numpy().reshape(-1, 1), reps=(1, horizon))
+                    dates = pd.to_datetime(df["datetime"])
+
+                    valid = ~np.isnan(y_true).any(axis=1) & ~np.isnan(y_pred).any(axis=1)
+                    if not valid.any():
+                        logging.warning("Keine gültigen Zeilen für Vorhersage vorhanden.")
+                        return
+
+                    # Speichern der kombinierten Daten
+                    true_cols = [f"true_t+{i+1}" for i in range(horizon)]
+                    pred_cols = [f"pred_t+{i+1}" for i in range(horizon)]
+
+                    true_df = pd.DataFrame(y_true[valid], columns=true_cols)
+                    pred_df = pd.DataFrame(y_pred[valid], columns=pred_cols)
+
+                    system_cols = [
+                        "cpu_load", "model_inference_time_ms", "total_processing_time_ms",
+                        "ram_total_gb", "ram_used_gb", "ram_percent"
+                    ]
+                    sysinfo_df = df.loc[valid, system_cols].reset_index(drop=True)
+
+                    full_df = pd.concat([
+                        pd.DataFrame({"date": dates[valid].values}),
+                        true_df,
+                        pred_df,
+                        sysinfo_df
+                    ], axis=1)
+
+                    pred_path = os.path.join(
+                        config["paths"]["Prediction_Data"],
+                        f"prediction_final_{config.get('run_id')}.csv"
+                    )
+                    os.makedirs(os.path.dirname(pred_path), exist_ok=True)
+                    full_df.to_csv(pred_path, index=False)
+
+                    # Metriken speichern
+                    metrics = PipelineUtils.evaluate_all_metrics(y_true[valid], y_pred[valid], horizon=config.get("horizon", 1)) 
+                    
+                    # Die Funktion save_metrics_summary wird hier anstelle von save_metrics_csv verwendet, 
+                    # da sie das Speichern der Konfigurationen mit einschließt.
+                    PipelineUtils.save_metrics_summary(metrics, config, (inference_processor.training_config if hasattr(inference_processor, 'training_config') else {}), config["paths"])
+
+                    logging.info(f"✅ Vorhersagen mit Systemdaten gespeichert: {pred_path}")
+
+                except Exception as e:
+                    logging.error(f"Fehler beim Speichern der erweiterten Vorhersagen: {e}", exc_info=True)
 
 
 # =============================================================================
-# FLASK WEB APPLICATION
+# FLASK WEB APPLICATION (unverändert)
 # =============================================================================
 
 def create_flask_app(app_config):
@@ -436,60 +499,71 @@ def create_flask_app(app_config):
 
     return app
 
+# =============================================================================
+# HAUPTLOGIK (Korrigierte Version)
+# =============================================================================
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Vereinheitlichte ML-Pipeline mit Web-UI")
+    
+    # --- Argumente definieren ---
+    parser.add_argument('--algorithm', type=str, required=True, choices=['random_forest', 'lstm'], help="Zu verwendender Algorithmus.")
+    # --config-name ist jetzt optional (required=True wurde entfernt)
+    parser.add_argument('--config-name', type=str, help="Optional: Name der Konfigurationsvariable. Default wird zu 'param_<algorithm>_test'.")
+    
     parser.add_argument('--retraining', action=argparse.BooleanOptionalAction, default=False, help="Aktiviert den Retraining-Modus.")
-    parser.add_argument('--algorithm', type=str, default='lstm', choices=['random_forest', 'lstm'], help="Zu verwendender Algorithmus.")
     parser.add_argument("--load_id", type=str, help="Optionale Run ID zum Laden von Artefakten anstelle von Training.")
     parser.add_argument("--model_filename", type=str, help="Optional: Name der zu ladenden Modelldatei (z.B. 'quantized_model.tflite').")
 
     args = parser.parse_args()
 
-    # Konfiguration basierend auf Algorithmus laden
+    # --- Default-Wert für config-name setzen, falls nicht angegeben ---
+    if args.config_name is None:
+        # Erstellt einen Default-Namen nach dem Muster "param_ALGORITHMUS_test"
+        args.config_name = f"param_{args.algorithm}_test"
+        logging.info(f"Kein --config-name angegeben. Verwende Default: '{args.config_name}'")
+
+    # --- Dynamisches Laden der Konfiguration ---
+    config = load_config_dynamically(args.algorithm, args.config_name)
+
+    # --- Zuordnung der Klassen basierend auf dem Algorithmus ---
     if args.algorithm == 'random_forest':
-        from config.config_ml_rf import param_rf_test
-        config = param_rf_test.copy()
         from ML_Algorithms.Random_Forest.rf_train import RandomForestTrainer
         from ML_Algorithms.Random_Forest.rf_inference import RFInference
         trainer_class = RandomForestTrainer
         inference_class = RFInference
         folder_flag = "RandomForest"
     else: # lstm
-        from config.config_ml_lstm import param_lstm_test
-        config = param_lstm_test.copy()
         from ML_Algorithms.LSTM.LSTM_train import LSTMTrainer
         from ML_Algorithms.LSTM.LSTM_inference import LSTMInference
         trainer_class = LSTMTrainer
         inference_class = LSTMInference
         folder_flag = "LSTM"
     
+    # --- Zusammenführen der restlichen Konfigurationen ---
     config.update(CONFIG_LOAD_ARTIFACTS)
     config.update(MQTT_CONFIG)
     config['paths'] = CONFIG_PATH['paths']
 
-    # Modus bestimmen
+    # --- Restliche Logik ---
     mode = "retraining" if args.retraining else "no_retraining"
     port = 5002 if mode == "retraining" else 5001
     
-    log_msg = f"--- MODUS: {mode.replace('_', ' ')} | ALGORITHMUS: {args.algorithm} ---"
+    log_msg = f"--- MODUS: {mode.replace('_', ' ')} | ALGORITHMUS: {args.algorithm} | CONFIG: {args.config_name} ---"
 
     if args.model_filename:
         config['model_filename'] = args.model_filename
 
     if args.load_id:
         config['load_id'] = args.load_id
-        config['run_id'] = args.load_id  # Wichtig für die Benennung der finalen Datei
+        config['run_id'] = args.load_id
         log_msg += f" | Lade Modell von Run ID: {args.load_id}"
 
-        # Wir müssen das 'paths'-Dictionary manuell mit den vollständigen, versionierten
-        # Pfaden des zu ladenden Laufs aktualisieren, damit das Speichern am Ende funktioniert.
         logging.info(f"Konfiguriere Pfade für das Laden von Run ID: {args.load_id}...")
         
         base_output_path = config['paths'].get('output')
         run_dir = os.path.join(base_output_path, folder_flag, args.load_id)
 
-        # Das 'paths'-Dictionary mit den spezifischen Unterordnern aktualisieren.
-        # Dies spiegelt die Struktur wider, die setup_experiment() beim Training erstellt.
         config['paths'].update({
             "run_dir": run_dir,
             "Models": os.path.join(run_dir, "Models"),
@@ -500,7 +574,6 @@ if __name__ == "__main__":
         logging.info(f"Speicherpfad für Vorhersagen gesetzt auf: {config['paths']['Prediction_Data']}")
 
     else:
-        # Dieser Pfad wird nur beim Training ausgeführt
         exp_name = folder_flag 
         _, paths = PipelineUtils.setup_experiment(config, exp_name, run_type='train')
         config['paths'] = paths
@@ -514,7 +587,6 @@ if __name__ == "__main__":
             name="InitialTrainingThread", daemon=True
         ).start()
     else:
-        # Wenn wir laden, ist das Modell sofort bereit für die Inferenz
         PIPELINE_STATE["status"] = "ready_for_inference"
 
     # Inferenz-Manager-Thread starten
