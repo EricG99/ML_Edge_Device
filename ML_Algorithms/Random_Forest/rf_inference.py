@@ -19,7 +19,7 @@ if project_root not in sys.path:
 from ML_Helpfunctions.base_inference import BaseInferenceProcessor
 # *** NEU: Import des optimierten Datenprozessors ***
 from ML_Helpfunctions.base_data_processing import RealTimeDataProcessor
-from config.config_ml_rf import param_rf_test
+from config.config_ml_random_forest import random_forest
 from config.config_general import CONFIG_PATH, MQTT_CONFIG, CONFIG_LOAD_ARTIFACTS
 
 FOLDER_FLAG = "RandomForest"

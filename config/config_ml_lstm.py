@@ -118,7 +118,7 @@ param_lstm_server = {
 lstm = {
     # --- Allgemeine Konfiguration ---
     "model_name": "lstm_csv_split",
-    "dataset": "mqtt_data_rate_limited.csv", # Diese Datei wird für Training und Inferenz genutzt
+    "dataset": "mqtt_data_filtered.csv", # Diese Datei wird für Training und Inferenz genutzt
     "model_filename": "model_quant_float16.tflite",
 
     # --- Laden & Aufteilen der Daten ---
@@ -128,15 +128,15 @@ lstm = {
     "train_fraction": 0.7, # 70% der CSV für Training, 30% für die anschließende Inferenz
 
     # --- Quantisierung ---
-    "edge_device": True, # Aktiviert die TFLite-Quantisierung nach dem Training
+    "edge_device": False, # Aktiviert die TFLite-Quantisierung nach dem Training
 
     # --- Modellarchitektur ---
-    "num_layers": 3,
-    "initial_units": 128,
+    "num_layers": 2,
+    "initial_units": 52,
     "dropout": 0.2,
 
     # --- Trainingseinstellungen ---
-    "epochs": 1,
+    "epochs": 5,
     "batch_size": 32,
     "validation_fraction": 0.2, # 20% der Trainingsdaten werden zur Validierung während des Trainings genutzt
     "early_stopping_patience": 10,
@@ -144,7 +144,7 @@ lstm = {
 
     # --- Zeitreihenparameter ---
     "lags": 1,
-    "horizon": 20,
+    "horizon": 4,
     "rolling_window_size": 2,
 
     # --- Feature Engineering ---
@@ -153,7 +153,7 @@ lstm = {
     "include_roll_mean": True,
     "include_roll_std": True,
     "scale_other_features": True, 
-    "scale_target": True,
+    "scale_target": False,
     
     # --- Inferenz (wird im "split"-Modus nicht verwendet) ---
     "inference_interval_sec": 1.0,

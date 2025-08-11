@@ -20,39 +20,36 @@ from pathlib import Path
 # ---------------------------------------------------
 def _get_file_path(config: dict) -> Path:
     """
-    Gibt den vollständigen Pfad zur Zieldatendatei zurück.
-    
-    Diese Funktion sucht im "input_data"-Verzeichnis (definiert in der Konfiguration)
-    nach dem Dateinamen, der unter dem Schlüssel "dataset" in der Konfiguration
-    gespeichert ist.
-
-    Args:
-        config (dict): Konfigurationsdictionary, das unter "paths" den Pfad 
-                       "input_data" und den Dateinamen unter "dataset" enthält.
-
-    Returns:
-        Path: Ein Path-Objekt, das auf die existierende Datendatei verweist.
-
-    Raises:
-        KeyError: Wenn notwendige Schlüssel in der Konfiguration fehlen.
-        FileNotFoundError: Wenn die zusammengesetzte Datei nicht gefunden wird.
+    Ermittelt den vollständigen Pfad zur Datendatei robust aus config['paths'] und 'dataset'.
+    Akzeptiert mehrere mögliche Keys für den Eingabeordner.
     """
     try:
-        # === KORREKTUR: Hier auf den spezifischen "input_data"-Pfad verweisen ===
-        data_dir = config["paths"]["input_data"] 
-        filename = config["dataset"]
-    except KeyError as e:
-        raise KeyError(f"Fehlender oder falscher Schlüssel in der Konfiguration: {e}. "
-                     f"Stellen Sie sicher, dass config['paths']['Input_Data'] und config['dataset'] existieren.")
+        paths = config["paths"]
+    except KeyError:
+        raise KeyError("Fehlender Schlüssel: config['paths']")
 
-    # Stelle sicher, dass data_dir ein Path-Objekt ist (falls es als String geladen wurde)
+    # akzeptiere mehrere Namensvarianten
+    for key in ("input_data", "Input_Data", "input"):
+        data_dir = paths.get(key)
+        if data_dir:
+            break
+    else:
+        raise KeyError(
+            "Kein Eingabeordner in config['paths'] gefunden. Erwartet einer von: "
+            "'input_data', 'Input_Data', 'input'."
+        )
+
+    filename = config.get("dataset")
+    if not filename:
+        raise KeyError("Fehlender Schlüssel: config['dataset'] (Dateiname)")
+
     file_path = Path(data_dir) / filename
-
     if not file_path.exists():
-        raise FileNotFoundError(f"Die angegebene Datendatei wurde nicht gefunden unter: {file_path}")
-        
+        raise FileNotFoundError(f"Datendatei nicht gefunden: {file_path}")
+
     print(f"✔️ Datendatei gefunden: {file_path}")
     return file_path
+
 
 # ---------------------------------------------------
 # LADEN TRAIN/TEST
@@ -87,7 +84,7 @@ def load_test_data_with_datetime(test_period_start: str,
     end_date = pd.to_datetime(test_period_end)
 
     file_path = _get_file_path(config)
-    df = pd.read_csv(file_path, sep=";")
+    df = pd.read_csv(f_get_file_pathile_path, sep=";")
     df["Datetime"] = pd.to_datetime(df["Datetime"])
     df = df[(df["Datetime"] >= start_date) & (df["Datetime"] <= end_date)].copy()
 

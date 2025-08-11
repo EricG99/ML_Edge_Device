@@ -2,10 +2,10 @@
 
 # Konfiguration für einen schnellen Testlauf (wenige Bäume, kleine Datenmenge).
 # Ideal für Debugging und Funktionsüberprüfungen.
-param_rf_test = {
+random_forest = {
     # Experimentinformationen
     "model_name": "rf_test",
-    "dataset": "mqtt_data_rate_limited.csv",
+    "dataset": "mqtt_data_filtered.csv",
     "model_filename": "model.joblib", # Wichtig für das Speichern
     "load_id": "2025-07-22_160652_7540_train",
 
@@ -20,7 +20,7 @@ param_rf_test = {
 
     # Zeitreihenparameter
     "lags": 1,
-    "horizon": 1,
+    "horizon": 5,
     "train_fraction": 0.8,
     "rolling_window_size": 2,
     # Features

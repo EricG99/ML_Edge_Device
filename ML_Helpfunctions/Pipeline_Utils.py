@@ -806,7 +806,7 @@ def create_representative_dataset_generator(dataset: tf.data.Dataset):
     return generator
 
 
-def load_model_artifacts_for_inference(config: dict, folder_flag ) -> tuple:
+def load_model_artifacts_for_inference(config: dict, folder_flag: str) -> tuple:
     """
     Lädt robust die notwendigen Artefakte (Scaler, Features, Modell) für die Inferenz.
     Die Funktion unterstützt zwei verschiedene Modi, die über die Konfiguration
@@ -814,9 +814,12 @@ def load_model_artifacts_for_inference(config: dict, folder_flag ) -> tuple:
 
     Args:
         config (dict): Das Konfigurations-Wörterbuch, das den Modus und die Pfade enthält.
+        folder_flag (str): Der modellspezifische Ordnername (z.B. "LSTM" oder "RandomForest").
 
     Returns:
-        tuple: Ein Tupel mit den geladenen Artefakten in der Reihenfolge (scaler, features, model).
+        tuple: Ein Tupel mit den geladenen Artefakten in der Reihenfolge 
+               (scaler, features, model, training_config, y_scaler). 
+               y_scaler kann None sein.
 
     Raises:
         ValueError: Wenn ein unbekannter 'inference_mode' angegeben wird oder
@@ -845,30 +848,29 @@ def load_model_artifacts_for_inference(config: dict, folder_flag ) -> tuple:
     mode = config.get("inference_mode", "load_artifacts_fast")
     logging.info(f"Lade Artefakte im Modus: '{mode}'...")
     
-    training_config = None # NEU: Initialisierung
+    # Artefakte initialisieren
+    scaler = None
+    y_scaler = None
+    features = None
+    model = None
+    training_config = None
 
     # ----- Pfade basierend auf dem Modus bestimmen -----
     if mode == 'load_artifacts_path':
         try:
-            # Der Schlüssel 'artifacts_path' wurde in der letzten Korrektur festgelegt
-            base_path = config['paths']['artifacts_output']
+            # Der Schlüssel 'artifacts_path' verweist auf das Basis-Output-Verzeichnis
+            base_path = config['paths'].get('output') or config.get('artifacts_path') # Fallback für ältere Configs
             load_id = config["load_id"]
-            
-            # KORREKTUR: Lese den Modell-Dateinamen aus der Konfiguration
-            model_filename = config["model_filename"] 
+            model_filename = config.get("model_filename", "model.joblib") # Default-Dateiname
             
         except KeyError as e:
             raise ValueError(f"Für Modus 'load_artifacts_path' fehlt der Schlüssel '{e}' in der Konfiguration.")
 
-        run_dir  = os.path.join(base_path, folder_flag, load_id)
+        run_dir = os.path.join(base_path, folder_flag, load_id)
 
-        # Verwende den dynamischen Dateinamen für das Modell
         model_path = os.path.join(run_dir, "Models", model_filename)
-        
-        # Die Namen für Scaler und Features sind oft konsistent
         scaler_path = os.path.join(run_dir, "Scalers", "scaler.joblib")
         features_path = os.path.join(run_dir, "Models", "features.joblib")
-
         training_config_path = os.path.join(run_dir, "Models", "training_config.json")
 
         logging.info(f"Lade versionierte Artefakte aus: {run_dir}")
@@ -890,33 +892,42 @@ def load_model_artifacts_for_inference(config: dict, folder_flag ) -> tuple:
     else:
         raise ValueError(f"Unbekannter 'inference_mode': '{mode}'. Gültige Modi sind 'load_artifacts_fast' und 'load_artifacts_path'.")
 
+    # ----- Existenz der Dateien prüfen -----
     for path in [model_path, scaler_path, features_path]:
         if not os.path.exists(path):
             raise FileNotFoundError(f"Benötigte Artefakt-Datei wurde nicht gefunden unter: {path}")
 
+    # ----- Artefakte laden -----
+    # Modell laden (je nach Dateityp)
     if model_path.endswith((".keras", ".h5")):
         model = tf.keras.models.load_model(model_path)
     elif model_path.endswith(".joblib"):
         model = joblib.load(model_path)
     elif model_path.endswith(".tflite"):
         logging.info("Lade TFLite-Modell mit TensorFlow Lite Interpreter.")
-        # Lade das Modell mit dem TFLite Interpreter
         interpreter = tf.lite.Interpreter(model_path=model_path)
-        # Reserviere Speicher für die Tensoren des Modells
         interpreter.allocate_tensors()
-        # Gib den Interpreter als "Modell"-Objekt zurück
         model = interpreter
     else:
-        raise ValueError(f"Unbekannte Modelldatei-Endung. Unterstützt werden .keras, .h5, .joblib. Pfad: {model_path}")
+        raise ValueError(f"Unbekannte Modelldatei-Endung. Unterstützt werden .keras, .h5, .joblib, .tflite. Pfad: {model_path}")
 
-    # Scaler und Features werden immer mit joblib geladen
+    # Feature-Scaler und Feature-Liste laden
     scaler = joblib.load(scaler_path)
     features = joblib.load(features_path)
 
+    # Optional den y-Scaler laden, falls vorhanden
+    y_scaler_path = os.path.join(os.path.dirname(scaler_path), "y_scaler.joblib")
+    if os.path.exists(y_scaler_path):
+        try:
+            y_scaler = joblib.load(y_scaler_path)
+            logging.info("✅ Target scaler (y_scaler) erfolgreich geladen.")
+        except Exception as e:
+            logging.warning(f"Konnte y_scaler nicht laden von {y_scaler_path}: {e}")
+    
     logging.info("✅ Alle Artefakte erfolgreich geladen.")
 
-    # Rückgabe in der gewünschten Reihenfolge
-    return scaler, features, model, training_config
+    # Rückgabe in der korrekten Reihenfolge
+    return scaler, features, model, training_config, y_scaler
 
 class ModelScalerSaver:
     """

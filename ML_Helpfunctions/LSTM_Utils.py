@@ -3,6 +3,7 @@
 
 import os
 import json
+from pyexpat import model
 import time
 import numpy as np
 import pandas as pd
@@ -102,7 +103,7 @@ def build_dynamic_lstm(input_shape: Tuple[int, int],
         model.add(BatchNormalization())
         units = max(units // 2, 4)
 
-    model.add(Dense(forecast_horizon, activation='relu'))
+    model.add(Dense(forecast_horizon, activation='linear'))
     model.compile(optimizer='adam', loss='mse')
     return model
 

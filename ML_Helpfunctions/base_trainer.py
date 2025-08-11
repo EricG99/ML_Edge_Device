@@ -38,7 +38,8 @@ class BaseTrainer(ABC):
         logging.info("\nStep 1: Preparing training data...")
         pipeline = self._setup_pipeline()
         X_train, y_train = pipeline.prepare_training_data()
-        
+        self.y_scaler = getattr(pipeline, 'y_scaler', None)
+
         self.scaler = pipeline.scaler
         self.features = pipeline.full_feature_list
 
@@ -94,6 +95,10 @@ class BaseTrainer(ABC):
             logging.info("Saving in 'path' mode with versioned directory...")
             saver = Pipeline_Utils.ModelScalerSaver(self.config, paths)
             saved_artifacts = saver.save_artifacts(model=self.model, scaler=self.scaler)
+            if getattr(self, 'y_scaler', None) is not None:
+                y_path = os.path.join(paths["Scalers"], "y_scaler.joblib")
+                joblib.dump(self.y_scaler, y_path)
+                logging.info(f"Target y_scaler saved to: {y_path}")
             try:
                 features_path = os.path.join(paths.get("Models"), "features.joblib")
                 joblib.dump(self.features, features_path)
