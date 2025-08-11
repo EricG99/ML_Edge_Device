@@ -295,7 +295,7 @@ def main():
         from config.config_ml_lstm import param_lstm_test
         config = param_lstm_test.copy()
     elif args.algorithm == 'random_forest':
-        from config.config_ml_rf import param_rf_test
+        from config.config_ml_random_forest import param_rf_test
         config = param_rf_test.copy()
     else:
         sys.exit(f"Unbekannter Algorithmus: {args.algorithm}")

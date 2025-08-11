@@ -17,7 +17,7 @@ if project_root not in sys.path:
 
 # --- Application Imports ---
 #from config.config_general import CONFIG_PATH, MQTT_CONFIG, generate_run_id
-from config.config_ml_rf import param_rf_test
+from config.config_ml_random_forest import param_rf_test
 from config.config_general import CONFIG_PATH, generate_run_id, MQTT_CONFIG, CONFIG_LOAD_ARTIFACTS
 
 #from ML_Algorithms.Random_Forest.rf_train import run

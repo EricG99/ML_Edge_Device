@@ -29,12 +29,17 @@ class RealTimeDataProcessor:
         min_for_rolling_features = self.config.get('rolling_window_size', 1)
         self._min_data_points = max(min_for_lags, min_for_rolling_features)
 
-        # Die Puffergröße muss groß genug sein für die minimalen Datenpunkte und die Lags für das LSTM.
-        self._max_buffer_size = self.config.get('max_fe_window', 50) + self.config.get('lags', 1)
+        # === LÖSUNG: Puffergröße drastisch erhöhen für stabile Features ===
+        # Ein kleiner Puffer führt zu instabilen statistischen Features (z.B. rolling_mean),
+        # die nicht mit den im Training berechneten Features übereinstimmen.
+        # Ein größerer Puffer sorgt für repräsentativere Feature-Werte.
+        # Der Wert kann über den Key 'max_fe_window' in der Config überschrieben werden.
+        default_window_size = 1000
+        self._max_buffer_size = self.config.get('max_fe_window', default_window_size) + self.config.get('lags', 1)
         
         logging.info(
             f"RealTimeDataProcessor initialisiert. "
-            f"Maximale Puffergröße: {self._max_buffer_size}, "
+            f"Maximale Puffergröße: {self._max_buffer_size} (Default-Fenster: {default_window_size}), "
             f"Minimale Datenpunkte für Start: {self._min_data_points}"
         )
 
@@ -56,14 +61,20 @@ class RealTimeDataProcessor:
         # 1. Neuen Datenpunkt in einen DataFrame umwandeln und an den Puffer anhängen
         try:
             new_row = pd.DataFrame([new_data_point])
-            # NEU: Alle Spaltennamen auf Kleinbuchstaben standardisieren
+            # Alle Spaltennamen auf Kleinbuchstaben standardisieren
             new_row.columns = new_row.columns.str.lower()
             
-            # Jetzt kann sicher auf 'datetime' zugegriffen werden
-            new_row['datetime'] = pd.to_datetime(new_row['datetime'])
+            # Zeitstempel-Spalte robust verarbeiten
+            if 'datetime' in new_row.columns:
+                new_row['datetime'] = pd.to_datetime(new_row['datetime'])
+            elif 'time' in new_row.columns:
+                 new_row['datetime'] = pd.to_datetime(new_row['time'], unit='ms')
+            else:
+                 raise KeyError("Eingehende Daten müssen eine 'datetime' oder 'time' Spalte enthalten.")
+
             new_row = new_row.set_index('datetime')
-        except KeyError:
-            logging.error("Der neue Datenpunkt enthält keinen 'datetime'-Schlüssel.")
+        except KeyError as e:
+            logging.error(f"Der neue Datenpunkt enthält keinen gültigen Zeitstempel-Schlüssel: {e}")
             return None
         
         self._buffer = pd.concat([self._buffer, new_row]).sort_index()

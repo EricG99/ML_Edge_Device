@@ -19,7 +19,7 @@ from Random_Forest.rf_train import run_training as run_rf_training
 # from LSTM.lstm_train import run_training as run_lstm_training # Beispiel für die Zukunft
 
 # --- Algorithmus-spezifische Konfigurationen ---
-from config.config_ml_rf import param_rf_test
+from config.config_ml_random_forest import param_rf_test
 
 from LSTM.lstm_train import run_training as run_lstm_training
 from config.config_ml_lstm import param_lstm_test, param_lstm_server

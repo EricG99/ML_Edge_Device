@@ -174,13 +174,13 @@ full_runtime_config = {
     "num_layers": 3,
     "initial_units": 128,
     "dropout": 0.2,
-    "epochs": 1,
+    "epochs": 50,
     "batch_size": 32,
     "validation_fraction": 0.2,
     "early_stopping_patience": 10,
     "loss": "huber",
-    "lags": 1,
-    "horizon": 20,
+    "lags": 5,
+    "horizon": 5,
     "rolling_window_size": 2,
     "base_features": ['group4-2_s6_massflowrate'],
     "time_features": [],
@@ -192,7 +192,7 @@ full_runtime_config = {
     # --- Inferenz- & Retraining-Steuerung ---
     "inference_interval_sec": 1.0, # Zeit zwischen den Schritten im MQTT-Modus
     # NEU: Anzahl der Inferenzschritte im "--no-retraining" Modus (wird bei MQTT genutzt)
-    "inference_steps": 500,
+    "inference_steps": 200,
     # NEU: Anzahl der Zyklen (Datensammeln + Nachtrainieren) im "--retraining" Modus
     "retraining_cycles": 3,
 
@@ -206,11 +206,5 @@ full_runtime_config = {
     "MQTT_PORT": 1883,
     "MQTT_TOPIC": "sim/data/20240341/S6", # Beispiel-Topic aus Ihren Logs
 
-    # --- Pfad-Konfiguration (aus config_general.py -> CONFIG_PATH) ---
-    # Die Basispfade für alle Ein- und Ausgaben.
-    "paths": {
-        "input": "C:/DEV/RevPi_ML/ML_Edge_Device/Input",   # Beispielpfad
-        "output": "C:/DEV/RevPi_ML/ML_Edge_Device/Output"  # Beispielpfad
-        # Weitere Pfade wie /Models, /Scalers etc. werden zur Laufzeit dynamisch hinzugefügt.
-    }
+
 }

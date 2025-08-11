@@ -10,7 +10,7 @@ if project_root not in sys.path:
     sys.path.append(project_root)
 
 from config.config_general import CONFIG_PATH, MQTT_CONFIG, CONFIG_LOAD_ARTIFACTS
-from config.config_ml_rf import param_rf_test
+from config.config_ml_random_forest import param_rf_test
 from Random_Forest.rf_inference import run_standalone_inference as run_rf_standalone_inference
 # from LSTM.lstm_inference import run_standalone_inference as run_lstm_standalone_inference
 
