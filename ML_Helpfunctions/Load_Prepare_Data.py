@@ -84,7 +84,7 @@ def load_test_data_with_datetime(test_period_start: str,
     end_date = pd.to_datetime(test_period_end)
 
     file_path = _get_file_path(config)
-    df = pd.read_csv(f_get_file_pathile_path, sep=";")
+    df = pd.read_csv(file_path, sep=";")
     df["Datetime"] = pd.to_datetime(df["Datetime"])
     df = df[(df["Datetime"] >= start_date) & (df["Datetime"] <= end_date)].copy()
 
@@ -482,42 +482,6 @@ def _create_train_val_split(X_train, y_train, validation_fraction=0.2):
     return X_train_split, X_val, y_train_split, y_val
 
 # In Ihrem Hilfs-Modul (z.B. Pipeline_Utils.py)
-
-def create_timeseries_validation_split(X_train, y_train, config):
-    """
-    Teilt Trainingsdaten chronologisch in ein Trainings- und ein Validierungsset.
-    Die letzten Datenpunkte werden für die Validierung verwendet.
-
-    Args:
-        X_train (np.ndarray): Die vollständigen Trainingsdaten (Input).
-        y_train (np.ndarray): Die vollständigen Trainingsdaten (Zielwerte).
-        config (dict): Konfigurationsdictionary, das 'validation_fraction' enthält.
-
-    Returns:
-        tuple: (X_fit, y_fit, X_val, y_val)
-        Gibt die aufgeteilten Daten zurück. Wenn keine Validierung stattfindet,
-        sind X_val und y_val None.
-    """
-    val_fraction = config.get("validation_fraction", 0.0)
-
-    # Nur splitten, wenn eine valide Fraktion angegeben ist und genügend Daten vorhanden sind.
-    if val_fraction > 0 and X_train.shape[0] > 10:
-        print(f"Erstelle chronologischen Validierungs-Split. Validation Fraction: {val_fraction}")
-        split_index = int((1 - val_fraction) * len(X_train))
-        
-        X_fit = X_train[:split_index]
-        y_fit = y_train[:split_index]
-        
-        X_val = X_train[split_index:]
-        y_val = y_train[split_index:]
-        
-        return X_fit, y_fit, X_val, y_val
-    else:
-        # Wenn keine Validierung stattfinden soll, gib die Originaldaten und None zurück.
-        print("Kein Validierungs-Split durchgeführt.")
-        return X_train, y_train, None, None
-        return X_train, y_train, None, None
-    
 
 def convert_data_to_multi_output_window(data: np.ndarray, config: dict):
     """

@@ -571,70 +571,6 @@ def inference_manager(config: dict, inference_class, folder_flag: str, algorithm
 
 
 # =============================================================================
-# FLASK WEB APPLICATION
-# =============================================================================
-
-def create_flask_app(app_config):
-    """Erstellt und konfiguriert die Flask-Anwendung."""
-    template_folder = os.path.join(project_root, 'ML_Algorithms', 'templates')
-    if not os.path.exists(template_folder):
-        template_folder = os.path.join(os.path.dirname(__file__), 'templates')
-
-    app = Flask(__name__, template_folder=template_folder)
-
-    @app.route('/')
-    def index():
-        return render_template('dashboard_retrain.html', config=app_config)
-
-    @app.route('/api/status')
-    def get_status():
-        with shared_resource_lock:
-            return jsonify(PIPELINE_STATE.copy())
-
-    @app.route('/api/data')
-    def get_data():
-        # Das Frontend fragt nach einem bestimmten Schritt, z.B. /api/data?step=5
-        step_index = request.args.get('step', type=int, default=0)
-
-        with shared_resource_lock:
-            # Prüfen, ob die Daten für den angeforderten Schritt bereits existieren
-            if step_index < len(all_predictions):
-                # Ja, Daten sind da. Sende sie.
-                data_for_step = deepcopy(all_predictions[step_index])
-
-                if isinstance(data_for_step['datetime'], (datetime, pd.Timestamp)):
-                    data_for_step['datetime'] = data_for_step['datetime'].isoformat()
-
-                # Die Logik für die rollierende Prognose muss hier auch ausgeführt werden
-                interval_key = "inference_cycle_sec" if PIPELINE_STATE["mode"] == "retraining" else "inference_interval_sec"
-                interval_sec = app_config.get(interval_key, 1.0)
-                rolling_forecast_values = data_for_step.get("rolling_forecast", [])
-                rolling_forecast_dates = [
-                    (datetime.fromisoformat(data_for_step['datetime']) + timedelta(seconds=(i) * interval_sec)).isoformat()
-                    for i in range(len(rolling_forecast_values))
-                ]
-                data_for_step['rolling_forecast_dates'] = rolling_forecast_dates
-
-                return jsonify({"status": "success", "data": data_for_step})
-            else:
-                # Nein, der Inferenz-Thread ist noch nicht so weit. Frontend soll warten.
-                return jsonify({"status": "waiting"})
-
-    @app.route('/api/control', methods=['POST'])
-    def control_pipeline():
-        action = request.json.get('action')
-        with shared_resource_lock:
-            if action == 'pause':
-                PIPELINE_STATE['is_paused'] = True
-            elif action == 'resume':
-                PIPELINE_STATE['is_paused'] = False
-            logging.info(f"Steuerungsaktion '{action}' empfangen. Pausiert: {PIPELINE_STATE['is_paused']}")
-        return jsonify({"status": "ok", "is_paused": PIPELINE_STATE['is_paused']})
-
-    return app
-
-
-# =============================================================================
 # HAUPTLOGIK
 # =============================================================================
 
@@ -735,7 +671,8 @@ if __name__ == "__main__":
     ).start()
 
     # Flask-App starten
-    app = create_flask_app(config)
+    from web_app import create_app
+    app = create_app(config, PIPELINE_STATE, all_predictions, shared_resource_lock)
     log = logging.getLogger('werkzeug')
     log.setLevel(logging.WARNING)
     local_ip = PipelineUtils.get_local_ip()
