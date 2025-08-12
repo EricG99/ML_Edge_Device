@@ -49,23 +49,31 @@ def create_app(app_config, pipeline_state, predictions_list, lock, *, template_n
                 elif hasattr(dt, 'to_pydatetime'):
                     entry['datetime'] = dt.to_pydatetime().isoformat()
 
-                # --- KORREKTUR: Logik für die Zukunftsprognose ---
-                # Wir verwenden jetzt den Schlüssel 'future_forecast'
-                future_forecast_values = entry.get("future_forecast", [])
+                # --- KORREKTUR: Trenne die 1-Schritt-Prognose vom Rest der Zukunft ---
+                full_forecast = entry.get("future_forecast", [])
                 
-                # Wir berechnen die Zeitstempel für die Zukunftspunkte
-                if future_forecast_values:
+                if full_forecast:
+                    # Bestimme das Zeitintervall für die Prognosepunkte
                     interval_key = "inference_cycle_sec" if state.get("mode") == "retraining" else "inference_interval_sec"
                     interval_sec = app.config['APP_CONFIG'].get(interval_key, 1.0)
-                    try:
-                        base_ts = datetime.fromisoformat(entry['datetime'])
-                        # Die Zukunftsprognose startet bei t+1
-                        entry['future_forecast_dates'] = [
-                            (base_ts + timedelta(seconds=(i + 1) * interval_sec)).isoformat()
-                            for i in range(len(future_forecast_values))
-                        ]
-                    except Exception:
-                        entry['future_forecast_dates'] = []
+                    base_ts = datetime.fromisoformat(entry['datetime'])
+
+                    # Der erste Punkt der Zukunft ist die "Vorhersage (1 Zeitschritt)"
+                    entry['prediction_1_step'] = full_forecast[0]
+                    entry['prediction_1_step_date'] = (base_ts + timedelta(seconds=interval_sec)).isoformat()
+                    
+                    # Der Rest ist die "Zukunftsprognose"
+                    remaining_forecast = full_forecast[1:]
+                    entry['future_forecast'] = remaining_forecast
+                    entry['future_forecast_dates'] = [
+                        (base_ts + timedelta(seconds=(i + 2) * interval_sec)).isoformat()
+                        for i in range(len(remaining_forecast))
+                    ]
+                else:
+                    entry['prediction_1_step'] = None
+                    entry['prediction_1_step_date'] = None
+                    entry['future_forecast'] = []
+                    entry['future_forecast_dates'] = []
                 # --- Ende der Korrektur ---
 
                 return jsonify({"status": "success", "data": entry})

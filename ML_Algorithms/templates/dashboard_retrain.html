@@ -119,17 +119,16 @@
                 chart = new Chart(dom.chartCanvas, {
                     type: 'line',
                     data: {
-                        // Wir verwenden jetzt direkt die Datenobjekte, nicht mehr separate Labels
                         datasets: [
                             { 
-                                label: 'Echter Wert', 
+                                label: 'Echter Wert', // --- NEUE BEZEICHNUNG ---
                                 data: [], 
                                 borderColor: 'rgb(59, 130, 246)', 
                                 tension: 0.2, 
                                 pointRadius: 3 
                             }, 
                             { 
-                                label: 'Vorhersage (für t)', 
+                                label: 'Vorhersage (1 Zeitschritt)', // --- NEUE BEZEICHNUNG ---
                                 data: [], 
                                 borderColor: 'rgb(234, 179, 8)', 
                                 tension: 0.2, 
@@ -137,13 +136,13 @@
                                 pointStyle: 'triangle'
                             },
                             { 
-                                label: 'Zukunftsprognose (ab t)', 
+                                label: 'Zukunftsprognose', // --- NEUE BEZEICHNUNG ---
                                 data: [], 
                                 borderColor: 'rgb(34, 197, 94)', 
                                 borderDash: [5, 5], 
                                 tension: 0.2, 
                                 pointRadius: 2, 
-                                showLine: true // Wichtig: Wir wollen eine durchgehende Linie
+                                showLine: true 
                             },
                         ]
                     },
@@ -158,46 +157,58 @@
                 });
             }
             
-            // --- KORREKTUR: Komplette Überarbeitung der Chart-Update-Logik ---
+            // --- KORREKTUR: Chart-Update-Logik an die neue API-Struktur angepasst ---
             function addDataToChart(dataPoint) {
-                const { datetime, true_value, prediction, future_forecast, future_forecast_dates } = dataPoint;
+                const { 
+                    datetime, true_value, prediction, 
+                    prediction_1_step, prediction_1_step_date,
+                    future_forecast, future_forecast_dates 
+                } = dataPoint;
                 
-                // Datasets für echte Werte und die vergangenheitsbezogene Vorhersage
-                const trueValuePoint = { x: datetime, y: true_value };
-                const predictionPoint = { x: datetime, y: prediction };
+                // 1. Echten Wert und die dazugehörige, "bestätigte" Vorhersage hinzufügen
+                if (true_value != null) chart.data.datasets[0].data.push({ x: datetime, y: true_value });
+                if (prediction != null) chart.data.datasets[1].data.push({ x: datetime, y: prediction });
 
-                if (true_value != null) chart.data.datasets[0].data.push(trueValuePoint);
-                if (prediction != null) chart.data.datasets[1].data.push(predictionPoint);
+                // Die "Vorhersage"-Linie (gelb) wird bei jedem Schritt um den nächsten Punkt erweitert
+                // und am Ende wieder entfernt, um den "leading" Effekt zu erzeugen.
+                // Entferne den letzten (vorauseilenden) Punkt vom vorherigen Schritt.
+                if (chart.data.datasets[1].data.length > 0) {
+                     const lastPoint = chart.data.datasets[1].data[chart.data.datasets[1].data.length - 1];
+                     const secondLastPoint = chart.data.datasets[1].data[chart.data.datasets[1].data.length - 2];
+                     if (secondLastPoint && lastPoint.x > secondLastPoint.x && chart.data.datasets[0].data.length < chart.data.datasets[1].data.length) {
+                          chart.data.datasets[1].data.pop();
+                     }
+                }
+                
+                // Füge den neuen, vorauseilenden Punkt hinzu
+                if (prediction_1_step != null) {
+                    chart.data.datasets[1].data.push({ x: prediction_1_step_date, y: prediction_1_step });
+                }
 
-                // Dataset für die Zukunftsprognose
+                // 2. Die "Zukunftsprognose" (grün, gestrichelt) vorbereiten
                 const forecastLinePoints = [];
-                if (future_forecast && future_forecast_dates) {
-                    // Die Forecast-Linie beginnt am letzten *echten* Punkt, um eine saubere Verbindung zu haben.
-                    if (true_value != null) {
-                        forecastLinePoints.push(trueValuePoint);
-                    } else if (prediction != null) {
-                        // Fallback, falls der echte Wert mal fehlt
-                        forecastLinePoints.push(predictionPoint);
-                    }
+                if (prediction_1_step != null) {
+                    // Die Linie beginnt am 1-Schritt-vorhergesagten Punkt
+                    forecastLinePoints.push({ x: prediction_1_step_date, y: prediction_1_step });
                     
-                    // Füge alle Zukunftspunkte hinzu
+                    // Füge die restlichen Zukunftspunkte hinzu
                     for (let i = 0; i < future_forecast.length; i++) {
                         forecastLinePoints.push({ x: future_forecast_dates[i], y: future_forecast[i] });
                     }
                 }
-                // Dieses Dataset wird bei jedem Schritt komplett ersetzt, nicht angehängt.
+                // Dieses Dataset wird bei jedem Schritt komplett ersetzt.
                 chart.data.datasets[2].data = forecastLinePoints;
 
-                // Alte Datenpunkte entfernen, um den Graphen übersichtlich zu halten
+                // 3. Alte Datenpunkte entfernen, um den Graphen übersichtlich zu halten
                 const MAX_DATA_POINTS = 60;
-                if (chart.data.datasets[0].data.length > MAX_DATA_POINTS) {
+                while (chart.data.datasets[0].data.length > MAX_DATA_POINTS) {
                     chart.data.datasets[0].data.shift();
                 }
-                if (chart.data.datasets[1].data.length > MAX_DATA_POINTS) {
+                while (chart.data.datasets[1].data.length > MAX_DATA_POINTS + 1) { // +1 für den führenden Punkt
                     chart.data.datasets[1].data.shift();
                 }
 
-                // Chart aktualisieren, 'none' verhindert eine hüpfende Animation
+                // 4. Chart aktualisieren
                 chart.update('none');
             }
 
@@ -268,7 +279,6 @@
                     if (result && result.status === 'success') {
                         addDataToChart(result.data);
                         
-                        // Metriken nur aktualisieren, wenn sie vorhanden sind
                         if(result.data.cpu_load != null) dom.cpuLoad.textContent = `${result.data.cpu_load.toFixed(1)} %`;
                         if(result.data.total_processing_time_ms != null) dom.totalTimeVal.textContent = result.data.total_processing_time_ms.toFixed(2);
                         if(result.data.model_inference_time_ms != null) dom.inferenceTimeVal.textContent = result.data.model_inference_time_ms.toFixed(2);
