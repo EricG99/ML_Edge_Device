@@ -81,7 +81,7 @@ def add_rolling_features(df: pd.DataFrame, config: dict) -> tuple[pd.DataFrame, 
     rolling_features_dict = {"rolling_mean": [], "rolling_std": []}
     window_size = config.get('rolling_window_size', 2)
 
-    if config.get("add_rolling_features", False):
+    if config.get("add_rolling_features", True):
         # --- KORREKTUR: Immer mit der Kleinbuchstaben-Version des Features arbeiten ---
         for feature in config.get("base_features", []):
             feature_lower = feature.lower() # Sicherstellen, dass der Feature-Name klein ist
@@ -109,7 +109,7 @@ def add_lag_features(df: pd.DataFrame, config: dict) -> tuple[pd.DataFrame, dict
     lag_features_dict = {"lags": []}
     num_lags = config.get("num_lags", 1)
 
-    if config.get("add_lag_features", False):
+    if config.get("add_lag_features", True):
         # --- KORREKTUR: Immer mit der Kleinbuchstaben-Version des Features arbeiten ---
         for feature in config.get("base_features", []):
             feature_lower = feature.lower() # Sicherstellen, dass der Feature-Name klein ist

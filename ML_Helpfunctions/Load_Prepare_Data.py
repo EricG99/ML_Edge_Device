@@ -680,61 +680,89 @@ class DataPipeline3D(DataPipelineBase):
         """
         Führt die komplette Pipeline für die Trainingsdaten aus und formt sie in 3D.
         Der Scaler wird ausschließlich auf den Trainingsdaten angepasst.
+        *** KORRIGIERTE VERSION, UM DOPPELTE SKALIERUNG ZU VERMEIDEN ***
         """
-        print("--- Starte 3D Trainings-Pipeline ---")
+        print("--- Starte 3D Trainings-Pipeline (Korrigierte Version) ---")
         
-        # Schritt 1: Lade Daten (Testdaten werden nicht mehr für den Scaler verwendet)
+        # Schritt 1: Lade Daten
         train_df, _ = self._load_data(mode='train') 
 
         # Schritt 2: Feature Engineering
         print("\nSchritt 2: Feature Engineering...")
         train_df_featured, self.train_features_dict = fe.add_all_features(train_df, self.config)
         self.full_feature_list = self.train_features_dict["all"]
-        print(f"Verfügbare Features: {self.full_feature_list}")
+        
+        # ==================== WICHTIGE KORREKTUR HIER ====================
+        # Stelle sicher, dass die Zielvariable an erster Stelle steht,
+        # da convert_data_to_sliding_window y aus der ersten Spalte ableitet.
+        target_col_lower = self.config["base_features"][0].lower()
+        if self.full_feature_list[0] != target_col_lower:
+            logging.warning(f"Zielvariable '{target_col_lower}' nicht an Position 0. Ordne Features neu...")
+            self.full_feature_list.remove(target_col_lower)
+            self.full_feature_list.insert(0, target_col_lower)
+            logging.info(f"Neue Feature-Reihenfolge (Top 5): {self.full_feature_list[:5]}")
+        # ==================== ENDE DER KORREKTUR =======================
 
-        # WICHTIG: NaN-Zeilen entfernen, die durch rollierende Features entstehen,
-        # BEVOR der Scaler angepasst wird.
         train_df_featured.dropna(inplace=True)
         print(f"Nach FE und dropna verbleiben {len(train_df_featured)} Zeilen für das Training.")
         
-        # Schritt 3: Scaler ausschließlich auf Trainingsdaten anpassen
-        print("\nSchritt 3: Scaler anpassen (nur auf Trainingsdaten)...")
+        # Schritt 3: Scaler getrennt anpassen (X und y)
+        print("\nSchritt 3: Scaler getrennt anpassen...")
         scaler_class = RobustScaler if self.config.get("scaler_type", "minmax") == "robust" else MinMaxScaler
+        
+        # Feature-Scaler (X) NUR auf Feature-Spalten anpassen
         self.scaler = scaler_class()
         self.scaler.fit(train_df_featured[self.full_feature_list])
-        print("Feature-Scaler wurde ausschließlich auf den Trainingsdaten angepasst.")
+        print("✅ Feature-Scaler (X) wurde auf den Trainingsdaten angepasst.")
         
+        # Target-Scaler (y) NUR auf Target-Spalte anpassen, falls konfiguriert
+        target_col = self.config["base_features"][0].lower()
         if self.config.get("scale_target", False):
             self.y_scaler = scaler_class()
-            target_col = self.config["base_features"][0].lower()
-            # y_scaler wird ebenfalls nur auf den Target-Werten der Trainingsdaten angepasst
             self.y_scaler.fit(train_df_featured[[target_col]])
+            print("✅ Target-Scaler (y) wurde auf den Trainingsdaten angepasst.")
+        else:
+            self.y_scaler = None
 
-            print("Target-Scaler wurde ausschließlich auf den Trainingsdaten angepasst.")
-
-        # Schritt 4: Trainingsdaten transformieren und in Sliding Windows umwandeln
-        print("\nSchritt 4: Skalierung und 3D-Windowing für Trainingsdaten...")
-        train_scaled = self.scaler.transform(train_df_featured[self.full_feature_list])
+        # Schritt 4: Daten transformieren und in Sliding Windows umwandeln
+        print("\nSchritt 4: Skalierung und 3D-Windowing...")
         
-        X_train_3D, y_train_3D_raw = convert_data_to_sliding_window(
-            train_scaled,
+        # WICHTIG: Nur die FEATURES mit dem Feature-Scaler transformieren
+        train_features_scaled = self.scaler.transform(train_df_featured[self.full_feature_list])
+        
+        # Windows für X aus den skalierten Features erstellen
+        # Da das Target jetzt an Index 0 ist, nimmt die Funktion korrekterweise die
+        # skalierten Target-Werte für das y-Array.
+        X_train_3D, y_train_3D_from_scaled_features = convert_data_to_sliding_window(
+            train_features_scaled,
             lag_horizon=self.config["lags"],
             forecast_horizon=self.config["horizon"],
             shift=1
         )
         
-        y_train_3D = y_train_3D_raw
-        if self.config.get("scale_target", False):
-            # Transformieren mit dem bereits angepassten y_scaler
-            # Form für den Scaler anpassen -> (N, 1)
-            y_train_3D_reshaped = y_train_3D_raw.reshape(-1, 1)
-            # Skalieren
-            y_train_3D_scaled = self.y_scaler.transform(y_train_3D_reshaped)
-            # Zurück in die ursprüngliche Form (Anzahl_Fenster, forecast_horizon)
-            y_train_3D = y_train_3D_scaled.reshape(y_train_3D_raw.shape)
+        # Die y-Werte sind bereits korrekt skaliert, da sie aus dem mit dem
+        # Gesamt-Scaler transformierten Array stammen. Eine separate y-Skalierung ist
+        # für das Training hier nicht mehr nötig, WENN `scale_target` false ist.
+        # Wenn `scale_target` true ist, brauchen wir den dedizierten y_scaler.
+        
+        y_train_3D = y_train_3D_from_scaled_features
+
+        if self.y_scaler:
+            # Wenn ein separater y_scaler existiert, müssen wir die y-Werte damit erzeugen.
+             _, y_train_3D_raw = convert_data_to_sliding_window(
+                train_df_featured[[target_col]].values, # Nur die unskalierte Zielspalte
+                lag_horizon=self.config["lags"],
+                forecast_horizon=self.config["horizon"],
+                shift=1
+            )
+             y_train_3D_reshaped = y_train_3D_raw.reshape(-1, 1)
+             y_train_3D_scaled = self.y_scaler.transform(y_train_3D_reshaped)
+             y_train_3D = y_train_3D_scaled.reshape(y_train_3D_raw.shape)
+
 
         print(f"\nTrainings-Pipeline abgeschlossen. Shapes: X_train: {X_train_3D.shape}, y_train: {y_train_3D.shape}")
         return X_train_3D, y_train_3D
+
 
     def prepare_testing_data(self) -> tuple[np.ndarray, np.ndarray]:
         """

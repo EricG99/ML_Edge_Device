@@ -49,13 +49,6 @@ class LSTMInference(BaseInferenceProcessor):
             if os.path.exists(tfl_path):
                 interpreter = tf.lite.Interpreter(model_path=tfl_path)
                 interpreter.allocate_tensors()
-                
-                # DEBUG-Logging für TFLite-Modell
-                in_det = interpreter.get_input_details()[0]
-                out_det = interpreter.get_output_details()[0]
-                logger.info(f"TFLite Input: Shape={in_det['shape']}, DType={in_det['dtype']}")
-                logger.info(f"TFLite Output: Shape={out_det['shape']}, DType={out_det['dtype']}")
-                
                 self.model = interpreter # Überschreibe das Keras-Modell
                 logging.info(f"ℹ️ LSTM-Inferenz nutzt TFLite-Interpreter: {tfl_path}")
         except Exception as e:
@@ -108,25 +101,10 @@ class LSTMInference(BaseInferenceProcessor):
             logging.warning("--> Bitte prüfen: Ist die Spalte in der CSV/MQTT-Quelle überhaupt vorhanden?")
             logging.warning("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
         
-                # --- DEBUG-Logging für Eingabedaten ---
-        logger.debug(f"Input-Window Shape: {inference_window.shape}")
-        logger.debug(f"Min/Max im skalierten Input: {np.min(inference_window):.4f} / {np.max(inference_window):.4f}")
-        if np.allclose(np.min(inference_window), np.max(inference_window)):
-            logger.warning("Alle Werte im skalierten Input-Fenster sind identisch!")
-
-        
         return inference_window, timestamp, true_value
 
     def _inverse_transform_prediction(self, prediction_scaled: np.ndarray) -> np.ndarray:
         """Skaliert die LSTM-Vorhersage mit dem y_scaler zurück."""
-        
-        # --- DEBUG PRINT 4: Was gibt das Modell aus, bevor es zurückskaliert wird? ---
-        if np.all(prediction_scaled == 0):
-            logger.warning("[DEBUG] Das rohe Modell-Output ist komplett Null!")
-        else:
-            logger.info(f"[DEBUG] Rohes Modell-Output (Ausschnitt): {prediction_scaled.flatten()[:5]}")
-        # --- ENDE DEBUG PRINT ---
-        
         if self.y_scaler:
             pred_reshaped = np.asarray(prediction_scaled).reshape(-1, 1)
             pred_unscaled_reshaped = self.y_scaler.inverse_transform(pred_reshaped)

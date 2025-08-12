@@ -63,7 +63,7 @@ class BaseTrainer(ABC):
             logging.info("\nStep 3: Returning trained artifacts without saving.")
         
         logging.info("\n✅ Training pipeline finished successfully.")
-        return self.model, self.scaler, self.features
+        return self.model, self.scaler, self.y_scaler, self.features
 
     def _save_artifacts(self):
         """Speichert die trainierten Artefakte (Modell, Scaler, Features)."""

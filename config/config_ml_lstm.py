@@ -118,44 +118,44 @@ param_lstm_server = {
 lstm = {
     # --- Allgemeine Konfiguration ---
     "model_name": "lstm_csv_split",
-    "dataset": "mqtt_data_filtered.csv", # Diese Datei wird für Training und Inferenz genutzt
-    "model_filename": "model_quant_float16.tflite",
+    "dataset": "mqtt_data_filtered.csv",
+    "model_filename": "model.keras",
 
-    # --- Laden & Aufteilen der Daten ---
-    # "split": Lädt die CSV und teilt sie in Trainings- & Testdaten auf
-    # "live_mqtt": Nutzt Live-Daten vom MQTT-Broker
-    "loading_strategy": "split", 
-    "train_fraction": 0.7, # 70% der CSV für Training, 30% für die anschließende Inferenz
-
-    # --- Quantisierung ---
-    "edge_device": False, # Aktiviert die TFLite-Quantisierung nach dem Training
+    #"model_filename": "model_quant_float16.tflite",
+    "loading_strategy": "split",
+    "train_fraction": 0.7,
+    "edge_device": True,
 
     # --- Modellarchitektur ---
-    "num_layers": 2,
+    "num_layers": 1,
     "initial_units": 52,
     "dropout": 0.2,
 
-    # --- Trainingseinstellungen ---
-    "epochs": 5,
+    # --- Trainingseinstellungen (OPTIMIERT) ---
+    "epochs": 30,  # ERHÖHT: Geben Sie dem Modell mehr Zeit zum Lernen.
     "batch_size": 32,
-    "validation_fraction": 0.2, # 20% der Trainingsdaten werden zur Validierung während des Trainings genutzt
+    "validation_fraction": 0.2,
     "early_stopping_patience": 10,
-    "loss": "huber",     
+    "loss": "huber",
 
     # --- Zeitreihenparameter ---
-    "lags": 1,
+    "lags": 3,
     "horizon": 4,
     "rolling_window_size": 2,
 
-    # --- Feature Engineering ---
+    # --- Feature Engineering (OPTIMIERT) ---
     "base_features": ['group4-2_s6_massflowrate'],
-    "time_features": [],
-    "include_roll_mean": True,
-    "include_roll_std": True,
-    "scale_other_features": True, 
-    "scale_target": False,
     
-    # --- Inferenz (wird im "split"-Modus nicht verwendet) ---
+    # Aktiviert die Erstellung von 3 Lag-Features (lag_1, lag_2, lag_3)
+    "add_lag_features": True,
+    
+    # Aktiviert die Erstellung von roll. Mittelwert und Standardabweichung
+    "add_rolling_features": True,
+    
+    "scale_other_features": True,
+    "scale_target": True,
+    
+    # --- Inferenz ---
     "inference_interval_sec": 1.0,
 }
 # =================================================================================

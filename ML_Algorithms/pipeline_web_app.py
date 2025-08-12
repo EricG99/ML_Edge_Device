@@ -143,11 +143,11 @@ def initial_training(config: dict, trainer_class, folder_flag: str):
         trainer = trainer_class(config=config, folder_flag=folder_flag)
         pipeline = trainer._setup_pipeline()
         initial_data_df, _ = pipeline._load_data(mode='train')
-        model, scaler, features = trainer.run(save_artifacts=True)  # Speichert Artefakte für Nachvollziehbarkeit
+        model, scaler, y_scaler, features = trainer.run(save_artifacts=True)
 
         with shared_resource_lock:
             shared_model.update({
-                "model": model, "scaler": scaler, "features": features,
+                "model": model, "scaler": scaler, "y_scaler": y_scaler, "features": features,
                 "config": config, "initial_training_data": initial_data_df
             })
         logging.info("--- PHASE 1: Initiales Training abgeschlossen. ---")

@@ -140,10 +140,22 @@ class BaseInferenceProcessor(ABC):
 
     def _run_inference_unified(self, input_data: np.ndarray):
         start = time.perf_counter()
+        # TFLite-Interpreter?
         if hasattr(self.model, "get_input_details"):
             interpreter = self.model
             input_details = interpreter.get_input_details()
             output_details = interpreter.get_output_details()
+
+            # ==================== WICHTIGE KORREKTUR HIER ====================
+            # Prüfe, ob die Eingabeform angepasst werden muss (z.B. von None auf 1)
+            if tuple(input_details[0]["shape"]) != tuple(input_data.shape):
+                logging.info(f"Passe TFLite-Eingabe an: von {input_details[0]['shape']} zu {input_data.shape}")
+                interpreter.resize_tensor_input(input_details[0]["index"], input_data.shape, strict=False)
+                interpreter.allocate_tensors()
+                input_details = interpreter.get_input_details() # Details neu abrufen
+                output_details = interpreter.get_output_details()
+            # ==================== ENDE DER KORREKTUR =======================
+
             interpreter.set_tensor(input_details[0]["index"], input_data.astype(np.float32))
             interpreter.invoke()
             pred = interpreter.get_tensor(output_details[0]["index"])
@@ -154,6 +166,7 @@ class BaseInferenceProcessor(ABC):
                 pred = self.model.predict(input_data)
         else:
             raise TypeError(f"Das Modell vom Typ {type(self.model)} hat keine bekannte Inferenzmethode.")
+        
         dur_ms = (time.perf_counter() - start) * 1000.0
         return np.asarray(pred), dur_ms
 
