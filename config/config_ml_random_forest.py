@@ -10,8 +10,8 @@ random_forest = {
     "load_id": "2025-07-22_160652_7540_train",
 
     # Modellparameter
-    "n_estimators": 10,
-    "max_depth": 2,
+    "n_estimators": 50,
+    "max_depth": 20,
     "min_samples_split": 5,
     "min_samples_leaf": 3,
     "random_state": 42,
@@ -19,10 +19,10 @@ random_forest = {
     
 
     # Zeitreihenparameter
-    "lags": 1,
+    "lags": 5,
     "horizon": 5,
     "train_fraction": 0.8,
-    "rolling_window_size": 2,
+    "rolling_window_size": 5,
     # Features
     "base_features": ['Group4-2_S6_MassFlowRate'],
     "time_features": [],

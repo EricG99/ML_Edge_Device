@@ -59,21 +59,6 @@ def add_time_features(df: pd.DataFrame, config: dict) -> tuple[pd.DataFrame, dic
 
     return df, feature_dict
 
-
-def add_lag_features(df: pd.DataFrame, config: dict) -> tuple[pd.DataFrame, dict]:
-    base_features = config["base_features"]
-    max_lag = config["lags"]
-    feature_dict = {"lagged": []}
-
-    for feature in base_features:
-        for lag in range(1, max_lag + 1):
-            lagged_name = f'{feature}_lag_{lag}'
-            df[lagged_name] = df[feature].shift(lag)
-            feature_dict["lagged"].append(lagged_name)
-
-    return df, feature_dict
-
-
 def add_rolling_features(df: pd.DataFrame, config: dict) -> tuple[pd.DataFrame, dict]:
     """ Fügt rollierende Mittelwerte und Standardabweichungen hinzu. """
     print("\n[DEBUG] --- Betrete Funktion: add_rolling_features ---")
@@ -122,76 +107,46 @@ def add_rolling_features(df: pd.DataFrame, config: dict) -> tuple[pd.DataFrame, 
 
 def add_lag_features(df: pd.DataFrame, config: dict) -> tuple[pd.DataFrame, dict]:
     """ Fügt Lag-Features (zeitlich verschobene Werte) hinzu. """
-    # print("\n[DEBUG] --- Betrete Funktion: add_lag_features ---")
     lag_features_dict = {"lags": []}
-
     should_run = config.get("add_lag_features", True)
-    # print(f"[DEBUG] 'add_lag_features' in config gefunden? -> {should_run}")
-
     if should_run:
         num_lags = config.get("lags", 1)
         base_features_to_process = config.get("base_features", [])
-        # print(f"[DEBUG] Anzahl Lags: {num_lags}")
-        # print(f"[DEBUG] Basis-Features, die verarbeitet werden sollen: {base_features_to_process}")
-        
         for feature in base_features_to_process:
             feature_lower = feature.lower()
-            # print(f"[DEBUG] Verarbeite Lag-Feature für: '{feature_lower}'")
-
-            if feature_lower not in df.columns:
-                # print(f"!!!!!!!!!! [DEBUG] FEHLER: Die Spalte '{feature_lower}' wurde im DataFrame nicht gefunden! Überspringe. !!!!!!!!!!")
-                continue
-            
-            for lag in range(1, num_lags + 1):
-                lagged_name = f"{feature_lower}_lag_{lag}"
-                df[lagged_name] = df[feature_lower].shift(lag)
-                lag_features_dict["lags"].append(lagged_name)
-                # print(f"    -> ✅ '{lagged_name}' erstellt.")
-
-    # print("[DEBUG] --- Verlasse Funktion: add_lag_features ---")
+            if feature_lower in df.columns:
+                for lag in range(1, num_lags + 1):
+                    lagged_name = f"{feature_lower}_lag_{lag}"
+                    df[lagged_name] = df[feature_lower].shift(lag)
+                    lag_features_dict["lags"].append(lagged_name)
     return df, lag_features_dict
 
 
 def add_all_features(df: pd.DataFrame, config: dict) -> tuple[pd.DataFrame, dict]:
     """ Führt alle konfigurierten Feature-Engineering-Schritte aus. """
-    # print("\n[DEBUG] ########## STARTE FEATURE ENGINEERING ##########")
-    # print(f"[DEBUG] Shape des Eingangs-DF: {df.shape}")
-    # print(f"[DEBUG] Spalten des Eingangs-DF: {df.columns.to_list()}")
-    
     df.columns = df.columns.str.lower()
-    # print(f"[DEBUG] Spalten nach Umwandlung in Kleinbuchstaben: {df.columns.to_list()}")
-    
     base_features_lower = [f.lower() for f in config.get("base_features", [])]
 
+    df, time_dict = add_time_features(df, config)
     df, lag_dict = add_lag_features(df, config)
-    print(f"[DEBUG] Shape des DF nach add_lag_features: {df.shape}")
-
     df, rolling_dict = add_rolling_features(df, config)
-    print(f"[DEBUG] Shape des DF nach add_rolling_features: {df.shape}")
 
     all_features = (
         base_features_lower +
+        time_dict.get("time", []) + # Hinzugefügt
         lag_dict.get("lags", []) +
         rolling_dict.get("rolling_mean", []) +
         rolling_dict.get("rolling_std", [])
     )
-
-    # print("\n[DEBUG] --- ZUSAMMENFASSUNG der erstellten Features ---")
-    # print(f"[DEBUG] Gefundene Lag-Features: {lag_dict.get('lags', [])}")
-    # print(f"[DEBUG] Gefundene Rolling-Mean-Features: {rolling_dict.get('rolling_mean', [])}")
-    # print(f"[DEBUG] Gefundene Rolling-Std-Features: {rolling_dict.get('rolling_std', [])}")
-    # print(f"[DEBUG] Finale Feature-Liste (vor Bereinigung): {all_features}")
     
     features_summary = {
         "base": base_features_lower,
+        "time": time_dict.get("time", []), # Hinzugefügt
         "lags": lag_dict.get("lags", []),
         "rolling": rolling_dict,
         "all": sorted(list(set(all_features)))
     }
     
-    # print(f"[DEBUG] Finale Feature-Liste (bereinigt und sortiert): {features_summary['all']}")
-    # print("[DEBUG] ########## BEENDE FEATURE ENGINEERING ##########\n")
-
     return df, features_summary
 
 def create_feature_list_from_dict(feature_dict: dict) -> list:

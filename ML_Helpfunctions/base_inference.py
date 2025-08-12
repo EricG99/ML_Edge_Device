@@ -61,60 +61,93 @@ class BaseInferenceProcessor(ABC):
     
     def process_step(self, payload: dict) -> dict | None:
         """
-        Verarbeitet einen Datenpunkt, gibt aber die Vorhersage vom *vorherigen* Schritt zurück,
-        angereichert mit dem jetzt bekannten "true_value".
+        Verarbeitet einen einzelnen Inferenzschritt (z.B. einen MQTT-Payload).
+        
+        Diese Methode orchestriert eine komplexe, aber wichtige Logik für die UI:
+        1.  Sie nimmt die Daten für den aktuellen Zeitpunkt 't' entgegen.
+        2.  Sie vervollständigt die Vorhersage, die für 't' in der Vergangenheit (bei 't-1') gemacht wurde,
+            indem sie den nun bekannten 'true_value' von 't' hinzufügt.
+        3.  Sie erstellt eine NEUE Vorhersage für die Zukunft ('t+1', 't+2', ...).
+        4.  Sie gibt ein kombiniertes Ergebnis zurück, das die UI nutzen kann, um sowohl die vergangene
+            Performance als auch die zukünftige Prognose darzustellen.
         """
         if not payload:
             return None
 
-        # 1. Bereite Input für die VORHERSAGE FÜR T+1 basierend auf den Daten von T vor
-        input_data, ts_now, true_now = self._prepare_input_data(payload)
+        # Der Zeitstempel des aktuellen Payloads (Zeitpunkt 't')
+        start_processing_time = time.perf_counter()
+
+        # --- TEIL 1: NEUE VORHERSAGE FÜR DIE ZUKUNFT (t+1, t+2, ...) ERSTELLEN ---
+        input_data, timestamp_t, true_value_t = self._prepare_input_data(payload)
+        
+        # Wenn nicht genügend Daten vorhanden sind (z.B. beim Start), kann keine Vorhersage gemacht werden.
         if input_data is None:
+            # Wir geben trotzdem ein minimales Objekt zurück, damit die UI den echten Wert plotten kann.
+            if true_value_t is not None:
+                return {
+                    "datetime": timestamp_t,
+                    "prediction": None,       # Keine Vorhersage für t vorhanden
+                    "true_value": float(true_value_t),
+                    "future_forecast": []   # Keine neue Vorhersage für t+1
+                }
             return None
 
-        pred_scaled, t_inf_ms = self._run_inference_unified(input_data)
-        predictions_unscaled = self._inverse_transform_prediction(pred_scaled)
+        # Führe die Inferenz aus, um die Vorhersage für t+1, t+2, ... zu erhalten
+        future_pred_scaled, t_inf_ms = self._run_inference_unified(input_data)
+        future_pred_unscaled = self._inverse_transform_prediction(future_pred_scaled)
 
-        # 2. Erstelle den neuen Eintrag für die Zukunft (noch ohne echten Wert)
-        new_entry = {
-            "datetime": ts_now + pd.Timedelta(seconds=self.config.get("inference_interval_sec", 1.0)),
-            "prediction": float(predictions_unscaled[0]) if predictions_unscaled.size > 0 else None,
-            "true_value": None,
-            "rolling_forecast": predictions_unscaled.tolist(),
+
+        # --- TEIL 2: VERGANGENE VORHERSAGE (FÜR t) MIT ECHTEM WERT (VON t) VERVOLLSTÄNDIGEN ---
+        # `_pending_entry` enthält die Vorhersage, die bei t-1 für den Zeitpunkt t gemacht wurde.
+        # Jetzt, bei Zeitpunkt t, kennen wir den wahren Wert und können den Eintrag finalisieren.
+        completed_entry_for_t = None
+        if self._pending_entry is not None:
+            completed_entry_for_t = self._pending_entry.copy()
+            # Füge den jetzt bekannten wahren Wert hinzu
+            completed_entry_for_t["true_value"] = None if true_value_t is None else float(true_value_t)
+
+
+        # --- TEIL 3: NEUEN "PENDING ENTRY" FÜR DIE ZUKUNFT (t+1) VORBEREITEN ---
+        # Dies ist die Vorhersage, die wir in TEIL 1 gerade gemacht haben. Sie ist für t+1.
+        # Wir speichern sie, um sie im NÄCHSTEN Schritt (beim Eintreffen von Payload t+1) zu vervollständigen.
+        self._pending_entry = {
+            "datetime": timestamp_t + pd.Timedelta(seconds=self.config.get("inference_interval_sec", 1.0)),
+            "prediction": float(future_pred_unscaled[0]) if future_pred_unscaled.size > 0 else None,
+            "true_value": None, # Der wahre Wert von t+1 ist noch unbekannt
+            "rolling_forecast": future_pred_unscaled.tolist(),
             "cpu_load": Pipeline_Utils.get_cpu_usage(),
             "ram_usage": Pipeline_Utils.get_memory_usage(),
             "model_inference_time_ms": float(t_inf_ms),
-            "total_processing_time_ms": float((time.perf_counter() - payload.get('start_time', time.perf_counter())) * 1000.0)
+            "total_processing_time_ms": float((time.perf_counter() - start_processing_time) * 1000.0)
         }
+        
+        
+        # --- TEIL 4: FINALES OBJEKT FÜR DIE UI ZUSAMMENSTELLEN UND LOGGEN ---
+        self.step_counter += 1
+        
+        # Wenn dies der allererste Schritt war, gibt es noch keinen vervollständigten Eintrag.
+        if completed_entry_for_t is None:
+            completed_entry_for_t = {
+                "datetime": timestamp_t,
+                "prediction": None, # Es gab noch keine Vorhersage für t
+                "true_value": float(true_value_t) if true_value_t is not None else None,
+            }
 
-        # 3. Wenn eine Vorhersage von t-1 aussteht, vervollständige sie jetzt mit dem wahren Wert von t
-        entry_to_return = None
-        if self._pending_entry is not None:
-            self._pending_entry["true_value"] = None if true_now is None else float(true_now)
-            self._pending_entry["datetime"] = ts_now
-            entry_to_return = self._pending_entry
+        # Füge die brandneue Zukunftsvorhersage dem Objekt hinzu, das an die UI geht.
+        completed_entry_for_t['future_forecast'] = future_pred_unscaled.tolist()
+        
+        # Logging für die Konsole
+        true_str = f"{completed_entry_for_t['true_value']:.4f}" if completed_entry_for_t.get('true_value') is not None else "N/A"
+        pred_str_t = f"{completed_entry_for_t['prediction']:.4f}" if completed_entry_for_t.get('prediction') is not None else "Warte..."
+        pred_str_t_plus_1 = f"{future_pred_unscaled[0]:.4f}" if future_pred_unscaled.size > 0 else "N/A"
 
-        # 4. Die neue Vorhersage für t+1 wird der ausstehende Eintrag für den nächsten Schritt
-        self._pending_entry = new_entry
-
-        # 5. Logging (nur wenn ein vollständiger Eintrag zurückgegeben wird)
-        if entry_to_return:
-            self.step_counter += 1
-            true_str = f"{entry_to_return['true_value']:.4f}" if entry_to_return['true_value'] is not None else "N/A"
-            
-            # === NEU: Formatierung des gesamten Forecast-Vektors für die Ausgabe ===
-            forecast_list = entry_to_return.get('rolling_forecast', [])
-            pred_str = f"t+1: {forecast_list[0]:.4f}" if len(forecast_list) > 0 else "N/A"
-            if len(forecast_list) > 1:
-                # Erstellt einen String wie "[t+2: 1.23, t+3: 1.45, ...]"
-                other_steps = ", ".join([f"t+{i+2}: {val:.2f}" for i, val in enumerate(forecast_list[1:])])
-                pred_str += f" [{other_steps}]"
-            # ======================================================================
-
-            cpu_str = f"{entry_to_return['cpu_load']:.1f}%" if entry_to_return['cpu_load'] is not None else "N/A"
-            logging.info(f"Step [{self.step_counter}] -> True: {true_str} | Pred: {pred_str} | CPU: {cpu_str}")
-
-        return entry_to_return
+        logging.info(
+            f"Step [{self.step_counter}] | Zeit: {timestamp_t.strftime('%H:%M:%S')} | "
+            f"Vergleich für t: ECHT={true_str}, PRED={pred_str_t} | "
+            f"NEUER FORECAST für t+1 -> {pred_str_t_plus_1}"
+        )        
+        # Gib den vervollständigten Eintrag für Zeitpunkt t, angereichert mit der Prognose für t+1, zurück.
+        return completed_entry_for_t
 
     def get_data_source_iterator(self):
         """Gibt einen Iterator zurück, der die Payloads für die Inferenz liefert."""

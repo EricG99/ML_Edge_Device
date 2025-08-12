@@ -163,7 +163,8 @@ def initial_training(config: dict, trainer_class, folder_flag: str):
 def retraining_thread_task(retraining_data_df: pd.DataFrame, algorithm: str):
     """
     Führt das Nachtraining in einem separaten Thread aus.
-    Random Forest wird komplett im Speicher neu trainiert, um Datei-I/O zu vermeiden.
+    *** FINALE KORRIGIERTE VERSION ***
+    Stellt sicher, dass sowohl LSTM als auch Random Forest die Daten korrekt verarbeiten.
     """
     global shared_model
     logging.info(f"--- RETRAINING THREAD ({algorithm}): Startet Nachtraining. ---")
@@ -171,69 +172,87 @@ def retraining_thread_task(retraining_data_df: pd.DataFrame, algorithm: str):
         PIPELINE_STATE["retraining_status"] = "training"
 
     try:
+        # Hole alle notwendigen Objekte atomar aus dem globalen Zustand
         with shared_resource_lock:
-            # Notwendige Objekte aus dem globalen Zustand holen und kopieren
             config = deepcopy(shared_model['config'])
             initial_data = shared_model['initial_training_data']
+            # Kopiere die Referenzen auf die trainierten Artefakte
+            current_model_ref = shared_model['model']
+            scaler_ref = shared_model['scaler']
+            y_scaler_ref = shared_model.get('y_scaler')
+            features_ref = shared_model['features']
 
         if algorithm == 'lstm':
-            with shared_resource_lock:
-                if hasattr(shared_model['model'], 'clone_model'):
-                    current_model = tf.keras.models.clone_model(shared_model['model'])
-                    current_model.set_weights(shared_model['model'].get_weights())
-                else:
-                    current_model = deepcopy(shared_model['model'])
+            # Erstelle eine tiefe Kopie des Modells, um das Original nicht zu verändern, falls das Training fehlschlägt
+            if hasattr(current_model_ref, 'clone_model'):
+                current_model = tf.keras.models.clone_model(current_model_ref)
+                current_model.set_weights(current_model_ref.get_weights())
+            else:
+                current_model = deepcopy(current_model_ref)
 
             logging.info("LSTM-Nachtraining (inkrementell) wird durchgeführt...")
             retraining_data_featured, _ = fe.add_all_features(retraining_data_df, config)
-            retraining_data_featured = retraining_data_featured.dropna()
+            # Wichtig: Features in die gleiche Reihenfolge bringen wie beim Original-Training
+            retraining_data_featured = retraining_data_featured[features_ref]
+            retraining_data_featured.dropna(inplace=True)
 
             if not retraining_data_featured.empty:
-                scaled_data = shared_model['scaler'].transform(retraining_data_featured[shared_model['features']])
+                # KORREKTE DATENAUFBEREITUNG FÜR LSTM
+                # 1. Trenne Features und Target
+                target_col_name = config["base_features"][0].lower()
+                feature_cols = [f for f in features_ref if f != target_col_name]
+                
+                # 2. Skaliere getrennt mit den existierenden, trainierten Scalern
+                X_retrain_scaled = scaler_ref.transform(retraining_data_featured[feature_cols])
+                y_retrain_scaled = y_scaler_ref.transform(retraining_data_featured[[target_col_name]])
+                
+                # 3. Kombiniere sie wieder (Target an Index 0)
+                combined_scaled_data = np.hstack([y_retrain_scaled, X_retrain_scaled])
+                
+                # 4. Erstelle 3D-Fenster aus den korrekt kombinierten Daten
                 X_retrain, y_retrain = LoadPrepareData.convert_data_to_sliding_window(
-                    scaled_data, lag_horizon=config["lags"], forecast_horizon=config["horizon"]
+                    combined_scaled_data,
+                    lag_horizon=config["lags"],
+                    forecast_horizon=config["horizon"]
                 )
+                
                 if len(X_retrain) > 0:
                     current_model.compile(optimizer=config.get("optimizer", "adam"), loss=config.get("loss", "mse"))
                     current_model.fit(X_retrain, y_retrain, epochs=config.get("retraining_epochs", 5),
                                       batch_size=config.get("batch_size", 32), verbose=0)
+                    
+                    # Bei Erfolg: Tausche das globale Modell atomar aus
                     with shared_resource_lock:
                         shared_model["model"] = current_model
                         logging.info("--- RETRAINING THREAD (LSTM): Modellaustausch erfolgreich! ---")
 
         elif algorithm == 'random_forest':
-            # Vollständiges Neutraining für Random Forest im Speicher.
             logging.info("Kombiniere alte und neue Daten für RF-Nachtraining...")
             combined_data = pd.concat([initial_data, retraining_data_df]).drop_duplicates().sort_index()
 
-            # 1. Feature Engineering auf den kombinierten Daten
             logging.info("Führe Feature Engineering für kombinierten Datensatz durch...")
             combined_df_featured, features_dict = fe.add_all_features(combined_data, config)
             new_features = features_dict["all"]
             combined_df_featured.dropna(inplace=True)
 
-            # 2. Daten für Training vorbereiten (X und y)
             X_retrain = combined_df_featured[new_features]
             y_retrain = combined_df_featured[config["base_features"][0]]
 
-            # 3. Scaler neu anpassen und Daten transformieren
             logging.info("Passe Scaler neu an die kombinierten Daten an...")
             scaler_class = RobustScaler if config.get("scaler_type", "minmax") == "robust" else MinMaxScaler
             new_scaler = scaler_class()
             X_retrain_scaled = new_scaler.fit_transform(X_retrain)
 
-            # 4. Neues Modell trainieren
             logging.info("Trainiere neues Random Forest Modell...")
-            model_params = config.get("model_params", {})
-            new_model = RandomForestRegressor(**model_params)
+            new_model = RandomForestRegressor(**config.get("model_params", {}))
             new_model.fit(X_retrain_scaled, y_retrain.values)
 
-            # 5. Globales Modell, Scaler und Features atomar austauschen
             with shared_resource_lock:
                 shared_model.update({
                     "model": new_model,
                     "scaler": new_scaler,
-                    "features": new_features
+                    "features": new_features,
+                    "initial_training_data": combined_data # Wichtig: auch die Basisdaten aktualisieren
                 })
                 logging.info("--- RETRAINING THREAD (RF): Modellaustausch erfolgreich! ---")
 
@@ -242,9 +261,7 @@ def retraining_thread_task(retraining_data_df: pd.DataFrame, algorithm: str):
     finally:
         with shared_resource_lock:
             PIPELINE_STATE["retraining_status"] = "idle"
-
-
-# In: pipeline_web_app.py
+            
 
 def inference_manager(config: dict, inference_class, folder_flag: str, algorithm: str, mode: str):
     """

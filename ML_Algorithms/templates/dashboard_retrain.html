@@ -83,7 +83,7 @@
         </div>
     </div>
 
-    <script>
+<script>
         document.addEventListener('DOMContentLoaded', () => {
             const dom = {
                 statusText: document.getElementById('status-text'),
@@ -119,11 +119,32 @@
                 chart = new Chart(dom.chartCanvas, {
                     type: 'line',
                     data: {
-                        labels: [], 
+                        // Wir verwenden jetzt direkt die Datenobjekte, nicht mehr separate Labels
                         datasets: [
-                            { label: 'Echter Wert', data: [], borderColor: 'rgb(59, 130, 246)', tension: 0.2, pointRadius: 2 }, 
-                            { label: 'Vorhersage (t+1)', data: [], borderColor: 'rgb(234, 179, 8)', tension: 0.2, pointRadius: 2 },
-                            { label: `Zukunftsprognose (rollierend)`, data: [], borderColor: 'rgb(34, 197, 94)', borderDash: [5, 5], tension: 0.2, pointRadius: 3, pointStyle: 'rectRot' },
+                            { 
+                                label: 'Echter Wert', 
+                                data: [], 
+                                borderColor: 'rgb(59, 130, 246)', 
+                                tension: 0.2, 
+                                pointRadius: 3 
+                            }, 
+                            { 
+                                label: 'Vorhersage (für t)', 
+                                data: [], 
+                                borderColor: 'rgb(234, 179, 8)', 
+                                tension: 0.2, 
+                                pointRadius: 3,
+                                pointStyle: 'triangle'
+                            },
+                            { 
+                                label: 'Zukunftsprognose (ab t)', 
+                                data: [], 
+                                borderColor: 'rgb(34, 197, 94)', 
+                                borderDash: [5, 5], 
+                                tension: 0.2, 
+                                pointRadius: 2, 
+                                showLine: true // Wichtig: Wir wollen eine durchgehende Linie
+                            },
                         ]
                     },
                     options: {
@@ -137,31 +158,46 @@
                 });
             }
             
+            // --- KORREKTUR: Komplette Überarbeitung der Chart-Update-Logik ---
             function addDataToChart(dataPoint) {
-                const { datetime, true_value, prediction, rolling_forecast, rolling_forecast_dates } = dataPoint;
+                const { datetime, true_value, prediction, future_forecast, future_forecast_dates } = dataPoint;
                 
-                chart.data.labels.push(datetime);
-                chart.data.datasets[0].data.push(true_value);
-                chart.data.datasets[1].data.push(prediction);
+                // Datasets für echte Werte und die vergangenheitsbezogene Vorhersage
+                const trueValuePoint = { x: datetime, y: true_value };
+                const predictionPoint = { x: datetime, y: prediction };
 
-                const forecastPoints = [];
-                if (prediction != null) {
-                    forecastPoints.push({ x: datetime, y: prediction }); 
-                }
-                if (rolling_forecast && rolling_forecast_dates) {
-                    for (let i = 0; i < rolling_forecast.length; i++) {
-                        forecastPoints.push({ x: rolling_forecast_dates[i], y: rolling_forecast[i] });
+                if (true_value != null) chart.data.datasets[0].data.push(trueValuePoint);
+                if (prediction != null) chart.data.datasets[1].data.push(predictionPoint);
+
+                // Dataset für die Zukunftsprognose
+                const forecastLinePoints = [];
+                if (future_forecast && future_forecast_dates) {
+                    // Die Forecast-Linie beginnt am letzten *echten* Punkt, um eine saubere Verbindung zu haben.
+                    if (true_value != null) {
+                        forecastLinePoints.push(trueValuePoint);
+                    } else if (prediction != null) {
+                        // Fallback, falls der echte Wert mal fehlt
+                        forecastLinePoints.push(predictionPoint);
+                    }
+                    
+                    // Füge alle Zukunftspunkte hinzu
+                    for (let i = 0; i < future_forecast.length; i++) {
+                        forecastLinePoints.push({ x: future_forecast_dates[i], y: future_forecast[i] });
                     }
                 }
-                chart.data.datasets[2].data = forecastPoints;
+                // Dieses Dataset wird bei jedem Schritt komplett ersetzt, nicht angehängt.
+                chart.data.datasets[2].data = forecastLinePoints;
 
+                // Alte Datenpunkte entfernen, um den Graphen übersichtlich zu halten
                 const MAX_DATA_POINTS = 60;
-                if (chart.data.labels.length > MAX_DATA_POINTS) {
-                    chart.data.labels.shift();
+                if (chart.data.datasets[0].data.length > MAX_DATA_POINTS) {
                     chart.data.datasets[0].data.shift();
+                }
+                if (chart.data.datasets[1].data.length > MAX_DATA_POINTS) {
                     chart.data.datasets[1].data.shift();
                 }
 
+                // Chart aktualisieren, 'none' verhindert eine hüpfende Animation
                 chart.update('none');
             }
 
@@ -215,78 +251,50 @@
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ action })
                 });
-                // Rufen Sie pollServer einmalig sofort auf, um die UI direkt zu aktualisieren,
-                // anstatt auf das nächste Intervall zu warten.
                 pollServer();
             }
 
-            // =============================================================================
-            // === NEUE, VEREINHEITLICHTE POLLING-LOGIK ===
-            // =============================================================================
-            let currentStep = 0; // Der Zähler für die Datenpunkte
-            let pollingInterval;   // Variable für unser Intervall
+            let currentStep = 0;
+            let pollingInterval;
 
             async function pollServer() {
-                // 1. Immer den neuesten Status vom Server holen
                 const state = await fetchApi('/api/status');
-                
-                if (!state) {
-                    // Wenn kein Status empfangen wird (z.B. Server down), nichts weiter tun.
-                    // fetchApi sollte bereits einen Fehler in der Konsole geloggt haben.
-                    return; 
-                }
+                if (!state) return; 
 
-                // 2. Immer die komplette UI mit dem frischen Status aktualisieren
                 updateUI(state);
 
-                // 3. Prüfen, ob wir neue Datenpunkte abrufen sollen
-                // Wir fragen nur nach neuen Daten, wenn die Inferenz aktiv ist und nicht pausiert wurde.
                 if (state.status === 'inference_running' && !state.is_paused) {
-                    
-                    // Fordere den nächsten Datenpunkt an, den wir noch nicht haben
                     const result = await fetchApi(`/api/data?step=${currentStep}`);
-
                     if (result && result.status === 'success') {
-                        // Wir haben erfolgreich neue Daten erhalten!
-                        
-                        // a) Daten dem Diagramm hinzufügen
                         addDataToChart(result.data);
                         
-                        // b) Spezifische Metriken aus den neuen Daten aktualisieren
-                        dom.cpuLoad.textContent = `${result.data.cpu_load.toFixed(1)} %`;
-                        dom.totalTimeVal.textContent = result.data.total_processing_time_ms.toFixed(2);
-                        dom.inferenceTimeVal.textContent = result.data.model_inference_time_ms.toFixed(2);
+                        // Metriken nur aktualisieren, wenn sie vorhanden sind
+                        if(result.data.cpu_load != null) dom.cpuLoad.textContent = `${result.data.cpu_load.toFixed(1)} %`;
+                        if(result.data.total_processing_time_ms != null) dom.totalTimeVal.textContent = result.data.total_processing_time_ms.toFixed(2);
+                        if(result.data.model_inference_time_ms != null) dom.inferenceTimeVal.textContent = result.data.model_inference_time_ms.toFixed(2);
                         
                         if (result.data.ram_usage) {
                             const ram = result.data.ram_usage;
                             dom.ramUsagePercent.textContent = ram.percent.toFixed(1);
                             dom.ramUsageValues.textContent = `${ram.used_gb}/${ram.total_gb} GB`;
                         }
-
-                        // c) WICHTIG: Zähler für den nächsten Schritt erhöhen
                         currentStep++;
                     }
-                    // Wenn result.status "waiting" ist, passiert nichts. Wir versuchen es im nächsten Intervall erneut für denselben `currentStep`.
                 }
 
-                // 4. Wenn die Pipeline abgeschlossen ist, das Polling stoppen
                 if (state.is_finished || state.status === 'error') {
                     console.log("Pipeline beendet oder fehlerhaft. Polling wird gestoppt.");
                     clearInterval(pollingInterval);
                 }
             }
             
-            // Event Listener
             dom.pauseResumeButton.addEventListener('click', () => {
                 const action = dom.pauseResumeButton.textContent === 'Pause' ? 'pause' : 'resume';
                 sendControl(action);
             });
             dom.resetButton.addEventListener('click', () => window.location.reload());
 
-            // Initialisierung
             initializeChart();
-            
-            // Starten Sie den zentralen Polling-Mechanismus
             pollingInterval = setInterval(pollServer, 1000);
         });
     </script>

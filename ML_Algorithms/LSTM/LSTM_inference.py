@@ -118,19 +118,22 @@ class LSTMInference(BaseInferenceProcessor):
         return inference_window, timestamp, true_value
 
     def _inverse_transform_prediction(self, prediction_scaled: np.ndarray) -> np.ndarray:
-        """Skaliert die LSTM-Vorhersage mit dem y_scaler zurück."""
-        
-        # --- DEBUG PRINT 4: Was gibt das Modell aus, bevor es zurückskaliert wird? ---
-        if np.all(prediction_scaled == 0):
-            logger.warning("[DEBUG] Das rohe Modell-Output ist komplett Null!")
-        else:
-            logger.info(f"[DEBUG] Rohes Modell-Output (Ausschnitt): {prediction_scaled.flatten()[:5]}")
-        # --- ENDE DEBUG PRINT ---
-        
-        if self.y_scaler:
-            pred_reshaped = np.asarray(prediction_scaled).reshape(-1, 1)
-            pred_unscaled_reshaped = self.y_scaler.inverse_transform(pred_reshaped)
-            return pred_unscaled_reshaped.flatten()
-        else:
-            # Fallback, falls Target nicht skaliert wurde
-            return np.asarray(prediction_scaled).flatten()
+        """
+        Skaliert die LSTM-Vorhersage ausschließlich mit dem dedizierten y_scaler zurück.
+        *** KORRIGIERTE VERSION: Entfernt den fragilen Fallback-Mechanismus. ***
+        """
+        # Prüfen, ob der notwendige y_scaler vorhanden ist.
+        if self.y_scaler is None:
+            # Ein lauter Fehler ist besser als eine stille, falsche Vorhersage.
+            raise RuntimeError(
+                "Der 'y_scaler' wurde nicht gefunden oder geladen. Eine Rücktransformation "
+                "der Vorhersage ist nicht möglich. Stellen Sie sicher, dass das Modell "
+                "mit einem y_scaler gespeichert wurde."
+            )
+
+        # Die Vorhersage in die korrekte Form bringen (z.B. von (1, 5) zu (5, 1))
+        pred_reshaped = np.asarray(prediction_scaled).reshape(-1, 1)
+
+        # Die inverse Transformation mit dem dedizierten und sicheren y_scaler durchführen
+        # .flatten() wandelt das Ergebnis wieder in ein 1D-Array um (z.B. [pred1, pred2, ...])
+        return self.y_scaler.inverse_transform(pred_reshaped).flatten()

@@ -1,4 +1,5 @@
 # ML_Helpfunctions/base_trainer.py
+
 import logging
 import sys
 import os
@@ -6,6 +7,9 @@ import joblib
 from abc import ABC, abstractmethod
 
 from ML_Helpfunctions import Pipeline_Utils
+# NEU: Import für die Typprüfung der Pipeline
+from ML_Helpfunctions.Load_Prepare_Data import DataPipeline3D, DataPipeline2D
+
 
 class BaseTrainer(ABC):
     """
@@ -38,16 +42,27 @@ class BaseTrainer(ABC):
         logging.info("\nStep 1: Preparing training data...")
         pipeline = self._setup_pipeline()
         X_train, y_train = pipeline.prepare_training_data()
+        
+        # Zustand aus der Pipeline übernehmen
+        self.scaler = pipeline.scaler
         self.y_scaler = getattr(pipeline, 'y_scaler', None)
 
-        self.scaler = pipeline.scaler
+        # KORREKTUR: Die Logik zur Bestimmung der Feature-Liste wird vereinfacht.
+        # Die Pipeline ist nun dafür verantwortlich, die korrekte und vollständig geordnete
+        # Feature-Liste bereitzustellen (`pipeline.full_feature_list`).
+        # Der BaseTrainer speichert diese Liste einfach ab.
+        # Die Unterscheidung zwischen DataPipeline3D und 2D ist hier nicht mehr nötig.
         self.features = pipeline.full_feature_list
+        logging.info(f"Die zu speichernde Feature-Liste für die Inferenz enthält {len(self.features)} Spalten.")
+        logging.debug(f"Feature-Liste: {self.features}")
+
 
         if self.scaler is None or not self.features:
             logging.critical("CRITICAL: Data pipeline failed to generate scaler or feature list.")
             sys.exit(1)
         
         logging.info(f"Data preparation complete. Features: {len(self.features)}, X_train shape: {X_train.shape}")
+
 
         # --- SCHRITT 2: MODELLTRAINING ---
         logging.info("\nStep 2: Training model...")
@@ -70,8 +85,6 @@ class BaseTrainer(ABC):
         logging.info("\nStep 3: Saving artifacts for inference...")
         mode = self.config.get("inference_mode", "load_artifacts_path")
         
-        # KORREKTUR: Die Ordnerstruktur wird bereits in pipeline_web_app.py erstellt.
-        # Wir rufen setup_experiment NICHT erneut auf, sondern verwenden die vorhandenen Pfade.
         paths = self.config.get("paths")
         if not paths:
             logging.error("Pfade nicht in der Konfiguration gefunden. Artefakte können nicht gespeichert werden.")
@@ -95,10 +108,14 @@ class BaseTrainer(ABC):
             logging.info("Saving in 'path' mode with versioned directory...")
             saver = Pipeline_Utils.ModelScalerSaver(self.config, paths)
             saved_artifacts = saver.save_artifacts(model=self.model, scaler=self.scaler)
+            
+            # Speichere den dedizierten y_scaler, falls er existiert
             if getattr(self, 'y_scaler', None) is not None:
                 y_path = os.path.join(paths["Scalers"], "y_scaler.joblib")
                 joblib.dump(self.y_scaler, y_path)
                 logging.info(f"Target y_scaler saved to: {y_path}")
+            
+            # Speichere die korrekte Feature-Liste
             try:
                 features_path = os.path.join(paths.get("Models"), "features.joblib")
                 joblib.dump(self.features, features_path)
