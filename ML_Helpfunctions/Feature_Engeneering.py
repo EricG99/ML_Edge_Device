@@ -75,69 +75,89 @@ def add_lag_features(df: pd.DataFrame, config: dict) -> tuple[pd.DataFrame, dict
 
 
 def add_rolling_features(df: pd.DataFrame, config: dict) -> tuple[pd.DataFrame, dict]:
-    base_features = config["base_features"]
-    window_size = config.get("rolling_window_size", 1)
-    include_roll_mean = config.get("include_roll_mean", False)
-    include_roll_std = config.get("include_roll_std", False)
+    """
+    Fügt rollierende Mittelwerte und Standardabweichungen für die Basis-Features hinzu.
+    """
+    rolling_features_dict = {"rolling_mean": [], "rolling_std": []}
+    window_size = config.get('rolling_window_size', 2)
 
-    feature_dict = {"rolling": []}
+    if config.get("add_rolling_features", False):
+        # --- KORREKTUR: Immer mit der Kleinbuchstaben-Version des Features arbeiten ---
+        for feature in config.get("base_features", []):
+            feature_lower = feature.lower() # Sicherstellen, dass der Feature-Name klein ist
 
-    for feature in base_features:
-        if include_roll_mean:
-            mean_name = f'{feature}_roll_mean_{window_size}'
-            df[mean_name] = df[feature].rolling(window=window_size).mean() # OHNE .shift(1)
-            feature_dict["rolling"].append(mean_name)
+            # Rolling Mean
+            mean_name = f"{feature_lower}_roll_mean_{window_size}"
+            df[mean_name] = df[feature_lower].rolling(window=window_size).mean()
+            rolling_features_dict["rolling_mean"].append(mean_name)
 
-        if include_roll_std:
-            if window_size >= 2:
-                std_name = f'{feature}_roll_std_{window_size}'
-                df[std_name] = df[feature].rolling(window=window_size).std() # OHNE .shift(1)
-                feature_dict["rolling"].append(std_name)
-            else:
-                print(f"[WARNUNG] 'rolling_window_size' ist {window_size}. "
-                      f"Rollierende Standardabweichung wird übersprungen, da Fenstergröße >= 2 sein muss.")
+            # Rolling Std
+            std_name = f"{feature_lower}_roll_std_{window_size}"
+            df[std_name] = df[feature_lower].rolling(window=window_size).std()
+            rolling_features_dict["rolling_std"].append(std_name)
 
-    return df, feature_dict
+    return df, rolling_features_dict
 
 
+# ----------------------------------
+# Feature Engineering: Lag Features
+# ----------------------------------
+def add_lag_features(df: pd.DataFrame, config: dict) -> tuple[pd.DataFrame, dict]:
+    """
+    Fügt Lag-Features (zeitlich verschobene Werte) für die Basis-Features hinzu.
+    """
+    lag_features_dict = {"lags": []}
+    num_lags = config.get("num_lags", 1)
+
+    if config.get("add_lag_features", False):
+        # --- KORREKTUR: Immer mit der Kleinbuchstaben-Version des Features arbeiten ---
+        for feature in config.get("base_features", []):
+            feature_lower = feature.lower() # Sicherstellen, dass der Feature-Name klein ist
+            
+            for lag in range(1, num_lags + 1):
+                lagged_name = f"{feature_lower}_lag_{lag}"
+                df[lagged_name] = df[feature_lower].shift(lag)
+                lag_features_dict["lags"].append(lagged_name)
+    
+    return df, lag_features_dict
+
+
+# ----------------------------------
+# Hauptfunktion: Alle Features hinzufügen
+# ----------------------------------
 def add_all_features(df: pd.DataFrame, config: dict) -> tuple[pd.DataFrame, dict]:
     """
-    Führt alle Schritte des Feature Engineerings aus.
-    MODIFIZIERTE DEBUG-VERSION.
+    Führt alle konfigurierten Feature-Engineering-Schritte aus.
     """
-    feature_dict = {
-        "base": config["base_features"].copy(),
-        "lagged": [],
-        "rolling": [],
-        "time": [],
+    # WICHTIG: Stellen Sie sicher, dass die Spalten des Eingabe-DataFrames klein geschrieben sind,
+    # da alle folgenden Funktionen dies erwarten.
+    df.columns = df.columns.str.lower()
+    
+    # Basis-Features (sind die Originalspalten, die wir modifizieren)
+    # Wir stellen sicher, dass die Liste der base_features selbst klein geschrieben ist.
+    base_features_lower = [f.lower() for f in config.get("base_features", [])]
+
+    # Führe die einzelnen Schritte aus
+    df, lag_dict = add_lag_features(df, config)
+    df, rolling_dict = add_rolling_features(df, config)
+
+    # Sammle alle erstellten Features
+    all_features = (
+        base_features_lower +
+        lag_dict.get("lags", []) +
+        rolling_dict.get("rolling_mean", []) +
+        rolling_dict.get("rolling_std", [])
+    )
+
+    # Erstelle das finale Dictionary
+    features_summary = {
+        "base": base_features_lower,
+        "lags": lag_dict.get("lags", []),
+        "rolling": rolling_dict,
+        "all": sorted(list(set(all_features))) # Eindeutige und sortierte Liste aller Features
     }
 
-    # Schritt 1: Zeit-Features (falls konfiguriert)
-    df, time_dict = add_time_features(df, config)
-    feature_dict["time"] = time_dict["time"]
-
-    # Schritt 2: Lag-Features
-    df, lag_dict = add_lag_features(df, config)
-    feature_dict["lagged"] = lag_dict["lagged"]
-
-    # Schritt 3: Rolling-Features
-    df, roll_dict = add_rolling_features(df, config)
-    feature_dict["rolling"] = roll_dict["rolling"]
-
-    # Alle Features zusammenführen
-    all_features = (
-        feature_dict["base"]
-        + feature_dict["lagged"]
-        + feature_dict["rolling"]
-        + feature_dict["time"]
-    )
-    feature_dict["all"] = all_features
-
-    # # Debug-Ausgabe, um den Zustand des DataFrames zu prüfen
-    # print(f"[DEBUG in add_all_features] DataFrame hat {len(df)} Zeilen VOR dem Verlassen der Funktion.")
-    # print(f"[DEBUG in add_all_features] Anzahl der NaN-Werte pro Spalte:\n{df.isnull().sum()}")
-
-    return df, feature_dict
+    return df, features_summary
 
 
 def create_feature_list_from_dict(feature_dict: dict) -> list:

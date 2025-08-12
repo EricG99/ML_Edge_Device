@@ -593,7 +593,7 @@ class DataPipeline2D(DataPipelineBase):
         scaler_type = self.config.get("scaler_type", "minmax")
         scale_target = self.config.get("scale_target", False)
         scale_features = self.config.get("scale_other_features", False)
-        target_column = self.config["base_features"][0]
+        target_column = self.config["base_features"][0].lower()
 
         scaler_class = RobustScaler if scaler_type == "robust" else MinMaxScaler
 
@@ -706,9 +706,10 @@ class DataPipeline3D(DataPipelineBase):
         
         if self.config.get("scale_target", False):
             self.y_scaler = scaler_class()
-            target_col = self.config["base_features"][0]
+            target_col = self.config["base_features"][0].lower()
             # y_scaler wird ebenfalls nur auf den Target-Werten der Trainingsdaten angepasst
             self.y_scaler.fit(train_df_featured[[target_col]])
+
             print("Target-Scaler wurde ausschließlich auf den Trainingsdaten angepasst.")
 
         # Schritt 4: Trainingsdaten transformieren und in Sliding Windows umwandeln

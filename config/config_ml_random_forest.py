@@ -24,7 +24,7 @@ random_forest = {
     "train_fraction": 0.8,
     "rolling_window_size": 2,
     # Features
-    "base_features": ['group4-2_s6_massflowrate'],
+    "base_features": ['Group4-2_S6_MassFlowRate'],
     "time_features": [],
     "include_roll_mean": True,
     "include_roll_std": True,
