@@ -28,9 +28,10 @@ class BaseInferenceProcessor(ABC):
         self._mqtt_client = None
         self._lock = threading.Lock()
         self.latest_payload = None
-        
-        # --- KORREKTUR: Schrittzähler für die Log-Ausgabe ---
         self.step_counter = 0
+        
+        # === NEU: Puffer für die ausstehende Vorhersage ===
+        self._pending_entry = None
 
     def _update_latest_payload(self, data: dict):
         with self._lock:
@@ -57,47 +58,63 @@ class BaseInferenceProcessor(ABC):
         self.config = shared_model_dict["config"]
         self._post_load_artifacts()
         logging.info("✅ Artefakte aus dem Speicher übernommen.")
-
+    
     def process_step(self, payload: dict) -> dict | None:
         """
-        Führt einen kompletten Inferenzschritt für ein gegebenes Payload aus.
-        Gibt ein Dictionary mit den Ergebnissen oder None zurück.
+        Verarbeitet einen Datenpunkt, gibt aber die Vorhersage vom *vorherigen* Schritt zurück,
+        angereichert mit dem jetzt bekannten "true_value".
         """
         if not payload:
             return None
 
-        input_data, timestamp, true_value = self._prepare_input_data(payload)
+        # 1. Bereite Input für die VORHERSAGE FÜR T+1 basierend auf den Daten von T vor
+        input_data, ts_now, true_now = self._prepare_input_data(payload)
         if input_data is None:
             return None
 
-        prediction_scaled, model_inference_time_ms = self._run_inference_unified(input_data)
-        predictions_unscaled = self._inverse_transform_prediction(prediction_scaled)
+        pred_scaled, t_inf_ms = self._run_inference_unified(input_data)
+        predictions_unscaled = self._inverse_transform_prediction(pred_scaled)
 
-        total_processing_time_ms = (time.perf_counter() - payload.get('start_time', time.perf_counter())) * 1000.0
-        
-        prediction_entry = {
-            "datetime": timestamp,
+        # 2. Erstelle den neuen Eintrag für die Zukunft (noch ohne echten Wert)
+        new_entry = {
+            "datetime": ts_now + pd.Timedelta(seconds=self.config.get("inference_interval_sec", 1.0)),
             "prediction": float(predictions_unscaled[0]) if predictions_unscaled.size > 0 else None,
-            "true_value": None if true_value is None else float(true_value),
+            "true_value": None,
             "rolling_forecast": predictions_unscaled.tolist(),
             "cpu_load": Pipeline_Utils.get_cpu_usage(),
             "ram_usage": Pipeline_Utils.get_memory_usage(),
-            "model_inference_time_ms": float(model_inference_time_ms),
-            "total_processing_time_ms": float(total_processing_time_ms)
+            "model_inference_time_ms": float(t_inf_ms),
+            "total_processing_time_ms": float((time.perf_counter() - payload.get('start_time', time.perf_counter())) * 1000.0)
         }
 
-        # --- KORREKTUR: Gewünschte Log-Ausgabe für die Konsole ---
-        self.step_counter += 1
-        true_str = f"{prediction_entry['true_value']:.4f}" if prediction_entry['true_value'] is not None else "N/A"
-        pred_str = f"{prediction_entry['prediction']:.4f}" if prediction_entry['prediction'] is not None else "N/A"
-        cpu_str = f"{prediction_entry['cpu_load']:.1f}%" if prediction_entry['cpu_load'] is not None else "N/A"
+        # 3. Wenn eine Vorhersage von t-1 aussteht, vervollständige sie jetzt mit dem wahren Wert von t
+        entry_to_return = None
+        if self._pending_entry is not None:
+            self._pending_entry["true_value"] = None if true_now is None else float(true_now)
+            self._pending_entry["datetime"] = ts_now
+            entry_to_return = self._pending_entry
 
-        logging.info(f"Step [{self.step_counter}] -> True: {true_str} | Pred: {pred_str} | CPU: {cpu_str}")
-        # --- Ende der Log-Ausgabe ---
+        # 4. Die neue Vorhersage für t+1 wird der ausstehende Eintrag für den nächsten Schritt
+        self._pending_entry = new_entry
 
-        return prediction_entry
+        # 5. Logging (nur wenn ein vollständiger Eintrag zurückgegeben wird)
+        if entry_to_return:
+            self.step_counter += 1
+            true_str = f"{entry_to_return['true_value']:.4f}" if entry_to_return['true_value'] is not None else "N/A"
+            
+            # === NEU: Formatierung des gesamten Forecast-Vektors für die Ausgabe ===
+            forecast_list = entry_to_return.get('rolling_forecast', [])
+            pred_str = f"t+1: {forecast_list[0]:.4f}" if len(forecast_list) > 0 else "N/A"
+            if len(forecast_list) > 1:
+                # Erstellt einen String wie "[t+2: 1.23, t+3: 1.45, ...]"
+                other_steps = ", ".join([f"t+{i+2}: {val:.2f}" for i, val in enumerate(forecast_list[1:])])
+                pred_str += f" [{other_steps}]"
+            # ======================================================================
 
-    # ... (Rest der Datei bleibt unverändert) ...
+            cpu_str = f"{entry_to_return['cpu_load']:.1f}%" if entry_to_return['cpu_load'] is not None else "N/A"
+            logging.info(f"Step [{self.step_counter}] -> True: {true_str} | Pred: {pred_str} | CPU: {cpu_str}")
+
+        return entry_to_return
 
     def get_data_source_iterator(self):
         """Gibt einen Iterator zurück, der die Payloads für die Inferenz liefert."""

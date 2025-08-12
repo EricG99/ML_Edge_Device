@@ -123,25 +123,25 @@ lstm = {
 
     #"model_filename": "model_quant_float16.tflite",
     "loading_strategy": "split",
-    "train_fraction": 0.7,
+    "train_fraction": 0.9,
     "edge_device": True,
 
     # --- Modellarchitektur ---
-    "num_layers": 1,
-    "initial_units": 52,
+    "num_layers": 2,
+    "initial_units": 56,
     "dropout": 0.2,
 
     # --- Trainingseinstellungen (OPTIMIERT) ---
-    "epochs": 30,  # ERHÖHT: Geben Sie dem Modell mehr Zeit zum Lernen.
+    "epochs": 3,  # ERHÖHT: Geben Sie dem Modell mehr Zeit zum Lernen.
     "batch_size": 32,
     "validation_fraction": 0.2,
     "early_stopping_patience": 10,
     "loss": "huber",
 
     # --- Zeitreihenparameter ---
-    "lags": 3,
+    "lags": 6,
     "horizon": 4,
-    "rolling_window_size": 2,
+    "rolling_window_size": 6,
 
     # --- Feature Engineering (OPTIMIERT) ---
     "base_features": ['group4-2_s6_massflowrate'],

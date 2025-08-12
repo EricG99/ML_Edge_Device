@@ -366,6 +366,11 @@ def inference_manager(config: dict, inference_class, folder_flag: str, algorithm
 
         if hasattr(inference_processor, 'stop'):
             inference_processor.stop() # Stoppt z.B. den internen MQTT-Client
+        if hasattr(inference_processor, 'flush_pending_entry'):
+            last_entry = inference_processor.flush_pending_entry()
+            if last_entry:
+                with shared_resource_lock:
+                    all_predictions.append(last_entry)
 
         if all_predictions:
             try:
