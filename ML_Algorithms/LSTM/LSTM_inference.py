@@ -62,15 +62,38 @@ class LSTMInference(BaseInferenceProcessor):
         except Exception as e:
             logging.warning(f"⚠️ TFLite-Interpreter konnte nicht geladen werden ({e}), nutze Keras-Modell.")
 
+    # --- PATCH START ---
+    # Patch: Robuste Methode zum Übernehmen des Puffers beim Hot-Swap
     def _on_artifacts_swapped(self):
         """
         Wird nach set_artifacts_from_memory() aufgerufen.
-        LSTM nutzt im Retraining-Modus Keras anstelle von TFLite; der DataProcessor
-        muss ggf. mit neuer Config/Lags/Horizon neu aufgebaut werden.
+        Stellt sicher, dass der RealTimeDataProcessor mit der neuen Konfiguration
+        synchron ist und der Puffer-Zustand für eine nahtlose Inferenz erhalten bleibt.
         """
         from ML_Helpfunctions.base_data_processing import RealTimeDataProcessor
+        old_buf = None
+        try:
+            # Puffer aus dem alten Prozessor sicher auslesen
+            old_dp = getattr(self, "data_processor", None)
+            if old_dp is not None and hasattr(old_dp, "_buffer"):
+                old_buf = old_dp._buffer.copy()
+        except Exception:
+            old_buf = None # Im Fehlerfall mit leerem Puffer starten
+
+        # DataProcessor mit der (potenziell neuen) Konfiguration neu initialisieren
         self.data_processor = RealTimeDataProcessor(self.config)
-        logging.info("LSTMInference: DataProcessor nach Hot-Swap neu initialisiert.")
+
+        # Warm-Start mit altem Puffer
+        try:
+            if old_buf is not None and not old_buf.empty:
+                max_len = getattr(self.data_processor, "_max_buffer_size", len(old_buf))
+                self.data_processor._buffer = old_buf.tail(max_len)
+                logging.info(f"{self.__class__.__name__}: DataProcessor warm-started mit {len(self.data_processor._buffer)} Zeilen aus altem Puffer.")
+            else:
+                logging.info(f"{self.__class__.__name__}: DataProcessor neu initialisiert (kein alter Puffer verfügbar).")
+        except Exception as e:
+            logging.warning(f"{self.__class__.__name__}: Konnte alten Puffer nicht übernehmen: {e}")
+    # --- PATCH END ---
 
 
     def _prepare_input_data(self, payload: dict) -> tuple[np.ndarray | None, any, float | None]:
@@ -85,13 +108,6 @@ class LSTMInference(BaseInferenceProcessor):
 
         featured_buffer = self.data_processor.update_and_process(payload_lower)
         
-        # FIX 5: Temporäre Diagnose zum Überprüfen der Zeitstempel
-        logger.debug(
-            f"t_payload={payload_lower.get('datetime')}, "
-            f"t_buffer_last={self.data_processor._buffer.index[-1] if not self.data_processor._buffer.empty else 'N/A'}, "
-            f"t_fe_last={featured_buffer.index[-1] if featured_buffer is not None and not featured_buffer.empty else 'N/A'}"
-        )
-        
         if featured_buffer is None or len(featured_buffer) < self.lags:
             return None, None, None
             
@@ -104,7 +120,6 @@ class LSTMInference(BaseInferenceProcessor):
         window_scaled = self.scaler.transform(window_df.values)
         inference_window = np.expand_dims(window_scaled, axis=0)
         
-        # FIX 1: Log-/Referenz-Zeit direkt aus dem Payload nehmen
         timestamp = pd.to_datetime(payload_lower.get('datetime'))
         if pd.isna(timestamp):
             timestamp = pd.Timestamp.utcnow() # Fallback
@@ -126,5 +141,3 @@ class LSTMInference(BaseInferenceProcessor):
             )
         pred_reshaped = np.asarray(prediction_scaled).reshape(-1, 1)
         return self.y_scaler.inverse_transform(pred_reshaped).flatten()
-    
-    

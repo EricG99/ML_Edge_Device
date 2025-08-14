@@ -89,7 +89,11 @@ class BaseInferenceProcessor(ABC):
         # Merken (ab hier existiert der Pfad garantiert)
         if self._predictions_file_path is None:
             self._predictions_file_path = path
-
+            try:
+                import os
+                logging.info(f"📄 StepPredictions gestartet: {os.path.abspath(path)}")
+            except Exception:
+                pass
         return path
 
     def flush_pending_entry(self) -> dict | None:
@@ -144,10 +148,14 @@ class BaseInferenceProcessor(ABC):
             return None
 
         start_processing_time = time.perf_counter()
+
+        # 1) Payload -> Modellinput + t/Zielwert extrahieren (modell-spezifisch)
         input_data, timestamp_t, true_value_t = self._prepare_input_data(payload)
-        
+
+        # 2) Wenn (noch) kein Fenster bereit ist
         if input_data is None:
             if true_value_t is not None:
+                # Wir liefern zumindest True-Value + leeren Forecast, damit der Logger/CSV fortlaufend bleibt
                 return {
                     "datetime": timestamp_t,
                     "prediction": None,
@@ -156,14 +164,24 @@ class BaseInferenceProcessor(ABC):
                 }
             return None
 
+        # 3) Inferenz (vereinheitlicht: TFLite oder Keras) + Rückskalierung
         future_pred_scaled, t_inf_ms = self._run_inference_unified(input_data)
         future_pred_unscaled = self._inverse_transform_prediction(future_pred_scaled)
 
+        # 4) Den fertigzustellenden Eintrag für Zeitpunkt t aus dem "pending" von t-1 holen
         completed_entry_for_t = None
         if self._pending_entry is not None:
             completed_entry_for_t = self._pending_entry.copy()
             completed_entry_for_t["true_value"] = None if true_value_t is None else float(true_value_t)
 
+            # NEU: Inferenzzeit aus dem Pending-Eintrag (ms) in Sekunden übernehmen -> kommt in die CSV als 'inference_time_s'
+            try:
+                if "model_inference_time_ms" in self._pending_entry and self._pending_entry["model_inference_time_ms"] is not None:
+                    completed_entry_for_t["inference_time_s"] = float(self._pending_entry["model_inference_time_ms"]) / 1000.0
+            except Exception:
+                pass
+
+        # 5) Neuen Pending-Eintrag für Zeitpunkt t+1 vorbereiten
         self._pending_entry = {
             "datetime": timestamp_t + pd.Timedelta(seconds=self.config.get("inference_interval_sec", 1.0)),
             "prediction": float(future_pred_unscaled[0]) if future_pred_unscaled.size > 0 else None,
@@ -174,9 +192,11 @@ class BaseInferenceProcessor(ABC):
             "model_inference_time_ms": float(t_inf_ms),
             "total_processing_time_ms": float((time.perf_counter() - start_processing_time) * 1000.0)
         }
-        
+
+        # 6) Housekeeping
         self.step_counter += 1
-        
+
+        # Falls dies der allererste Schritt war, gibt es noch keinen completed_entry_for_t
         if completed_entry_for_t is None:
             completed_entry_for_t = {
                 "datetime": timestamp_t,
@@ -184,18 +204,27 @@ class BaseInferenceProcessor(ABC):
                 "true_value": float(true_value_t) if true_value_t is not None else None,
             }
 
-        completed_entry_for_t['future_forecast'] = future_pred_unscaled.tolist()
-        
-        true_str = f"{completed_entry_for_t['true_value']:.4f}" if completed_entry_for_t.get('true_value') is not None else "N/A"
-        pred_str_t = f"{completed_entry_for_t['prediction']:.4f}" if completed_entry_for_t.get('prediction') is not None else "Warte..."
+        # Forecast (H-Schritte) am Eintrag für t hinterlegen
+        completed_entry_for_t["future_forecast"] = future_pred_unscaled.tolist()
+
+        # 7) Logging für Übersicht
+        true_str = (
+            f"{completed_entry_for_t['true_value']:.4f}"
+            if completed_entry_for_t.get("true_value") is not None else "N/A"
+        )
+        pred_str_t = (
+            f"{completed_entry_for_t['prediction']:.4f}"
+            if completed_entry_for_t.get("prediction") is not None else "Warte..."
+        )
         pred_str_t_plus_1 = f"{future_pred_unscaled[0]:.4f}" if future_pred_unscaled.size > 0 else "N/A"
-        ts_str = timestamp_t.strftime('%H:%M:%S.%f')[:-3] if hasattr(timestamp_t, 'strftime') else str(timestamp_t)
+        ts_str = timestamp_t.strftime("%H:%M:%S.%f")[:-3] if hasattr(timestamp_t, "strftime") else str(timestamp_t)
 
         logging.info(
             f"Step [{self.step_counter}] | Zeit: {ts_str} | "
             f"Vergleich für t: ECHT={true_str}, PRED={pred_str_t} | "
             f"NEUER FORECAST für t+1 -> {pred_str_t_plus_1}"
-        )        
+        )
+
         return completed_entry_for_t
 
     def get_data_source_iterator(self):
@@ -240,13 +269,23 @@ class BaseInferenceProcessor(ABC):
             if hasattr(self, "_predictions_file_path") and self._predictions_file_path:
                 extra["predictions_file_path"] = self._predictions_file_path
 
-            Pipeline_Utils.save_metrics_summary(
+            metrics_json_path = Pipeline_Utils.save_metrics_summary(
                 metrics=metrics,
                 run_config=self.config,
                 training_config=self.training_config or {},
                 paths=self.config.get("paths", {}),
                 extra_info=extra if extra else None
             )
+            try:
+                import os
+                if getattr(self, "_predictions_file_path", None):
+                    logging.info(f"📄 StepPredictions CSV: {os.path.abspath(self._predictions_file_path)}")
+                if metrics_json_path:
+                    logging.info(f"📁 ErrorMetrics JSON: {os.path.abspath(metrics_json_path)}")
+                agg_csv = os.path.join(self.config.get("paths", {}).get("Error_Metrics", self.config.get("paths", {}).get("Prediction_Data", ".")), "ErrorMetrics_all_runs.csv")
+                logging.info(f"📊 ErrorMetrics (aggregiert, CSV): {os.path.abspath(agg_csv)}")
+            except Exception:
+                pass
             logging.info("✅ Finale Ergebnisse erfolgreich gespeichert.")
         except Exception as e:
             logging.error(f"Fehler beim Speichern der finalen Ergebnisse: {e}", exc_info=True)

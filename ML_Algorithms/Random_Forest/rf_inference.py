@@ -35,12 +35,33 @@ class RFInference(BaseInferenceProcessor):
     def _on_artifacts_swapped(self):
         """
         Wird nach set_artifacts_from_memory() aufgerufen.
-        Stellt sicher, dass der RealTimeDataProcessor mit der (ggf. geänderten)
-        Konfiguration/Featureliste synchron ist.
+        Stellt sicher, dass der RealTimeDataProcessor mit der neuen Konfiguration
+        synchron ist und der Puffer-Zustand für eine nahtlose Inferenz erhalten bleibt.
         """
         from ML_Helpfunctions.base_data_processing import RealTimeDataProcessor
+        old_buf = None
+        try:
+            # Puffer aus dem alten Prozessor sicher auslesen
+            old_dp = getattr(self, "data_processor", None)
+            if old_dp is not None and hasattr(old_dp, "_buffer"):
+                old_buf = old_dp._buffer.copy()
+        except Exception:
+            old_buf = None # Im Fehlerfall mit leerem Puffer starten
+
+        # DataProcessor mit der (potenziell neuen) Konfiguration neu initialisieren
         self.data_processor = RealTimeDataProcessor(self.config)
-        logging.info("RFInference: DataProcessor nach Hot-Swap neu initialisiert.")
+
+        # Warm-Start mit altem Puffer
+        try:
+            if old_buf is not None and not old_buf.empty:
+                max_len = getattr(self.data_processor, "_max_buffer_size", len(old_buf))
+                self.data_processor._buffer = old_buf.tail(max_len)
+                logging.info(f"{self.__class__.__name__}: DataProcessor warm-started mit {len(self.data_processor._buffer)} Zeilen aus altem Puffer.")
+            else:
+                logging.info(f"{self.__class__.__name__}: DataProcessor neu initialisiert (kein alter Puffer verfügbar).")
+        except Exception as e:
+            logging.warning(f"{self.__class__.__name__}: Konnte alten Puffer nicht übernehmen: {e}")
+ 
 
 
     def _prepare_input_data(self, payload: dict) -> tuple[np.ndarray | None, any, float | None]:

@@ -93,3 +93,20 @@ class RealTimeDataProcessor:
         except Exception as e:
             logging.error(f"Fehler beim Feature Engineering im RealTimeDataProcessor: {e}", exc_info=True)
             return None
+        
+    def prime_buffer(self, df_like: pd.DataFrame):
+            """
+            Füllt den internen Puffer initial mit den letzten _min_data_points Zeilen.
+            Erwartet Datetime-Index und Spaltennamen in Kleinbuchstaben.
+            """
+            if df_like is None or df_like.empty:
+                return
+            df = df_like.copy()
+            df.columns = df.columns.str.lower()
+            if "datetime" in df.columns:
+                df["datetime"] = pd.to_datetime(df["datetime"])
+                df = df.set_index("datetime")
+            # Puffer mit den letzten N Zeilen füllen, die für das Feature Engineering benötigt werden
+            self._buffer = df.sort_index().tail(self._min_data_points)
+            logging.info(f"Puffer wurde mit {len(self._buffer)} Zeilen vorgefüllt ('geprimed').")
+ 

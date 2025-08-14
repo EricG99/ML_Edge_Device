@@ -233,6 +233,18 @@ def inference_manager(config: dict, inference_class, folder_flag: str, algorithm
         inference_processor = inference_class(config, folder_flag=folder_flag)
         if shared_model.get("model") is not None:
             inference_processor.set_artifacts_from_memory(shared_model)
+            # 🔧 Warm-Start: DataProcessor mit initialem Fenster vorfüttern
+            try:
+                init_df = shared_model.get("initial_training_data")
+                dp = getattr(inference_processor, "data_processor", None)
+                if dp is not None and init_df is not None and hasattr(dp, "prime_buffer"):
+                    want = getattr(dp, "_min_data_points", 1)
+                    dp.prime_buffer(init_df.tail(want))
+                    logging.info("🔧 DataProcessor warm-started mit initialem Fenster.")
+            except Exception as e:
+                logging.warning(f"Konnte DataProcessor nicht vorfüttern: {e}")
+
+
         elif config.get('load_id'):
             inference_processor.load_artifacts()
         else:
