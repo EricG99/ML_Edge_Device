@@ -132,16 +132,16 @@ lstm = {
     "dropout": 0.2,
 
     # --- Trainingseinstellungen (OPTIMIERT) ---
-    "epochs": 30,  # ERHÖHT: Geben Sie dem Modell mehr Zeit zum Lernen.
+    "epochs": 20,  # ERHÖHT: Geben Sie dem Modell mehr Zeit zum Lernen.
     "batch_size": 32,
     "validation_fraction": 0.2,
     "early_stopping_patience": 10,
     "loss": "huber",
 
     # --- Zeitreihenparameter ---
-    "lags": 12,
+    "lags": 4,
     "horizon": 4,
-    "rolling_window_size": 6,
+    "rolling_window_size": 2,
 
     # --- Feature Engineering (OPTIMIERT) ---
     "base_features": ['group4-2_s6_massflowrate'],

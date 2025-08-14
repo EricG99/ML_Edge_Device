@@ -37,11 +37,13 @@ class LSTMInference(BaseInferenceProcessor):
     
     def __init__(self, config: dict, folder_flag: str = FOLDER_FLAG):
         super().__init__(config, folder_flag)
-        self.data_processor = RealTimeDataProcessor(config) # Verwaltet den Puffer für Features
+        self.data_processor = RealTimeDataProcessor(config) 
         self.lags = int(config.get("lags", 1))
 
     def _post_load_artifacts(self):
-        """Versucht, nach dem Laden der Basis-Artefakte ein optimiertes TFLite-Modell zu laden."""
+        if self.config.get("mode") == "retraining":
+            logging.info("Retraining-Modus aktiv. Keras-Modell wird für die Inferenz verwendet.")
+            return
         try:
             models_dir = self.config["paths"].get("Models")
             tfl_name = self.config.get("model_filename", "model_quant_float16.tflite")
@@ -50,35 +52,34 @@ class LSTMInference(BaseInferenceProcessor):
                 interpreter = tf.lite.Interpreter(model_path=tfl_path)
                 interpreter.allocate_tensors()
                 
-                # DEBUG-Logging für TFLite-Modell
                 in_det = interpreter.get_input_details()[0]
                 out_det = interpreter.get_output_details()[0]
                 logger.info(f"TFLite Input: Shape={in_det['shape']}, DType={in_det['dtype']}")
                 logger.info(f"TFLite Output: Shape={out_det['shape']}, DType={out_det['dtype']}")
                 
-                self.model = interpreter # Überschreibe das Keras-Modell
+                self.model = interpreter
                 logging.info(f"ℹ️ LSTM-Inferenz nutzt TFLite-Interpreter: {tfl_path}")
         except Exception as e:
             logging.warning(f"⚠️ TFLite-Interpreter konnte nicht geladen werden ({e}), nutze Keras-Modell.")
 
     def _prepare_input_data(self, payload: dict) -> tuple[np.ndarray | None, any, float | None]:
-        """
-        Bereitet ein 3D-Fenster für das LSTM-Modell vor.
-        Diese Version ist robust gegenüber Groß- und Kleinschreibung im Payload.
-        """
         if not payload:
             return None, None, None
             
-        # --- NEU: Robuste, Case-Insensitive Behandlung des Payloads ---
-        # Erstelle eine temporäre Version des Payloads, bei der alle Schlüssel klein geschrieben sind.
         try:
             payload_lower = {str(k).lower(): v for k, v in payload.items()}
         except AttributeError:
-            logging.error("Fehler beim Konvertieren der Payload-Schlüssel in Kleinbuchstaben. Ist das Payload ein Dictionary?")
+            logging.error("Fehler beim Konvertieren der Payload-Schlüssel in Kleinbuchstaben.")
             return None, None, None
 
-        # Der Datenprozessor erhält das Payload mit den nun garantierten Kleinbuchstaben-Schlüsseln.
         featured_buffer = self.data_processor.update_and_process(payload_lower)
+        
+        # FIX 5: Temporäre Diagnose zum Überprüfen der Zeitstempel
+        logger.debug(
+            f"t_payload={payload_lower.get('datetime')}, "
+            f"t_buffer_last={self.data_processor._buffer.index[-1] if not self.data_processor._buffer.empty else 'N/A'}, "
+            f"t_fe_last={featured_buffer.index[-1] if featured_buffer is not None and not featured_buffer.empty else 'N/A'}"
+        )
         
         if featured_buffer is None or len(featured_buffer) < self.lags:
             return None, None, None
@@ -92,48 +93,25 @@ class LSTMInference(BaseInferenceProcessor):
         window_scaled = self.scaler.transform(window_df.values)
         inference_window = np.expand_dims(window_scaled, axis=0)
         
-        timestamp = window_df.index[-1]
+        # FIX 1: Log-/Referenz-Zeit direkt aus dem Payload nehmen
+        timestamp = pd.to_datetime(payload_lower.get('datetime'))
+        if pd.isna(timestamp):
+            timestamp = pd.Timestamp.utcnow() # Fallback
 
-        # --- KORREKTUR: Suche in dem Dictionary mit den Kleinbuchstaben-Schlüsseln ---
         key_to_find = self.target_feature.lower()
         true_value = payload_lower.get(key_to_find)
 
-        # Hilfreicher Debug-Logger für den Fall, dass die Spalte komplett fehlt
         if true_value is None:
-            logging.warning("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-            logging.warning(f"FEHLER (LSTM): 'true_value' konnte auch nach Umwandlung in Kleinbuchstaben nicht gefunden werden!")
-            logging.warning(f"--> Gesuchter Schlüssel: '{key_to_find}'")
-            available_keys = list(payload_lower.keys())
-            logging.warning(f"--> Verfügbare Schlüssel (klein, Auszug): {available_keys[:10]}")
-            logging.warning("--> Bitte prüfen: Ist die Spalte in der CSV/MQTT-Quelle überhaupt vorhanden?")
-            logging.warning("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-        
-                # --- DEBUG-Logging für Eingabedaten ---
-        logger.debug(f"Input-Window Shape: {inference_window.shape}")
-        logger.debug(f"Min/Max im skalierten Input: {np.min(inference_window):.4f} / {np.max(inference_window):.4f}")
-        if np.allclose(np.min(inference_window), np.max(inference_window)):
-            logger.warning("Alle Werte im skalierten Input-Fenster sind identisch!")
+            logging.warning(f"FEHLER (LSTM): 'true_value' für Schlüssel '{key_to_find}' nicht im Payload gefunden.")
 
+        logger.debug(f"Input-Window Shape: {inference_window.shape}")
         
         return inference_window, timestamp, true_value
 
     def _inverse_transform_prediction(self, prediction_scaled: np.ndarray) -> np.ndarray:
-        """
-        Skaliert die LSTM-Vorhersage ausschließlich mit dem dedizierten y_scaler zurück.
-        *** KORRIGIERTE VERSION: Entfernt den fragilen Fallback-Mechanismus. ***
-        """
-        # Prüfen, ob der notwendige y_scaler vorhanden ist.
         if self.y_scaler is None:
-            # Ein lauter Fehler ist besser als eine stille, falsche Vorhersage.
             raise RuntimeError(
-                "Der 'y_scaler' wurde nicht gefunden oder geladen. Eine Rücktransformation "
-                "der Vorhersage ist nicht möglich. Stellen Sie sicher, dass das Modell "
-                "mit einem y_scaler gespeichert wurde."
+                "Der 'y_scaler' wurde nicht gefunden oder geladen. Eine Rücktransformation ist nicht möglich."
             )
-
-        # Die Vorhersage in die korrekte Form bringen (z.B. von (1, 5) zu (5, 1))
         pred_reshaped = np.asarray(prediction_scaled).reshape(-1, 1)
-
-        # Die inverse Transformation mit dem dedizierten und sicheren y_scaler durchführen
-        # .flatten() wandelt das Ergebnis wieder in ein 1D-Array um (z.B. [pred1, pred2, ...])
         return self.y_scaler.inverse_transform(pred_reshaped).flatten()

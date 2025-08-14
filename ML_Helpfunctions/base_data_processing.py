@@ -23,11 +23,18 @@ class RealTimeDataProcessor:
         self.config = config
         self._buffer = pd.DataFrame()
 
-        # KORREKTUR: Bestimme die wahre minimale Anzahl an Datenpunkten, die für alle Features benötigt wird.
-        # Dies ist das Maximum aus der Lag-Anzahl und der Fenstergröße für rollierende Features.
+        # FIX 3: Bestimme die wahre minimale Anzahl an Datenpunkten, die für alle Features benötigt wird.
         min_for_lags = self.config.get('lags', 1)
-        min_for_rolling_features = self.config.get('rolling_window_size', 1)
+        # Berücksichtige sowohl eine einzelne Fenstergröße als auch eine Liste von Fenstern
+        rolling_windows = self.config.get('rolling_windows', [])
+        if not isinstance(rolling_windows, list): rolling_windows = [rolling_windows] # Mache es zur Liste, falls es nur eine Zahl ist
+        
+        min_for_rolling_features = max(
+            self.config.get('rolling_window_size', 1),
+            max(rolling_windows) if rolling_windows else 1
+        )
         self._min_data_points = max(min_for_lags, min_for_rolling_features)
+
 
         # Die Puffergröße muss groß genug sein für die minimalen Datenpunkte und die Lags für das LSTM.
         self._max_buffer_size = self.config.get('max_fe_window', 50) + self.config.get('lags', 1)
@@ -56,10 +63,7 @@ class RealTimeDataProcessor:
         # 1. Neuen Datenpunkt in einen DataFrame umwandeln und an den Puffer anhängen
         try:
             new_row = pd.DataFrame([new_data_point])
-            # NEU: Alle Spaltennamen auf Kleinbuchstaben standardisieren
             new_row.columns = new_row.columns.str.lower()
-            
-            # Jetzt kann sicher auf 'datetime' zugegriffen werden
             new_row['datetime'] = pd.to_datetime(new_row['datetime'])
             new_row = new_row.set_index('datetime')
         except KeyError:
@@ -67,6 +71,11 @@ class RealTimeDataProcessor:
             return None
         
         self._buffer = pd.concat([self._buffer, new_row]).sort_index()
+
+        # FIX 2: Duplikate & NaNs im Index entfernen, damit der "letzte" Index wirklich fortschreitet
+        self._buffer = self._buffer[~self._buffer.index.duplicated(keep='last')]
+        self._buffer = self._buffer[~self._buffer.index.isna()]
+
 
         # 2. Puffer auf die maximale Größe kürzen (Effizienz)
         if len(self._buffer) > self._max_buffer_size:
