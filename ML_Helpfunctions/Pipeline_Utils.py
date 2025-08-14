@@ -12,6 +12,7 @@ import traceback
 from pathlib import Path
 import socket
 
+
 import psutil
 import time
 
@@ -157,6 +158,43 @@ def flatten_config(config: dict, prefix: str = "") -> dict:
             flat[full_key] = str(value)  # Sicherer Fallback
     return flat
 
+
+import os
+import json
+import numpy as np
+import pandas as pd
+from pathlib import Path
+from datetime import datetime, date
+
+def _to_jsonable(obj):
+    """
+    Wandelt beliebige Objekte rekursiv in JSON-serialisierbare Typen um.
+    Behandelt: pathlib.Path, numpy (inkl. np.generic), datetime/pd.Timestamp,
+    Dict/List/Tuple/Set und verschachtelte Strukturen.
+    """
+    if obj is None or isinstance(obj, (str, int, float, bool)):
+        return obj
+    if isinstance(obj, (datetime, date, pd.Timestamp)):
+        try:
+            return obj.isoformat()
+        except Exception:
+            return str(obj)
+    if isinstance(obj, Path):
+        return str(obj)
+    if isinstance(obj, np.generic):
+        return obj.item()
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    if isinstance(obj, dict):
+        return {str(k): _to_jsonable(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple, set)):
+        return [_to_jsonable(v) for v in obj]
+    try:
+        return str(obj)
+    except Exception:
+        return repr(obj)
+
+
 def save_metrics_summary(
     metrics: dict,
     run_config: dict,
@@ -165,21 +203,24 @@ def save_metrics_summary(
     extra_info: dict | None = None
 ) -> str:
     """
-    Speichert Metriken als JSON + CSV. 'extra_info' kann z. B. 'predictions_file_path' enthalten.
-    Rückgabe: absoluter Pfad zur JSON.
+    Speichert die Metriken als:
+      1) Run-spezifische JSON (neue Datei je Run).
+      2) Aggregierte CSV 'ErrorMetrics_all_runs.csv' (wird immer ergänzt).
+    Rückgabe: absoluter Pfad zur JSON-Datei.
     """
     out_dir = (paths or {}).get("Error_Metrics", (paths or {}).get("Prediction_Data", "."))
+    out_dir = os.fspath(out_dir)
     os.makedirs(out_dir, exist_ok=True)
 
     model_name = run_config.get("model_name", "model")
-    dataset = run_config.get("dataset", "data")
-    run_id = run_config.get("run_id", "run")
-    timestamp = run_config.get("time_stamp", "timestamp")
+    dataset    = run_config.get("dataset", "data")
+    run_id     = run_config.get("run_id", "run")
+    timestamp  = run_config.get("time_stamp", "timestamp")
 
-    base = f"ErrorMetrics_{run_id}_{model_name}_{dataset}_{timestamp}"
+    base      = f"ErrorMetrics_{run_id}_{model_name}_{dataset}_{timestamp}"
     json_path = os.path.join(out_dir, base + ".json")
-    csv_path  = os.path.join(out_dir, base + ".csv")
 
+    # JSON-Payload zusammenbauen und serialisierbar machen
     payload = {
         "run": {
             "run_id": run_id,
@@ -194,22 +235,38 @@ def save_metrics_summary(
     if extra_info:
         payload["extra_info"] = extra_info
 
-    with open(json_path, "w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2, ensure_ascii=False)
+    payload_jsonable = _to_jsonable(payload)
 
+    # 1) Run-spezifische JSON schreiben
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(payload_jsonable, f, indent=2, ensure_ascii=False)
+
+    # 2) Aggregierte CSV-Zeile anhängen
     flat = {
         "run_id": run_id,
         "model_name": model_name,
         "dataset": dataset,
-        "time_stamp": timestamp
+        "time_stamp": timestamp,
+        "json_path": os.fspath(json_path)
     }
     for k in ["MAE", "MSE", "RMSE", "MAPE", "SMAPE", "R2"]:
         if k in (metrics or {}):
-            flat[k] = metrics[k]
-    if extra_info and "predictions_file_path" in extra_info:
-        flat["predictions_file_path"] = os.path.abspath(extra_info["predictions_file_path"])
+            try:
+                flat[k] = float(metrics[k])
+            except Exception:
+                flat[k] = metrics[k]
 
-    pd.DataFrame([flat]).to_csv(csv_path, index=False)
+    if extra_info and "predictions_file_path" in extra_info:
+        flat["predictions_file_path"] = os.fspath(extra_info["predictions_file_path"])
+
+    agg_path = os.path.join(out_dir, "ErrorMetrics_all_runs.csv")
+    pd.DataFrame([flat]).to_csv(
+        agg_path,
+        mode="a",
+        header=not os.path.exists(agg_path),
+        index=False
+    )
+
     return os.path.abspath(json_path)
 
 

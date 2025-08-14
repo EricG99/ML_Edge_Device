@@ -12,6 +12,9 @@ from flask import Flask, jsonify, render_template, request
 from copy import deepcopy
 from datetime import datetime, timedelta
 import tensorflow as tf
+
+import webbrowser # NEU
+from threading import Timer # NEU
 import importlib
 
 from sklearn.ensemble import RandomForestRegressor
@@ -180,28 +183,53 @@ def retraining_thread_task(retraining_data_df: pd.DataFrame, algorithm: str):
 
 def inference_manager(config: dict, inference_class, folder_flag: str, algorithm: str, mode: str):
     """
-    Kern-Loop der Inferenz:
-    - Läuft kontinuierlich weiter (auch während Retraining).
-    - Startet Retraining non-blocking am Zyklusende (nur im Modus 'retraining').
-    - Führt Hot-Swap durch, sobald Retraining-Artefakte 'ready_to_swap' signalisieren.
+    Führt die Inferenz in Zyklen/Schritten aus.
+    - Speichert pro Schritt: True, Forecast(H), inference_time_s (aus prediction_entry), total_time_s, CPU%, RAM.
+    - Sammelt pro Schritt Retraining-Material und triggert am Zyklusende ein non-blocking Retraining.
+    - Hot-Swap, sobald neues Modell/Abhängigkeiten bereitstehen.
     """
-    global all_predictions
+    import os
+    import time
+    import threading
+    import logging
+    import pandas as pd
+
+    # psutil optional verwenden (CPU/RAM)
+    try:
+        import psutil
+    except Exception:
+        psutil = None
+
+    # Globale Zustände verwenden (werden an anderer Stelle definiert)
+    global all_predictions, shared_model, shared_resource_lock, PIPELINE_STATE, retraining_thread_task
+
     retraining_data_list = []
     inference_processor = None
 
+    # Prozess & CPU-Kerne für Prozentberechnung
+    if psutil is not None:
+        try:
+            proc = psutil.Process(os.getpid())
+            n_cpus = max(psutil.cpu_count(logical=True) or 1, 1)
+        except Exception:
+            proc, n_cpus = None, 1
+    else:
+        proc, n_cpus = None, 1
+
     try:
-        # Warten bis Initialisierung abgeschlossen
-        while PIPELINE_STATE["status"] == "initializing":
-            time.sleep(1)
-        if PIPELINE_STATE["status"] == "error":
+        # Auf Initialisierung warten
+        while PIPELINE_STATE.get("status") == "initializing":
+            time.sleep(0.2)
+        if PIPELINE_STATE.get("status") == "error":
             logging.error("Inferenz-Manager startet nicht, da ein Fehler bei der Initialisierung aufgetreten ist.")
             return
 
+        # Status setzen
         with shared_resource_lock:
             PIPELINE_STATE["status"] = "inference_running"
         logging.info(f"--- INFERENCE MANAGER: Startet im Modus '{mode}' ---")
 
-        # Inferenz-Prozessor & Artefakte laden
+        # Inferenz-Objekt aufsetzen + Artefakte laden/übernehmen
         inference_processor = inference_class(config, folder_flag=folder_flag)
         if shared_model.get("model") is not None:
             inference_processor.set_artifacts_from_memory(shared_model)
@@ -210,20 +238,25 @@ def inference_manager(config: dict, inference_class, folder_flag: str, algorithm
         else:
             raise RuntimeError("Kein trainiertes Modell und keine load_id zum Laden gefunden.")
 
-        # Daten-Iterator beziehen (callable, das Iteratoren pro Zyklus liefert)
+        # Datenquelle (zustandsbehafteter Iterator-Fabrik)
         data_source_iterator = inference_processor.get_data_source_iterator()
 
-        # Zyklus-/Schrittkonfiguration
+        # Zyklen & Schritte pro Zyklus
         if mode == "retraining":
-            max_cycles = config.get("retraining_cycles", 5)
-            steps_per_cycle = config.get("retraining_interval_steps", 20)
+            max_cycles = int(config.get("retraining_cycles", 5))
+            steps_per_cycle = int(config.get("retraining_interval_steps", 20))
         else:
             max_cycles = 1
             steps_per_cycle = config.get("inference_steps", "infinite")
-            if steps_per_cycle == "infinite" and hasattr(inference_processor, "_batch_data_df") and inference_processor._batch_data_df is not None:
-                steps_per_cycle = len(inference_processor._batch_data_df)
+            if steps_per_cycle == "infinite":
+                if hasattr(inference_processor, "_batch_data_df") and inference_processor._batch_data_df is not None:
+                    steps_per_cycle = len(inference_processor._batch_data_df)
+                else:
+                    # Fallback: sichere Obergrenze
+                    steps_per_cycle = int(config.get("fallback_steps", 1000))
 
-        target_interval_sec = config.get("inference_interval_sec", 1.0)
+        target_interval_sec = float(config.get("inference_interval_sec", 1.0))
+
         with shared_resource_lock:
             PIPELINE_STATE.update({
                 "total_cycles": max_cycles,
@@ -231,7 +264,7 @@ def inference_manager(config: dict, inference_class, folder_flag: str, algorithm
                 "mode": mode
             })
 
-        # Hauptschleife über Zyklen
+        # --- Hauptschleife über Zyklen ---
         for cycle in range(max_cycles):
             with shared_resource_lock:
                 PIPELINE_STATE.update({
@@ -240,32 +273,79 @@ def inference_manager(config: dict, inference_class, folder_flag: str, algorithm
                 })
             logging.info(f"--- Zyklus {cycle + 1}/{max_cycles}: Starte Inferenz. ---")
 
-            # Iterator für den aktuellen Zyklus
             current_cycle_iterator = data_source_iterator(steps_per_cycle)
 
-            # Innere Schritt-Schleife
+            # --- Schritt-Schleife ---
             for step, payload in enumerate(current_cycle_iterator):
-                start_cycle_time = time.perf_counter()
+                step_wall_t0 = time.perf_counter()
 
-                # Pause/Stop beachten
-                while PIPELINE_STATE["is_paused"]:
-                    time.sleep(0.5)
-                if PIPELINE_STATE["is_finished"]:
+                # Ressourcen am Anfang messen
+                if proc is not None:
+                    try:
+                        cpu_t0 = proc.cpu_times()
+                        ram_mb = proc.memory_info().rss / (1024 * 1024)
+                    except Exception:
+                        cpu_t0, ram_mb = None, None
+                else:
+                    cpu_t0, ram_mb = None, None
+
+                # Pause/Stop behandeln
+                while PIPELINE_STATE.get("is_paused"):
+                    time.sleep(0.2)
+                if PIPELINE_STATE.get("is_finished"):
                     break
-
                 with shared_resource_lock:
                     PIPELINE_STATE["steps_in_cycle"] = step + 1
 
                 # Einen Schritt verarbeiten
                 prediction_entry = inference_processor.process_step(payload)
+
                 if prediction_entry:
+                    # Gesamtzeit (Wall)
+                    step_total_time_s = time.perf_counter() - step_wall_t0
+
+                    # CPU% aus Prozess-CPU-Zeit relativ zu n_cpus
+                    cpu_percent = None
+                    if proc is not None and cpu_t0 is not None:
+                        try:
+                            cpu_t1 = proc.cpu_times()
+                            cpu_used = (cpu_t1.user + cpu_t1.system) - (cpu_t0.user + cpu_t0.system)
+                            cpu_percent = (cpu_used / max(step_total_time_s, 1e-12)) / n_cpus * 100.0
+                        except Exception:
+                            cpu_percent = None
+
+                    # Persistieren dieses Schritts
+                    try:
+                        inference_processor.save_step_result(
+                            prediction_entry=prediction_entry,
+                            total_time_s=step_total_time_s,
+                            cpu_percent=cpu_percent,
+                            ram_mb=ram_mb
+                        )
+                    except Exception as persist_err:
+                        logging.error(f"Fehler beim Speichern des Inferenz-Schritts: {persist_err}", exc_info=True)
+
+                    # In-Memory sammeln (für finale Metriken)
                     with shared_resource_lock:
                         all_predictions.append(prediction_entry)
-                    # Im Retraining-Modus Rohpayload für Nachtraining sammeln
-                    if mode == "retraining":
-                        retraining_data_list.append(payload)
 
-                # --- HOT-SWAP: Prüfen, ob neue Artefakte bereit sind ---
+                    # --- NEU: Retraining-Material sammeln (nur im Modus 'retraining') ---
+                    if mode == "retraining":
+                        try:
+                            if hasattr(payload, "to_dict"):
+                                pl = payload.to_dict()
+                            else:
+                                pl = dict(payload)
+                        except Exception:
+                            pl = {}
+
+                        # datetime sicherstellen
+                        if "datetime" not in pl and "datetime" in prediction_entry:
+                            pl["datetime"] = prediction_entry["datetime"]
+
+                        retraining_data_list.append(pl)
+
+                # Hot-Swap, wenn Retraining fertig
                 with shared_resource_lock:
                     ready = PIPELINE_STATE.get("retraining_status") == "ready_to_swap"
                 if ready:
@@ -274,25 +354,30 @@ def inference_manager(config: dict, inference_class, folder_flag: str, algorithm
                         PIPELINE_STATE["retraining_status"] = "idle"
                     logging.info("--- INFERENCE MANAGER: Neues Modell & Abhängigkeiten aktiv (Hot-Swap) ---")
 
-                # Takt einhalten
-                elapsed = time.perf_counter() - start_cycle_time
-                sleep_duration = target_interval_sec - elapsed
-                if sleep_duration > 0:
-                    time.sleep(sleep_duration)
+                # Zyklus-Takt einhalten
+                elapsed = time.perf_counter() - step_wall_t0
+                sleep_dur = target_interval_sec - elapsed
+                if sleep_dur > 0:
+                    time.sleep(sleep_dur)
 
-            if PIPELINE_STATE["is_finished"]:
+            # vorzeitig beendet?
+            if PIPELINE_STATE.get("is_finished"):
                 break
 
-            # --- ZYKLUSENDE: Retraining non-blocking starten (nur wenn weitere Zyklen folgen) ---
+            # --- Am Zyklusende: Retraining non-blocking starten (nur wenn etwas gesammelt wurde) ---
             if mode == "retraining" and cycle < max_cycles - 1:
                 if len(retraining_data_list) == 0:
                     logging.info("--- Kein neues Retraining-Material gesammelt; starte kein Retraining. ---")
                 else:
                     logging.info(f"--- Zyklus {cycle + 1}: Datensammlung abgeschlossen. Starte Retraining (non-blocking). ---")
-                    retraining_df = pd.DataFrame(retraining_data_list).set_index('datetime')
-                    retraining_data_list.clear()  # Speicher freigeben, nächste Sammelphase kann starten
+                    retraining_df = pd.DataFrame(retraining_data_list)
+                    # Index setzen, falls vorhanden
+                    if "datetime" in retraining_df.columns:
+                        retraining_df = retraining_df.set_index("datetime")
+                    # Liste für den nächsten Zyklus leeren
+                    retraining_data_list.clear()
 
-                    # Doppelstarts vermeiden
+                    # nicht doppelt starten
                     with shared_resource_lock:
                         already_training = (PIPELINE_STATE.get("retraining_status") == "training")
 
@@ -316,19 +401,31 @@ def inference_manager(config: dict, inference_class, folder_flag: str, algorithm
         logging.info("--- Pipeline beendet. Aufräumen und Speichern. ---")
         with shared_resource_lock:
             PIPELINE_STATE.update({"status": "finished", "is_finished": True})
-        if hasattr(inference_processor, 'stop'):
-            inference_processor.stop()
-        if hasattr(inference_processor, 'flush_pending_entry'):
-            last_entry = inference_processor.flush_pending_entry()
-            if last_entry:
-                with shared_resource_lock:
-                    all_predictions.append(last_entry)
-        if all_predictions:
+
+        # Sauber stoppen
+        if inference_processor is not None and hasattr(inference_processor, 'stop'):
             try:
+                inference_processor.stop()
+            except Exception:
+                pass
+
+        # Letzten evtl. gepufferten Eintrag flushen
+        if inference_processor is not None and hasattr(inference_processor, 'flush_pending_entry'):
+            try:
+                last_entry = inference_processor.flush_pending_entry()
+                if last_entry:
+                    with shared_resource_lock:
+                        all_predictions.append(last_entry)
+            except Exception:
+                pass
+
+        # Finale Ergebnisse speichern
+        try:
+            if inference_processor is not None and all_predictions:
                 logging.info("Speichere finale Vorhersagen...")
                 inference_processor.save_final_results(all_predictions)
-            except Exception as e:
-                logging.error(f"Fehler beim finalen Speichern der Ergebnisse: {e}", exc_info=True)
+        except Exception as e:
+            logging.error(f"Fehler beim finalen Speichern der Ergebnisse: {e}", exc_info=True)
 
 
 
@@ -396,6 +493,20 @@ if __name__ == "__main__":
     threading.Thread(target=inference_manager, args=(config, inference_class, folder_flag, args.algorithm, mode), name="InferenceManagerThread", daemon=True).start()
 
     from web_app import create_app
+    app = create_app(config, PIPELINE_STATE, all_predictions, shared_resource_lock)
+    log = logging.getLogger('werkzeug')
+    log.setLevel(logging.WARNING)
+
+    # ===== NEUER TEIL: BROWSER AUTOMATISCH ÖFFNEN =====
+    # Verwende localhost (127.0.0.1), da dies immer auf den lokalen Rechner verweist.
+    url = f"http://127.0.0.1:{port}"
+    
+    def open_browser():
+        webbrowser.open_new(url)
+
+    # Starte einen Timer, der nach 1,5 Sekunden die Funktion zum Öffnen des Browsers aufruft.
+    Timer(1.5, open_browser).start()
+    
     app = create_app(config, PIPELINE_STATE, all_predictions, shared_resource_lock)
     log = logging.getLogger('werkzeug')
     log.setLevel(logging.WARNING)

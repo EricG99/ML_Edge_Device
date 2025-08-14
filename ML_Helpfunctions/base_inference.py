@@ -45,6 +45,52 @@ class BaseInferenceProcessor(ABC):
             self._batch_data_df = df.sort_values("datetime").reset_index(drop=True)
             logging.info(f"{len(self._batch_data_df)} Zeilen für die Inferenz vorgeladen.")
 
+    def save_step_result(
+        self,
+        prediction_entry: dict,
+        total_time_s: float | None = None,
+        cpu_percent: float | None = None,
+        ram_mb: float | None = None,
+        output_path: str | None = None
+    ) -> str | None:
+        """
+        Persistiert einen Inferenz-Schritt (True, n-Step-Forecast, Zeiten, CPU/RAM).
+        Erwartete Keys in prediction_entry:
+          - 'datetime', 'true_value',
+          - 'future_forecast' ODER 'rolling_forecast' (Liste mit H Werten),
+          - optional: 'inference_time_s', 'time_breakdown'
+        """
+        if not prediction_entry:
+            return None
+
+        # 🔒 Robust gegen fehlendes Attribut (fix für deinen Fehler)
+        if not hasattr(self, "_predictions_file_path"):
+            self._predictions_file_path = None
+
+        date = prediction_entry.get("datetime")
+        true_value = prediction_entry.get("true_value")
+        forecast = prediction_entry.get("future_forecast") or prediction_entry.get("rolling_forecast") or []
+        inference_time_s = prediction_entry.get("inference_time_s", None)
+        breakdown = prediction_entry.get("time_breakdown", None)
+
+        path = Pipeline_Utils.append_prediction_step(
+            config=self.config,
+            date=date,
+            true_value=true_value,
+            forecast=forecast,
+            inference_time_s=inference_time_s,
+            total_time_s=total_time_s,
+            cpu_percent=cpu_percent,
+            ram_mb=ram_mb,
+            breakdown=breakdown,
+            output_path=output_path or self._predictions_file_path  # darf None sein
+        )
+
+        # Merken (ab hier existiert der Pfad garantiert)
+        if self._predictions_file_path is None:
+            self._predictions_file_path = path
+
+        return path
 
     def flush_pending_entry(self) -> dict | None:
         """Gibt den letzten, noch nicht abgeschlossenen Vorhersage-Eintrag zurück."""
@@ -182,18 +228,29 @@ class BaseInferenceProcessor(ABC):
                 logging.warning("Keine gültigen Paare aus wahren Werten und Vorhersagen gefunden. Metriken können nicht berechnet werden.")
                 return
 
-            horizon = self.config.get("horizon", 1)
+            horizon = int(self.config.get("horizon", 1))
             y_pred = np.stack(df_valid["rolling_forecast"].to_numpy())
             y_true_1d = df_valid["true_value"].to_numpy()
             y_true = np.tile(y_true_1d.reshape(-1, 1), reps=(1, y_pred.shape[1]))
 
             logging.info(f"Berechne Metriken für {len(y_true)} konsistente Datenpunkte.")
             metrics = Pipeline_Utils.evaluate_all_metrics(y_true, y_pred, horizon=horizon)
-            Pipeline_Utils.save_metrics_summary(metrics, self.config, self.training_config or {}, self.config.get("paths", {}))
-            
+
+            extra = {}
+            if hasattr(self, "_predictions_file_path") and self._predictions_file_path:
+                extra["predictions_file_path"] = self._predictions_file_path
+
+            Pipeline_Utils.save_metrics_summary(
+                metrics=metrics,
+                run_config=self.config,
+                training_config=self.training_config or {},
+                paths=self.config.get("paths", {}),
+                extra_info=extra if extra else None
+            )
             logging.info("✅ Finale Ergebnisse erfolgreich gespeichert.")
         except Exception as e:
             logging.error(f"Fehler beim Speichern der finalen Ergebnisse: {e}", exc_info=True)
+
 
     def _run_inference_unified(self, input_data: np.ndarray):
         start = time.perf_counter()
