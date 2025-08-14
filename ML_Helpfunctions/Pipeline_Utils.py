@@ -157,49 +157,119 @@ def flatten_config(config: dict, prefix: str = "") -> dict:
             flat[full_key] = str(value)  # Sicherer Fallback
     return flat
 
-def save_metrics_summary(metrics: dict, infer_config: dict, train_config: dict, paths: dict) -> str:
+def save_metrics_summary(
+    metrics: dict,
+    run_config: dict,
+    training_config: dict,
+    paths: dict,
+    extra_info: dict | None = None
+) -> str:
     """
-    Fügt die Metriken, Konfigurationen und Pfade eines Inferenzlaufs 
-    zu einer zentralen Übersichts-CSV-Datei hinzu.
+    Speichert Metriken als JSON + CSV. 'extra_info' kann z. B. 'predictions_file_path' enthalten.
+    Rückgabe: absoluter Pfad zur JSON.
     """
-    summary_path = None
-    try:
-        # Pfad zur zentralen Metrik-Datei
-        summary_dir = paths.get("Error_Metrics")
-        os.makedirs(summary_dir, exist_ok=True)
-        summary_path = os.path.join(summary_dir, "metrics_summary.csv")
-        
-        # Konfigurationen für die Speicherung vorbereiten
-        flat_infer_cfg = flatten_config(infer_config, "infer_")
-        flat_train_cfg = flatten_config(train_config, "train_") if train_config else {}
+    out_dir = (paths or {}).get("Error_Metrics", (paths or {}).get("Prediction_Data", "."))
+    os.makedirs(out_dir, exist_ok=True)
 
-        # Alle Daten für die neue Zeile kombinieren
-        new_row = {
-            "run_id": infer_config.get("run_id"),
-            "timestamp": infer_config.get("time_stamp"),
-            "model_name": infer_config.get("model_name"),
-            **metrics,
-            **flat_infer_cfg,
-            **flat_train_cfg
-        }
-        
-        # Bestehende Datei laden oder neuen DataFrame erstellen
-        if os.path.exists(summary_path):
-            summary_df = pd.read_csv(summary_path)
-        else:
-            summary_df = pd.DataFrame()
-            
-        # Neue Zeile hinzufügen und speichern
-        # Alte Spalten beibehalten und neue hinzufügen, falls sie nicht existieren
-        summary_df = pd.concat([summary_df, pd.DataFrame([new_row])], ignore_index=True)
-        summary_df.to_csv(summary_path, index=False)
-        
-        print(f"✅ Metriken-Zusammenfassung aktualisiert: {summary_path}")
-    except Exception as e:
-        print(f"❌ Fehler beim Speichern der Metriken-Zusammenfassung: {e}")
-        traceback.print_exc()
-    return summary_path
+    model_name = run_config.get("model_name", "model")
+    dataset = run_config.get("dataset", "data")
+    run_id = run_config.get("run_id", "run")
+    timestamp = run_config.get("time_stamp", "timestamp")
 
+    base = f"ErrorMetrics_{run_id}_{model_name}_{dataset}_{timestamp}"
+    json_path = os.path.join(out_dir, base + ".json")
+    csv_path  = os.path.join(out_dir, base + ".csv")
+
+    payload = {
+        "run": {
+            "run_id": run_id,
+            "model_name": model_name,
+            "dataset": dataset,
+            "time_stamp": timestamp
+        },
+        "metrics": metrics or {},
+        "training_config": training_config or {},
+        "inference_config": run_config or {}
+    }
+    if extra_info:
+        payload["extra_info"] = extra_info
+
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False)
+
+    flat = {
+        "run_id": run_id,
+        "model_name": model_name,
+        "dataset": dataset,
+        "time_stamp": timestamp
+    }
+    for k in ["MAE", "MSE", "RMSE", "MAPE", "SMAPE", "R2"]:
+        if k in (metrics or {}):
+            flat[k] = metrics[k]
+    if extra_info and "predictions_file_path" in extra_info:
+        flat["predictions_file_path"] = os.path.abspath(extra_info["predictions_file_path"])
+
+    pd.DataFrame([flat]).to_csv(csv_path, index=False)
+    return os.path.abspath(json_path)
+
+
+def append_prediction_step(
+    config: dict,
+    date: datetime,
+    true_value: float | int | None,
+    forecast: list | np.ndarray,
+    inference_time_s: float | None,
+    total_time_s: float | None,
+    cpu_percent: float | None = None,   # CPU in %
+    ram_mb: float | None = None,        # RAM in MB (RSS)
+    breakdown: dict | None = None,
+    output_path: str | None = None
+) -> str:
+    """
+    Hängt EINEN Inferenz-Schritt als Zeile an eine CSV (oder erzeugt sie, falls neu).
+    Spalten:
+      date, true_value, pred_h1..pred_h{H}, inference_time_s, total_time_s, cpu_percent, ram_mb, (+ optionale Breakdown-Spalten)
+    Rückgabe: absoluter Pfad der Datei.
+    """
+    model_name = config.get("model_name", "model")
+    dataset = config.get("dataset", "data")
+    run_id = config.get("run_id", "run")
+    timestamp = config.get("time_stamp", "timestamp")
+    output_dir = config.get("paths", {}).get("Prediction_Data", ".")
+    horizon = int(config.get("horizon", 1))
+
+    # Zielpfad
+    if output_path is None:
+        filename = f"StepPredictions_{run_id}_{model_name}_{dataset}_{timestamp}.csv"
+        output_path = os.path.join(output_dir, filename)
+
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+
+    # Forecast normalisieren
+    forecast = np.asarray(forecast).reshape(-1).tolist()
+    if len(forecast) < horizon:
+        forecast += [np.nan] * (horizon - len(forecast))
+    elif len(forecast) > horizon:
+        forecast = forecast[:horizon]
+
+    row = {
+        "date": pd.Timestamp(date).to_pydatetime().isoformat(),
+        "true_value": true_value,
+        "inference_time_s": float(inference_time_s) if inference_time_s is not None else None,
+        "total_time_s": float(total_time_s) if total_time_s is not None else None,
+        "cpu_percent": float(cpu_percent) if cpu_percent is not None else None,
+        "ram_mb": float(ram_mb) if ram_mb is not None else None,
+    }
+    for h in range(horizon):
+        row[f"pred_h{h+1}"] = forecast[h]
+
+    if breakdown:
+        for k, v in breakdown.items():
+            row[str(k)] = float(v) if v is not None else None
+
+    write_header = not os.path.exists(output_path)
+    pd.DataFrame([row]).to_csv(output_path, index=False, mode="a", header=write_header)
+    return os.path.abspath(output_path)
 
 def evaluate_all_metrics(y_true, y_pred, y_train=None, horizon=1, alpha=0.8):
     """
@@ -296,56 +366,73 @@ def save_prediction_data(
     y_true: np.ndarray,
     y_pred: np.ndarray,
     dates: np.ndarray,
-    output_path: str = None  
+    output_path: str = None,
+    inference_times: np.ndarray | None = None,   # optional: je Sample
+    total_times: np.ndarray | None = None,       # optional: je Sample
+    cpu_percents: np.ndarray | None = None,      # optional: je Sample
+    ram_mbs: np.ndarray | None = None,           # optional: je Sample
+    breakdowns: list[dict] | None = None         # optional: je Sample
 ) -> str:
     """
-    Speichert Vorhersagedaten mit Zeitstempeln anhand der Konfigurationsdaten.
-    y_true und y_pred werden als 1D-Arrays (geflacht, falls Horizon > 1) erwartet.
-    
-    Optional kann ein vollständiger Dateipfad übergeben werden (output_path),
-    andernfalls wird basierend auf config gespeichert.
+    Speichert Vorhersagedaten (Batch) mit Zeitstempeln.
+    Erwartet y_true/y_pred flach (num_samples*horizon).
     """
-    print("--- DEBUG: FÜHRE save_prediction_data AUS (mit optionalem output_path) ---")
+    print("--- DEBUG: FÜHRE save_prediction_data AUS (batch, mit Zeiten & Ressourcen) ---")
 
     model_name = config.get("model_name", "model")
     dataset = config.get("dataset", "data")
     run_id = config.get("run_id", "run")
     timestamp = config.get("time_stamp", "timestamp")
     output_dir = config.get("paths", {}).get("Prediction_Data", ".")
-    horizon = config.get("horizon", 1)
+    horizon = int(config.get("horizon", 1))
 
     num_samples = len(dates)
-
     if len(y_true) != num_samples * horizon:
         raise ValueError(f"Länge von y_true ({len(y_true)}) stimmt nicht mit num_samples ({num_samples}) * horizon ({horizon}) überein.")
     if len(y_pred) != num_samples * horizon:
         raise ValueError(f"Länge von y_pred ({len(y_pred)}) stimmt nicht mit num_samples ({num_samples}) * horizon ({horizon}) überein.")
 
-    try:
-        y_true_reshaped = y_true.reshape(num_samples, horizon)
-        y_pred_reshaped = y_pred.reshape(num_samples, horizon)
-    except ValueError as e:
-        raise ValueError(f"Fehler beim Reshapen von y_true/y_pred. Originale Exception: {e}")
+    y_true_reshaped = np.asarray(y_true).reshape(num_samples, horizon)
+    y_pred_reshaped = np.asarray(y_pred).reshape(num_samples, horizon)
 
-    df_data = {'date': dates}
-    for h in range(horizon):
-        df_data[f'true_h{h+1}'] = y_true_reshaped[:, h]
-        df_data[f'pred_h{h+1}'] = y_pred_reshaped[:, h]
+    if inference_times is not None and len(inference_times) != num_samples:
+        raise ValueError("inference_times muss Länge num_samples haben.")
+    if total_times is not None and len(total_times) != num_samples:
+        raise ValueError("total_times muss Länge num_samples haben.")
+    if cpu_percents is not None and len(cpu_percents) != num_samples:
+        raise ValueError("cpu_percents muss Länge num_samples haben.")
+    if ram_mbs is not None and len(ram_mbs) != num_samples:
+        raise ValueError("ram_mbs muss Länge num_samples haben.")
+    if breakdowns is not None and len(breakdowns) != num_samples:
+        raise ValueError("breakdowns muss Länge num_samples haben.")
 
-    df = pd.DataFrame(df_data)
+    rows = []
+    for i in range(num_samples):
+        row = {"date": pd.Timestamp(dates[i]).isoformat()}
+        row["true_value"] = y_true_reshaped[i, 0] if horizon >= 1 else None
+        for h in range(horizon):
+            row[f"pred_h{h+1}"] = y_pred_reshaped[i, h]
 
+        row["inference_time_s"] = float(inference_times[i]) if inference_times is not None else None
+        row["total_time_s"] = float(total_times[i]) if total_times is not None else None
+        row["cpu_percent"] = float(cpu_percents[i]) if cpu_percents is not None else None
+        row["ram_mb"] = float(ram_mbs[i]) if ram_mbs is not None else None
+
+        if breakdowns and breakdowns[i]:
+            for k, v in breakdowns[i].items():
+                row[str(k)] = float(v) if v is not None else None
+
+        rows.append(row)
+
+    df = pd.DataFrame(rows)
     if output_path is None:
         filename = f"PredictionData_{run_id}_{model_name}_{dataset}_{timestamp}.csv"
         output_path = os.path.join(output_dir, filename)
 
-    try:
-        os.makedirs(os.path.dirname(output_path), exist_ok=True)
-        df.to_csv(output_path, index=False)
-        print(f"✅ Vorhersagedatei gespeichert unter: {output_path}")
-    except Exception as e_csv:
-        raise IOError(f"Fehler beim Schreiben der CSV-Datei '{output_path}': {e_csv}")
-
-    return output_path
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    df.to_csv(output_path, index=False)
+    print(f"✅ Vorhersagedatei gespeichert unter: {output_path}")
+    return os.path.abspath(output_path)
 
 
 # -------------------------------------------

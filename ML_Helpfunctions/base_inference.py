@@ -68,13 +68,30 @@ class BaseInferenceProcessor(ABC):
             sys.exit(1)
 
     def set_artifacts_from_memory(self, shared_model_dict: dict):
+        """
+        Übernimmt Modell/Scaler/Featureliste/Konfig aus dem gemeinsamen Speicher.
+        Ruft danach _post_load_artifacts() (für Klassenspezifika) und optional
+        den Hook _on_artifacts_swapped(), damit z. B. DataProcessor mit neuer
+        Config/Features neu aufgebaut werden kann.
+        """
         self.model = shared_model_dict["model"]
         self.scaler = shared_model_dict["scaler"]
         self.y_scaler = shared_model_dict.get("y_scaler")
         self.feature_list = shared_model_dict["features"]
         self.config = shared_model_dict["config"]
+
+        # Klassenspezifische Folgearbeiten (z. B. TFLite/Keras-Umschaltung etc.)
         self._post_load_artifacts()
-        logging.info("✅ Artefakte aus dem Speicher übernommen.")
+
+        # NEU: Optionaler Hook in Kindklassen (RF/LSTM), um z. B. DataProcessor neu zu initialisieren
+        if hasattr(self, "_on_artifacts_swapped"):
+            try:
+                self._on_artifacts_swapped()
+            except Exception as hook_err:
+                logging.error(f"Fehler im _on_artifacts_swapped-Hook: {hook_err}", exc_info=True)
+
+        logging.info("✅ Artefakte aus dem Speicher übernommen (inkl. Hook-Aufruf, falls vorhanden).")
+
     
     def process_step(self, payload: dict) -> dict | None:
         if not payload:

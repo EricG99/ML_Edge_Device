@@ -33,6 +33,11 @@ def create_app(app_config, pipeline_state, predictions_list, lock, *, template_n
 
     @app.route('/api/data')
     def get_data():
+        """
+        Liefert den Eintrag für den angefragten Schritt (inkl. abgeleiteter Felder
+        für 1-Schritt-Prognose und Zukunftsprognose). Verwendet IMMER
+        'inference_interval_sec' für die Zeitstempel-Berechnung.
+        """
         step_index = request.args.get('step', type=int, default=0)
 
         with app.config['LOCK']:
@@ -41,7 +46,7 @@ def create_app(app_config, pipeline_state, predictions_list, lock, *, template_n
 
             if step_index < len(preds):
                 entry = dict(preds[step_index])  # shallow copy
-                
+
                 # Datetime normalisieren
                 dt = entry.get('datetime')
                 if isinstance(dt, (datetime, Timestamp)):
@@ -49,20 +54,18 @@ def create_app(app_config, pipeline_state, predictions_list, lock, *, template_n
                 elif hasattr(dt, 'to_pydatetime'):
                     entry['datetime'] = dt.to_pydatetime().isoformat()
 
-                # --- KORREKTUR: Trenne die 1-Schritt-Prognose vom Rest der Zukunft ---
+                # Zukunfts-Prognosefeld auftrennen
                 full_forecast = entry.get("future_forecast", [])
-                
                 if full_forecast:
-                    # Bestimme das Zeitintervall für die Prognosepunkte
-                    interval_key = "inference_cycle_sec" if state.get("mode") == "retraining" else "inference_interval_sec"
-                    interval_sec = app.config['APP_CONFIG'].get(interval_key, 1.0)
-                    base_ts = datetime.fromisoformat(entry['datetime'])
+                    # KORREKTUR: Immer inference_interval_sec verwenden
+                    interval_sec = app.config['APP_CONFIG'].get("inference_interval_sec", 1.0)
+                    base_ts = Timestamp(entry['datetime']) if not isinstance(dt, (datetime, Timestamp)) else dt
 
-                    # Der erste Punkt der Zukunft ist die "Vorhersage (1 Zeitschritt)"
+                    # 1-Schritt-Prognose
                     entry['prediction_1_step'] = full_forecast[0]
                     entry['prediction_1_step_date'] = (base_ts + timedelta(seconds=interval_sec)).isoformat()
-                    
-                    # Der Rest ist die "Zukunftsprognose"
+
+                    # Restliche Zukunft
                     remaining_forecast = full_forecast[1:]
                     entry['future_forecast'] = remaining_forecast
                     entry['future_forecast_dates'] = [
@@ -74,11 +77,11 @@ def create_app(app_config, pipeline_state, predictions_list, lock, *, template_n
                     entry['prediction_1_step_date'] = None
                     entry['future_forecast'] = []
                     entry['future_forecast_dates'] = []
-                # --- Ende der Korrektur ---
 
                 return jsonify({"status": "success", "data": entry})
             else:
                 return jsonify({"status": "waiting"})
+
 
     @app.route('/api/control', methods=['POST'])
     def control_pipeline():

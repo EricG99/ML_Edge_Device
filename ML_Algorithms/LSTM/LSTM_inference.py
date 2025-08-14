@@ -62,6 +62,17 @@ class LSTMInference(BaseInferenceProcessor):
         except Exception as e:
             logging.warning(f"⚠️ TFLite-Interpreter konnte nicht geladen werden ({e}), nutze Keras-Modell.")
 
+    def _on_artifacts_swapped(self):
+        """
+        Wird nach set_artifacts_from_memory() aufgerufen.
+        LSTM nutzt im Retraining-Modus Keras anstelle von TFLite; der DataProcessor
+        muss ggf. mit neuer Config/Lags/Horizon neu aufgebaut werden.
+        """
+        from ML_Helpfunctions.base_data_processing import RealTimeDataProcessor
+        self.data_processor = RealTimeDataProcessor(self.config)
+        logging.info("LSTMInference: DataProcessor nach Hot-Swap neu initialisiert.")
+
+
     def _prepare_input_data(self, payload: dict) -> tuple[np.ndarray | None, any, float | None]:
         if not payload:
             return None, None, None
@@ -115,3 +126,5 @@ class LSTMInference(BaseInferenceProcessor):
             )
         pred_reshaped = np.asarray(prediction_scaled).reshape(-1, 1)
         return self.y_scaler.inverse_transform(pred_reshaped).flatten()
+    
+    

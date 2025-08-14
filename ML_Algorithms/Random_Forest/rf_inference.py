@@ -32,7 +32,16 @@ class RFInference(BaseInferenceProcessor):
         self.target_feature = config['base_features'][0]
         self.data_processor = RealTimeDataProcessor(config)
 
-# In rf_inference.py
+    def _on_artifacts_swapped(self):
+        """
+        Wird nach set_artifacts_from_memory() aufgerufen.
+        Stellt sicher, dass der RealTimeDataProcessor mit der (ggf. geänderten)
+        Konfiguration/Featureliste synchron ist.
+        """
+        from ML_Helpfunctions.base_data_processing import RealTimeDataProcessor
+        self.data_processor = RealTimeDataProcessor(self.config)
+        logging.info("RFInference: DataProcessor nach Hot-Swap neu initialisiert.")
+
 
     def _prepare_input_data(self, payload: dict) -> tuple[np.ndarray | None, any, float | None]:
         """
