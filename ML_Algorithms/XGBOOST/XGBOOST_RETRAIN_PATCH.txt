@@ -1,0 +1,128 @@
+
+# --- EINZIGE (Best-Practice) RETRAIN-METHODE FÜR XGBOOST ---
+elif algorithm.lower() == 'xgboost':
+    """
+    Best Practice für XGBoost:
+    - Skaler auf (neuer + kleiner Historien-)Datenbasis neu fitten (Drift berücksichtigen)
+    - Weitertrainieren durch Anhängen zusätzlicher Bäume an den bestehenden Booster
+      (fit(..., xgb_model=old_booster), n_estimators += config['xgb_additional_estimators'])
+    - Optional Early Stopping auf eval_set
+    """
+    logging.info("XGBoost Retrain (continued training / append trees) ...")
+
+    if retraining_data_df is None or retraining_data_df.empty:
+        logging.warning("Retraining-Daten sind leer. Überspringe XGBoost-Retrain.")
+        with shared_resource_lock:
+            PIPELINE_STATE["retraining_status"] = "idle"
+        return
+
+    # 1) Historie + neue Daten kombinieren
+    hist_rows = int(config.get("xgb_retrain_hist_rows", 5000))  # kleiner Fenster-Backfill
+    df_old = (initial_data.copy() if initial_data is not None else pd.DataFrame()).tail(hist_rows)
+    df_new = retraining_data_df.copy()
+
+    for df in (df_old, df_new):
+        if not isinstance(df.index, pd.DatetimeIndex):
+            if 'date' in df.columns:
+                df['date'] = pd.to_datetime(df['date'])
+                df.set_index('date', inplace=True)
+
+    combined_raw = pd.concat([df_old, df_new], axis=0)
+    combined_raw = combined_raw[~combined_raw.index.duplicated(keep='last')]
+    combined_raw = combined_raw.sort_index()
+
+    # 2) Feature Engineering analog initialem Training
+    featured_all, _ = fe.add_all_features(combined_raw.copy(), config)
+
+    target_col = str(config.get("base_features", ["target"])[0]).lower()
+    # Feature-Liste aus initialem Training verwenden
+    if not features_ref:
+        raise ValueError("Feature-Liste (features_ref) ist leer – initiales Training fehlt.")
+    missing = [c for c in features_ref if c not in featured_all.columns]
+    if missing:
+        raise KeyError(f"Features fehlen im neu erstellten Frame: {missing}")
+    X_df_full = featured_all[features_ref].copy()
+
+    # 3) Ziel-Matrix für Horizon H erzeugen
+    H = max(1, int(config.get("horizon", 1)))
+    y_cols = []
+    for h in range(1, H + 1):
+        col_name = f"__y_t_plus_{h}__"
+        featured_all[col_name] = featured_all[target_col].shift(-h)
+        y_cols.append(col_name)
+
+    aligned_df = pd.concat([X_df_full, featured_all[y_cols]], axis=1).dropna(how='any')
+    if aligned_df.empty:
+        raise ValueError("Nach Ausrichtung/Dropna keine Zeilen – Fenster/Lags prüfen.")
+
+    X_df = aligned_df[features_ref]
+    Y_df = aligned_df[y_cols]
+
+    # 4) Skaler neu fitten (Drift berücksichtigen)
+    scaler_type = (config.get("scaler_type") or "standard").lower()
+    if scaler_type == "minmax":
+        from sklearn.preprocessing import MinMaxScaler
+        new_scaler = MinMaxScaler()
+    elif scaler_type == "robust":
+        from sklearn.preprocessing import RobustScaler
+        new_scaler = RobustScaler()
+    else:
+        from sklearn.preprocessing import StandardScaler
+        new_scaler = StandardScaler()
+
+    X_scaled = new_scaler.fit_transform(X_df.values)
+    Y = Y_df.values
+
+    # 5) Weitertrainieren (Trees anhängen) – Single-Output vs. Multi-Output
+    from xgboost import XGBRegressor
+    from sklearn.multioutput import MultiOutputRegressor
+
+    add_trees = int(config.get("xgb_additional_estimators", 200))
+    early_rounds = int(config.get("xgb_early_stopping_rounds", 0))
+
+    old_model = shared_model.get("model")
+    if old_model is None:
+        raise RuntimeError("Kein existierendes XGBoost-Modell im Shared-Store gefunden.")
+
+    if H == 1 and not isinstance(old_model, MultiOutputRegressor):
+        # Single-Output
+        old_params = old_model.get_params(deep=True)
+        old_params["n_estimators"] = int(old_params.get("n_estimators", 100)) + add_trees
+
+        new_est = XGBRegressor(**old_params)
+        fit_kwargs = {"xgb_model": old_model.get_booster()}
+        if early_rounds > 0:
+            fit_kwargs.update({"eval_set": [(X_scaled, Y.ravel())],
+                               "early_stopping_rounds": early_rounds, "verbose": False})
+        new_est.fit(X_scaled, Y.ravel(), **fit_kwargs)
+        new_model = new_est
+    else:
+        # Multi-Output: jede Horizon separat weitertrainieren
+        if not hasattr(old_model, "estimators_"):
+            raise ValueError("Erwarte MultiOutputRegressor für H>1.")
+        new_estimators = []
+        for k, old_est in enumerate(old_model.estimators_):
+            params = old_est.get_params(deep=True)
+            params["n_estimators"] = int(params.get("n_estimators", 100)) + add_trees
+            new_k = XGBRegressor(**params)
+            fit_kwargs = {"xgb_model": old_est.get_booster()}
+            if early_rounds > 0:
+                fit_kwargs.update({"eval_set": [(X_scaled, Y[:, k])],
+                                   "early_stopping_rounds": early_rounds, "verbose": False})
+            new_k.fit(X_scaled, Y[:, k], **fit_kwargs)
+            new_estimators.append(new_k)
+        old_model.estimators_ = new_estimators
+        new_model = old_model
+
+    # 6) Artefakte für Hot-Swap bereitstellen
+    with shared_resource_lock:
+        shared_model.update({
+            "model": new_model,
+            "scaler": new_scaler,
+            "features": features_ref,
+            "config": config,
+            "initial_training_data": combined_raw
+        })
+        PIPELINE_STATE["retraining_status"] = "ready_to_swap"
+
+    logging.info("XGBoost Retrain abgeschlossen – Artefakte bereit zum Hot-Swap.")

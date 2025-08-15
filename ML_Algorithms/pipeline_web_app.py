@@ -121,6 +121,143 @@ def retraining_thread_task(retraining_data_df: pd.DataFrame, algorithm: str):
                 PIPELINE_STATE["retraining_status"] = "ready_to_swap"
             logging.info("--- RETRAINING THREAD (CNN1D): Artefakte bereit zum Hot-Swap ---")
             return
+        
+        elif algorithm.lower() == 'xgboost':
+            # --- XGBoost Retraining (Best-Practice): Trees anhängen (continued training) ---
+            logging.info("XGBoost Retrain (append trees) startet ...")
+
+            if retraining_data_df is None or retraining_data_df.empty:
+                logging.warning("Retraining-Daten sind leer. Überspringe XGBoost-Retrain.")
+                with shared_resource_lock:
+                    PIPELINE_STATE["retraining_status"] = "idle"
+                return
+
+            # 1) Historie + neue Daten kombinieren (kleines Backfill gegen Forgetting)
+            hist_rows = int(config.get("xgb_retrain_hist_rows", 5000))
+            df_old = (initial_data.copy() if initial_data is not None else pd.DataFrame()).tail(hist_rows)
+            df_new = retraining_data_df.copy()
+
+            for df in (df_old, df_new):
+                if not isinstance(df.index, pd.DatetimeIndex):
+                    if 'date' in df.columns:
+                        df['date'] = pd.to_datetime(df['date'])
+                        df.set_index('date', inplace=True)
+
+            combined_raw = pd.concat([df_old, df_new], axis=0)
+            combined_raw = combined_raw[~combined_raw.index.duplicated(keep='last')]
+            combined_raw = combined_raw.sort_index()
+
+            # 2) Feature Engineering wie im Training
+            featured_all, _ = fe.add_all_features(combined_raw.copy(), config)
+
+            # 3) X exakt wie im initialen Training (features_ref)
+            target_col = str(config.get("base_features", ["target"])[0]).lower()
+            if features_ref is None or len(features_ref) == 0:
+                raise ValueError("Feature-Liste (features_ref) ist leer oder None – initiales Training hat nichts gespeichert.")
+            missing = [c for c in features_ref if c not in featured_all.columns]
+            if missing:
+                raise KeyError(f"Folgende Features fehlen im neu erstellten Feature-Frame: {missing}")
+
+            X_df_full = featured_all[features_ref].copy()
+
+            # 4) Zielmatrix (H Horizons) erzeugen
+            H = int(config.get("horizon", 1))
+            H = max(1, H)
+            y_cols = []
+            for h in range(1, H + 1):
+                col_name = f"__y_t_plus_{h}__"
+                featured_all[col_name] = featured_all[target_col].shift(-h)
+                y_cols.append(col_name)
+
+            aligned_df = pd.concat([X_df_full, featured_all[y_cols]], axis=1).dropna(how='any')
+            if aligned_df.empty:
+                raise ValueError("Nach Ausrichtung/Dropna sind keine Zeilen übrig – bitte Fenstergrößen/Lags prüfen.")
+
+            X_df = aligned_df[features_ref]
+            Y_df = aligned_df[y_cols]
+
+            # 5) Skaler neu fitten (Drift berücksichtigen)
+            logging.info("Passe Scaler neu an...")
+            scaler_type = (config.get("scaler_type") or "standard").lower()
+            if scaler_type == "minmax":
+                from sklearn.preprocessing import MinMaxScaler
+                new_scaler = MinMaxScaler()
+            elif scaler_type == "robust":
+                from sklearn.preprocessing import RobustScaler
+                new_scaler = RobustScaler()
+            else:
+                from sklearn.preprocessing import StandardScaler
+                new_scaler = StandardScaler()
+
+            X_scaled = new_scaler.fit_transform(X_df.values)
+            Y = Y_df.values
+
+            # 6) Weitertrainieren (Trees anhängen)
+            from xgboost import XGBRegressor
+            from sklearn.multioutput import MultiOutputRegressor
+            add_trees = int(config.get("xgb_additional_estimators", 200))
+            early_rounds = int(config.get("xgb_early_stopping_rounds", 0))
+
+            old_model = shared_model.get("model")
+            if old_model is None:
+                raise RuntimeError("Kein existierendes XGBoost-Modell im Shared-Store gefunden.")
+
+            def _fit_with_optional_es(estimator, X_, y_, booster):
+                # Robust gegen XGBoost-Versionen: erst versuchen mit early_stopping_rounds,
+                # sonst Fallback auf callbacks, sonst ohne ES.
+                fit_kwargs = {"xgb_model": booster}
+                if early_rounds > 0:
+                    try:
+                        estimator.fit(X_, y_, eval_set=[(X_, y_)], early_stopping_rounds=early_rounds, **fit_kwargs)
+                        return estimator
+                    except TypeError:
+                        try:
+                            import xgboost as xgb
+                            estimator.fit(X_, y_, eval_set=[(X_, y_)],
+                                          callbacks=[xgb.callback.EarlyStopping(rounds=early_rounds, save_best=True)],
+                                          **fit_kwargs)
+                            return estimator
+                        except TypeError:
+                            pass
+                estimator.fit(X_, y_, **fit_kwargs)
+                return estimator
+
+            if H == 1 and not isinstance(old_model, MultiOutputRegressor):
+                old_params = old_model.get_params(deep=True)
+                old_params["n_estimators"] = int(old_params.get("n_estimators", 100)) + add_trees
+
+                new_est = XGBRegressor(**old_params)
+                booster = old_model.get_booster()
+                new_est = _fit_with_optional_es(new_est, X_scaled, Y.ravel(), booster)
+                new_model = new_est
+            else:
+                if not hasattr(old_model, "estimators_"):
+                    raise ValueError("Erwarte MultiOutputRegressor für H>1.")
+                new_estimators = []
+                for k, old_est in enumerate(old_model.estimators_):
+                    params = old_est.get_params(deep=True)
+                    params["n_estimators"] = int(params.get("n_estimators", 100)) + add_trees
+                    new_k = XGBRegressor(**params)
+                    booster = old_est.get_booster()
+                    new_k = _fit_with_optional_es(new_k, X_scaled, Y[:, k], booster)
+                    new_estimators.append(new_k)
+                old_model.estimators_ = new_estimators
+                new_model = old_model
+
+            # 7) Artefakte für Hot-Swap bereitstellen
+            with shared_resource_lock:
+                shared_model.update({
+                    "model": new_model,
+                    "scaler": new_scaler,
+                    "features": features_ref,
+                    "config": config,
+                    "initial_training_data": combined_raw
+                })
+                PIPELINE_STATE["retraining_status"] = "ready_to_swap"
+
+            logging.info("--- RETRAINING THREAD (XGBoost): Artefakte bereit zum Hot-Swap ---")
+
+
 
         elif algorithm.lower() == 'random_forest':
             # =========================
@@ -536,7 +673,7 @@ def inference_manager(config: dict, inference_class, folder_flag: str, algorithm
 
 def main():
     parser = argparse.ArgumentParser(description="Vereinheitlichte ML-Pipeline mit Web-UI")
-    parser.add_argument('--algorithm', type=str, required=True, choices=['random_forest', 'lstm', 'cnn1d'],
+    parser.add_argument('--algorithm', type=str, required=True, choices=['random_forest', 'lstm', 'cnn1d', 'xgboost'],
                         help="Zu verwendender Algorithmus.")
     parser.add_argument('--config-name', type=str, help="Optional: Name der Konfigurationsvariable.")
     parser.add_argument('--retraining', action=argparse.BooleanOptionalAction, default=False,
@@ -577,6 +714,13 @@ def main():
         trainer_class = RandomForestTrainer
         inference_class = RFInference
         folder_flag = "Random_Forest"
+    elif args.algorithm == 'xgboost':
+        from ML_Algorithms.XGBOOST.XGBOOST_train import XGBoostTrainer
+        from ML_Algorithms.XGBOOST.XGBOOST_inference import XGBoostInference
+        trainer_class = XGBoostTrainer
+        inference_class = XGBoostInference
+        folder_flag = "XGBOOST"
+
     else:
         from ML_Algorithms.LSTM.LSTM_train import LSTMTrainer
         from ML_Algorithms.LSTM.LSTM_inference import LSTMInference

@@ -1,14 +1,9 @@
-
-# ML_Helpfunctions/XGBOOST_Utils.py
+# ML_Helpfunctions/Light_XGBOOST_Utils.py
 """
-Utilities für XGBoost in der vereinheitlichten Pipeline.
+Utilities für LightGBM ("Light_XGBoost") in der vereinheitlichten Pipeline.
 - Training (inkl. Multi-Output via MultiOutputRegressor)
 - Speichern von Modellen
-- Ergebnispersistierung analog RF-Utils
-
-Hinweis Retrain (Best Practice):
-Inkrementelles Lernen i.S.v. `partial_fit` gibt es nicht. Stattdessen: "continued training" durch
-Anhängen zusätzlicher Bäume am bestehenden Booster (xgb_model=old_booster) – optional mit Early Stopping.
+- Ergebnispersistierung analog XGBOOST_Utils
 """
 from __future__ import annotations
 import os, sys, time, joblib, numpy as np, traceback
@@ -20,17 +15,17 @@ if project_root not in sys.path:
 
 from ML_Helpfunctions import Pipeline_Utils as PipelineUtils  # type: ignore
 
-def train_xgboost_model(config: dict, X_train: np.ndarray, y_train: np.ndarray):
-    """Training eines XGBoost-Regressors. Multi-Output via MultiOutputRegressor."""
-    from xgboost import XGBRegressor
+def train_light_xgboost_model(config: dict, X_train: np.ndarray, y_train: np.ndarray):
+    """Training eines LightGBM-Regressors. Multi-Output via MultiOutputRegressor."""
+    from lightgbm import LGBMRegressor
     from sklearn.multioutput import MultiOutputRegressor
 
     y_arr = np.asarray(y_train)
     if y_arr.ndim == 1:
         y_arr = y_arr.reshape(-1, 1)
 
-    params = dict(config.get("xgb_params") or {})
-    base = XGBRegressor(**params)
+    params = dict(config.get("lgbm_params") or {})
+    base = LGBMRegressor(**params)
 
     if y_arr.shape[1] > 1:
         model = MultiOutputRegressor(base)
@@ -49,20 +44,20 @@ def save_sklearn_model(model, config: dict, paths: dict) -> str | None:
     try:
         model_dir = paths.get("Models") or os.path.join(paths.get("output", "."), "Models")
         os.makedirs(model_dir, exist_ok=True)
-        model_name = (config.get("model_name") or "xgboost_model").replace(" ", "_")
+        model_name = (config.get("model_name") or "light_xgboost_model").replace(" ", "_")
         dataset_name = (config.get("dataset") or "data").replace(".csv", "").replace(" ", "_")
         model_filename = f"{model_name}_{dataset_name}_{config.get('run_id','')}_{config.get('time_stamp','')}.joblib"
         model_path = os.path.join(model_dir, model_filename)
         joblib.dump(model, model_path, compress=3)
-        print(f"[XGB] Modell gespeichert: {model_path}")
+        print(f"[LGBM] Modell gespeichert: {model_path}")
         return model_path
     except Exception as e:
-        print(f"[XGB] Fehler beim Speichern: {e}\n{traceback.format_exc()}")
+        print(f"[LGBM] Fehler beim Speichern: {e}\n{traceback.format_exc()}")
         return None
 
 
-def save_results_xgboost(config, model, scaler, pred_orig, true_orig, dates, metrics, paths, power_time):
-    """Persistierung analog RF_Utils._save_common_results + Modellpfad."""
+def save_results_light_xgboost(config, model, scaler, pred_orig, true_orig, dates, metrics, paths, power_time):
+    """Persistierung analog XGB-Utils._save_common_results + Modellpfad."""
     common = PipelineUtils._save_common_results(
         config=config,
         pred_orig=pred_orig,
