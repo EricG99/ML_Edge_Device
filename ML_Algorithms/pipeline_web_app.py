@@ -114,6 +114,14 @@ def retraining_thread_task(retraining_data_df: pd.DataFrame, algorithm: str):
             logging.info("--- RETRAINING THREAD (LSTM): Artefakte bereit zum Hot-Swap ---")
             return
 
+        elif algorithm.lower() == 'cnn1d':
+            # CNN1D: (Platzhalter) – Retraining könnte analog LSTM/Langsames Keras-Training laufen.
+            logging.info("CNN1D-Nachtraining (inkrementell) Platzhalter – setze Swap-Signal.")
+            with shared_resource_lock:
+                PIPELINE_STATE["retraining_status"] = "ready_to_swap"
+            logging.info("--- RETRAINING THREAD (CNN1D): Artefakte bereit zum Hot-Swap ---")
+            return
+
         elif algorithm.lower() == 'random_forest':
             # =========================
             # Random Forest – FIX: Multi-Output beibehalten und X exakt wie im Training
@@ -528,7 +536,7 @@ def inference_manager(config: dict, inference_class, folder_flag: str, algorithm
 
 def main():
     parser = argparse.ArgumentParser(description="Vereinheitlichte ML-Pipeline mit Web-UI")
-    parser.add_argument('--algorithm', type=str, required=True, choices=['random_forest', 'lstm'],
+    parser.add_argument('--algorithm', type=str, required=True, choices=['random_forest', 'lstm', 'cnn1d'],
                         help="Zu verwendender Algorithmus.")
     parser.add_argument('--config-name', type=str, help="Optional: Name der Konfigurationsvariable.")
     parser.add_argument('--retraining', action=argparse.BooleanOptionalAction, default=False,
@@ -575,6 +583,14 @@ def main():
         trainer_class = LSTMTrainer
         inference_class = LSTMInference
         folder_flag = "LSTM"
+    
+    # --- CNN1D Support ---
+    if args.algorithm == 'cnn1d':
+        from ML_Algorithms.CNN1D.cnn1d_train import CNN1DTrainer
+        from ML_Algorithms.CNN1D.cnn1d_inference import CNN1DInference
+        trainer_class = CNN1DTrainer
+        inference_class = CNN1DInference
+        folder_flag = "CNN1D"
 
     # Basis-Konfigs mergen
     config.update(CONFIG_LOAD_ARTIFACTS)
