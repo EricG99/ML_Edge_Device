@@ -126,29 +126,10 @@ class BaseInferenceProcessor(ABC):
         if self._predictions_file_path is None:
             self._predictions_file_path = path
 
-        # ✅ GEWÜNSCHTES LOGGING DER PFADE
-        try:
-            abs_step_path = os.path.abspath(path) if path else None
-            if abs_step_path:
-                logging.info(f"📝 append_prediction_step -> Datei: {abs_step_path}")
-        except Exception:
-            pass
-
         try:
             metrics_dir = (self.config.get("paths") or {}).get("Error_Metrics")
             if metrics_dir:
                 metrics_summary_path = os.path.abspath(os.path.join(metrics_dir, "metrics_summary.csv"))
-                if os.path.exists(metrics_summary_path):
-                    logging.info(f"📈 Error-Metrics (Summary) vorhanden: {metrics_summary_path}")
-                else:
-                    logging.info(f"📈 Error-Metrics (Summary, geplant): {metrics_summary_path}")
-        except Exception:
-            pass
-
-        # Zusätzlich einmalig (beim ersten Schreiben) einen klaren Hinweis loggen
-        try:
-            if prediction_entry.get("_first_write_log_once") and abs_step_path:
-                logging.info(f"📄 StepPredictions gestartet: {abs_step_path}")
         except Exception:
             pass
 
@@ -176,30 +157,28 @@ class BaseInferenceProcessor(ABC):
             logging.error(f"Artefakte konnten nicht geladen werden: {e}", exc_info=True)
             sys.exit(1)
 
-    def set_artifacts_from_memory(self, shared_model_dict: dict):
-        """
-        Übernimmt Modell/Scaler/Featureliste/Konfig aus dem gemeinsamen Speicher.
-        Ruft danach _post_load_artifacts() (für Klassenspezifika) und optional
-        den Hook _on_artifacts_swapped(), damit z. B. DataProcessor mit neuer
-        Config/Features neu aufgebaut werden kann.
-        """
-        self.model = shared_model_dict["model"]
-        self.scaler = shared_model_dict["scaler"]
-        self.y_scaler = shared_model_dict.get("y_scaler")
-        self.feature_list = shared_model_dict["features"]
-        self.config = shared_model_dict["config"]
+    def set_artifacts_from_memory(self, artifacts: dict):
+        """Übernimmt neue Artefakte (Hot-Swap) ohne vorhandene Werte zu verlieren."""
+        prev_config = getattr(self, "config", None)
+        prev_features = getattr(self, "feature_list", None)
 
-        # Klassenspezifische Folgearbeiten (z. B. TFLite/Keras-Umschaltung etc.)
-        self._post_load_artifacts()
+        # Modell & Scaler – nur überschreiben, wenn vorhanden
+        if artifacts.get("model") is not None:
+            self.model = artifacts["model"]
+        if artifacts.get("scaler") is not None:
+            self.scaler = artifacts["scaler"]
+        if artifacts.get("y_scaler") is not None:
+            self.y_scaler = artifacts["y_scaler"]
 
-        # NEU: Optionaler Hook in Kindklassen (RF/LSTM), um z. B. DataProcessor neu zu initialisieren
-        if hasattr(self, "_on_artifacts_swapped"):
-            try:
-                self._on_artifacts_swapped()
-            except Exception as hook_err:
-                logging.error(f"Fehler im _on_artifacts_swapped-Hook: {hook_err}", exc_info=True)
+        # Config & Feature-Liste – niemals auf None setzen
+        self.config = artifacts.get("config") or prev_config
+        self.feature_list = artifacts.get("features") or prev_features
 
-        logging.info("✅ Artefakte aus dem Speicher übernommen (inkl. Hook-Aufruf, falls vorhanden).")
+        # Hook nach Hot-Swap (z. B. Puffer übernehmen)
+        try:
+            self._on_artifacts_swapped()
+        except Exception as e:
+            logging.error("Fehler im _on_artifacts_swapped-Hook: %s", e)
 
     
     def process_step(self, payload: dict) -> dict | None:

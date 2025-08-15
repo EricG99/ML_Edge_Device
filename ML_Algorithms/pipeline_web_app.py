@@ -13,8 +13,8 @@ from copy import deepcopy
 from datetime import datetime, timedelta
 import tensorflow as tf
 
-import webbrowser # NEU
-from threading import Timer # NEU
+import webbrowser  # NEU
+from threading import Timer  # NEU
 import importlib
 
 from sklearn.ensemble import RandomForestRegressor
@@ -42,8 +42,9 @@ PIPELINE_STATE = {
     "is_paused": False, "is_finished": False, "mode": "unknown"
 }
 shared_resource_lock = threading.Lock()
-shared_model = {"model": None, "scaler": None, "features": None, "config": None, "initial_training_data": None}
+shared_model = {"model": None, "scaler": None, "y_scaler": None, "features": None, "config": None, "initial_training_data": None}
 all_predictions = []
+
 
 def load_config_dynamically(algorithm: str, config_name: str) -> dict:
     try:
@@ -55,6 +56,7 @@ def load_config_dynamically(algorithm: str, config_name: str) -> dict:
     except (ImportError, AttributeError) as e:
         logging.error(f"Fehler beim dynamischen Laden der Konfiguration '{config_name}' aus '{module_path}': {e}", exc_info=True)
         sys.exit(1)
+
 
 def initial_training(config: dict, trainer_class, folder_flag: str):
     global shared_model
@@ -79,311 +81,198 @@ def initial_training(config: dict, trainer_class, folder_flag: str):
             PIPELINE_STATE["status"] = "error"
             PIPELINE_STATE["error_message"] = str(e)
 
+
 def retraining_thread_task(retraining_data_df: pd.DataFrame, algorithm: str):
     """
     Führt das Nachtraining im Hintergrund durch und bereitet Artefakte für den Hot-Swap vor.
     WICHTIG: Setzt den Pipeline-Status am Ende auf 'ready_to_swap', damit der Inferenz-Loop
     selbstständig die Artefakte übernimmt (kein Blockieren!).
+    - Für LSTM/CNN1D: inkrementelles Fitten auf neuen Daten (nur In-Memory, kein Speichern).
+    - Für Random Forest: Neu-Training auf kombinierten Daten (ebenfalls nur In-Memory).
     """
-    from sklearn.preprocessing import MinMaxScaler, StandardScaler, RobustScaler
-    from sklearn.multioutput import MultiOutputRegressor
-    from sklearn.ensemble import RandomForestRegressor
-    import joblib
+    import logging
+    global shared_model, PIPELINE_STATE, shared_resource_lock
 
-    global shared_model
+    algo = (algorithm or "").lower()
+    # gleiche Behandlung für verschiedene Schreibweisen
+    is_seq_model = algo in ("lstm", "cnn1d", "1dcnn", "cnn")
+
     logging.info(f"--- RETRAINING THREAD ({algorithm}): Startet Nachtraining. ---")
     with shared_resource_lock:
         PIPELINE_STATE["retraining_status"] = "training"
 
     try:
-        # Bestehende Artefakte & Konfiguration auslesen (thread-safe Kopie)
+        # Thread-sichere Kopie der Artefakte/Konfig holen
         with shared_resource_lock:
-            config = deepcopy(shared_model['config'])
-            initial_data = shared_model['initial_training_data']
-            current_model_ref = shared_model['model']
-            current_scaler_ref = shared_model['scaler']
-            features_ref = list(shared_model['features']) if shared_model['features'] is not None else None
+            config = deepcopy(shared_model.get('config') or {})
+            initial_data = shared_model.get('initial_training_data')  # für RF benötigt
+            current_model_ref = shared_model.get('model')
+            scaler_ref = shared_model.get('scaler')
+            y_scaler_ref = shared_model.get('y_scaler')
+            features_ref = shared_model.get('features')
 
-        if algorithm.lower() == 'lstm':
-            # --- LSTM: unverändert lassen (läuft bei dir bereits stabil) ---
-            logging.info("LSTM-Nachtraining (inkrementell) wird durchgeführt...")
-            # Hier bleibt dein bestehender LSTM-Retrain-Flow erhalten.
-            # Wir setzen lediglich am Ende das Swap-Signal, da LSTM bereits funktioniert.
-            with shared_resource_lock:
-                PIPELINE_STATE["retraining_status"] = "ready_to_swap"
-            logging.info("--- RETRAINING THREAD (LSTM): Artefakte bereit zum Hot-Swap ---")
-            return
+        # Features können als Liste oder Dict kommen (z.B. {"all": [...], ...})
+        if isinstance(features_ref, dict):
+            features_ref = features_ref.get("all")
+        if features_ref is not None:
+            features_ref = list(features_ref)
 
-        elif algorithm.lower() == 'cnn1d':
-            # CNN1D: (Platzhalter) – Retraining könnte analog LSTM/Langsames Keras-Training laufen.
-            logging.info("CNN1D-Nachtraining (inkrementell) Platzhalter – setze Swap-Signal.")
-            with shared_resource_lock:
-                PIPELINE_STATE["retraining_status"] = "ready_to_swap"
-            logging.info("--- RETRAINING THREAD (CNN1D): Artefakte bereit zum Hot-Swap ---")
-            return
-        
-        elif algorithm.lower() == 'xgboost':
-            # --- XGBoost Retraining (Best-Practice): Trees anhängen (continued training) ---
-            logging.info("XGBoost Retrain (append trees) startet ...")
-
-            if retraining_data_df is None or retraining_data_df.empty:
-                logging.warning("Retraining-Daten sind leer. Überspringe XGBoost-Retrain.")
+        # === Sequenz-Modelle (LSTM / 1D-CNN): inkrementelles Fitten ===========================
+        if is_seq_model:
+            if current_model_ref is None or scaler_ref is None or not features_ref:
+                logging.warning(f"{algorithm.upper()}: Fehlende Artefakte (Modell/Scaler/Features). Retraining abgebrochen.")
                 with shared_resource_lock:
                     PIPELINE_STATE["retraining_status"] = "idle"
                 return
 
-            # 1) Historie + neue Daten kombinieren (kleines Backfill gegen Forgetting)
-            hist_rows = int(config.get("xgb_retrain_hist_rows", 5000))
-            df_old = (initial_data.copy() if initial_data is not None else pd.DataFrame()).tail(hist_rows)
-            df_new = retraining_data_df.copy()
-
-            for df in (df_old, df_new):
-                if not isinstance(df.index, pd.DatetimeIndex):
-                    if 'date' in df.columns:
-                        df['date'] = pd.to_datetime(df['date'])
-                        df.set_index('date', inplace=True)
-
-            combined_raw = pd.concat([df_old, df_new], axis=0)
-            combined_raw = combined_raw[~combined_raw.index.duplicated(keep='last')]
-            combined_raw = combined_raw.sort_index()
-
-            # 2) Feature Engineering wie im Training
-            featured_all, _ = fe.add_all_features(combined_raw.copy(), config)
-
-            # 3) X exakt wie im initialen Training (features_ref)
-            target_col = str(config.get("base_features", ["target"])[0]).lower()
-            if features_ref is None or len(features_ref) == 0:
-                raise ValueError("Feature-Liste (features_ref) ist leer oder None – initiales Training hat nichts gespeichert.")
-            missing = [c for c in features_ref if c not in featured_all.columns]
-            if missing:
-                raise KeyError(f"Folgende Features fehlen im neu erstellten Feature-Frame: {missing}")
-
-            X_df_full = featured_all[features_ref].copy()
-
-            # 4) Zielmatrix (H Horizons) erzeugen
-            H = int(config.get("horizon", 1))
-            H = max(1, H)
-            y_cols = []
-            for h in range(1, H + 1):
-                col_name = f"__y_t_plus_{h}__"
-                featured_all[col_name] = featured_all[target_col].shift(-h)
-                y_cols.append(col_name)
-
-            aligned_df = pd.concat([X_df_full, featured_all[y_cols]], axis=1).dropna(how='any')
-            if aligned_df.empty:
-                raise ValueError("Nach Ausrichtung/Dropna sind keine Zeilen übrig – bitte Fenstergrößen/Lags prüfen.")
-
-            X_df = aligned_df[features_ref]
-            Y_df = aligned_df[y_cols]
-
-            # 5) Skaler neu fitten (Drift berücksichtigen)
-            logging.info("Passe Scaler neu an...")
-            scaler_type = (config.get("scaler_type") or "standard").lower()
-            if scaler_type == "minmax":
-                from sklearn.preprocessing import MinMaxScaler
-                new_scaler = MinMaxScaler()
-            elif scaler_type == "robust":
-                from sklearn.preprocessing import RobustScaler
-                new_scaler = RobustScaler()
-            else:
-                from sklearn.preprocessing import StandardScaler
-                new_scaler = StandardScaler()
-
-            X_scaled = new_scaler.fit_transform(X_df.values)
-            Y = Y_df.values
-
-            # 6) Weitertrainieren (Trees anhängen)
-            from xgboost import XGBRegressor
-            from sklearn.multioutput import MultiOutputRegressor
-            add_trees = int(config.get("xgb_additional_estimators", 200))
-            early_rounds = int(config.get("xgb_early_stopping_rounds", 0))
-
-            old_model = shared_model.get("model")
-            if old_model is None:
-                raise RuntimeError("Kein existierendes XGBoost-Modell im Shared-Store gefunden.")
-
-            def _fit_with_optional_es(estimator, X_, y_, booster):
-                # Robust gegen XGBoost-Versionen: erst versuchen mit early_stopping_rounds,
-                # sonst Fallback auf callbacks, sonst ohne ES.
-                fit_kwargs = {"xgb_model": booster}
-                if early_rounds > 0:
-                    try:
-                        estimator.fit(X_, y_, eval_set=[(X_, y_)], early_stopping_rounds=early_rounds, **fit_kwargs)
-                        return estimator
-                    except TypeError:
-                        try:
-                            import xgboost as xgb
-                            estimator.fit(X_, y_, eval_set=[(X_, y_)],
-                                          callbacks=[xgb.callback.EarlyStopping(rounds=early_rounds, save_best=True)],
-                                          **fit_kwargs)
-                            return estimator
-                        except TypeError:
-                            pass
-                estimator.fit(X_, y_, **fit_kwargs)
-                return estimator
-
-            if H == 1 and not isinstance(old_model, MultiOutputRegressor):
-                old_params = old_model.get_params(deep=True)
-                old_params["n_estimators"] = int(old_params.get("n_estimators", 100)) + add_trees
-
-                new_est = XGBRegressor(**old_params)
-                booster = old_model.get_booster()
-                new_est = _fit_with_optional_es(new_est, X_scaled, Y.ravel(), booster)
-                new_model = new_est
-            else:
-                if not hasattr(old_model, "estimators_"):
-                    raise ValueError("Erwarte MultiOutputRegressor für H>1.")
-                new_estimators = []
-                for k, old_est in enumerate(old_model.estimators_):
-                    params = old_est.get_params(deep=True)
-                    params["n_estimators"] = int(params.get("n_estimators", 100)) + add_trees
-                    new_k = XGBRegressor(**params)
-                    booster = old_est.get_booster()
-                    new_k = _fit_with_optional_es(new_k, X_scaled, Y[:, k], booster)
-                    new_estimators.append(new_k)
-                old_model.estimators_ = new_estimators
-                new_model = old_model
-
-            # 7) Artefakte für Hot-Swap bereitstellen
-            with shared_resource_lock:
-                shared_model.update({
-                    "model": new_model,
-                    "scaler": new_scaler,
-                    "features": features_ref,
-                    "config": config,
-                    "initial_training_data": combined_raw
-                })
-                PIPELINE_STATE["retraining_status"] = "ready_to_swap"
-
-            logging.info("--- RETRAINING THREAD (XGBoost): Artefakte bereit zum Hot-Swap ---")
-
-
-
-        elif algorithm.lower() == 'random_forest':
-            # =========================
-            # Random Forest – FIX: Multi-Output beibehalten und X exakt wie im Training
-            # =========================
-            logging.info("Kombiniere alte und neue Daten für RF-Nachtraining...")
-
-            # 1) Rohdaten zusammenführen und sauber sortieren
-            if retraining_data_df is None or retraining_data_df.empty:
-                logging.warning("Retraining-Daten sind leer. Überspringe RF-Retrain.")
+            # Prüfen, ob das aktuelle Modell fit-bar ist (kein TFLite/Interpreter)
+            can_fit = hasattr(current_model_ref, "fit") and hasattr(current_model_ref, "get_weights")
+            if not can_fit:
+                logging.warning(f"{algorithm.upper()}: Aktuelles Modell ist nicht trainierbar (z. B. TFLite). Überspringe Retraining.")
                 with shared_resource_lock:
                     PIPELINE_STATE["retraining_status"] = "idle"
                 return
 
-            df_old = initial_data.copy() if initial_data is not None else pd.DataFrame()
-            df_new = retraining_data_df.copy()
-
-            # Index/Zeiten bereinigen
-            for df in (df_old, df_new):
-                if not isinstance(df.index, pd.DatetimeIndex):
-                    if 'date' in df.columns:
-                        df['date'] = pd.to_datetime(df['date'])
-                        df.set_index('date', inplace=True)
-                    else:
-                        # Fallback: laufender Index, wird unten trotzdem sortiert
-                        pass
-
-            combined_raw = pd.concat([df_old, df_new], axis=0)
-            combined_raw = combined_raw[~combined_raw.index.duplicated(keep='last')]
+            # Modell klonen, um während des Fit keine Live-Gewichte zu mutieren
             try:
-                combined_raw = combined_raw.sort_index()
+                cloned = tf.keras.models.clone_model(current_model_ref)
+                cloned.set_weights(current_model_ref.get_weights())
+                current_model = cloned
             except Exception:
-                combined_raw = combined_raw.reset_index(drop=True)
+                current_model = deepcopy(current_model_ref)
 
-            # 2) Feature Engineering (genau wie im Training)
-            logging.info("Feature Engineering für kombinierten Datensatz...")
-            featured_all, _ = fe.add_all_features(combined_raw.copy(), config)
+            # Feature Engineering auf den neuen Daten
+            try:
+                retraining_df_feat, _ = fe.add_all_features(retraining_data_df.copy(), config)
+            except Exception as fe_err:
+                logging.error(f"{algorithm.upper()}: Feature-Engineering fehlgeschlagen: {fe_err}", exc_info=True)
+                with shared_resource_lock:
+                    PIPELINE_STATE["retraining_status"] = "idle"
+                return
 
-            # Zielvariable ermitteln (wie im RFInference genutzt)
-            target_col = str(config.get("base_features", ["target"])[0]).lower()
-            if target_col not in map(str.lower, featured_all.columns):
-                # Versuche ohne lower() (falls Spaltennamen bereits klein sind)
-                if target_col not in featured_all.columns:
-                    raise KeyError(
-                        f"Target-Spalte '{target_col}' nicht im Feature-DataFrame gefunden. "
-                        f"Vorhandene Spalten: {list(featured_all.columns)[:10]} ..."
-                    )
+            # exakt dieselben Feature-Spalten wie im Training (gleiche Reihenfolge)
+            try:
+                X_feat = retraining_df_feat.loc[:, features_ref].dropna().copy()
+            except KeyError as kerr:
+                logging.error(f"{algorithm.upper()}: Erwartete Features fehlen in Retraining-Daten: {kerr}")
+                with shared_resource_lock:
+                    PIPELINE_STATE["retraining_status"] = "idle"
+                return
 
-            # 3) X exakt wie beim initialen Training: features_ref verwenden
-            if features_ref is None or len(features_ref) == 0:
-                raise ValueError("Feature-Liste (features_ref) ist leer oder None – initiales Training hat nichts gespeichert.")
+            if X_feat.empty:
+                logging.info(f"{algorithm.upper()}: Keine verwertbaren Zeilen nach Feature-Engineering (leer nach Drop-NA).")
+                with shared_resource_lock:
+                    PIPELINE_STATE["retraining_status"] = "idle"
+                return
 
-            # Safety: prüfe, dass alle Features existieren
-            missing = [c for c in features_ref if c not in featured_all.columns]
-            if missing:
-                raise KeyError(f"Folgende Features fehlen im neu erstellten Feature-Frame: {missing}")
+            # Skalieren wie im Training
+            try:
+                X_scaled = scaler_ref.transform(X_feat.values)
+            except Exception as sc_err:
+                logging.error(f"{algorithm.upper()}: Scaler.transform fehlgeschlagen: {sc_err}", exc_info=True)
+                with shared_resource_lock:
+                    PIPELINE_STATE["retraining_status"] = "idle"
+                return
 
-            X_df_full = featured_all[features_ref].copy()
-
-            # 4) Y_{t+1 ... t+H} bauen (Multi-Output) – exakt aus der Zielspalte
+            # Sliding-Window erstellen
             H = int(config.get("horizon", 1))
-            if H < 1:
-                H = 1
+            L = int(config.get("lags", 1))
+            try:
+                X_retrain, y_retrain = LoadPrepareData.convert_data_to_sliding_window(
+                    X_scaled, lag_horizon=L, forecast_horizon=H
+                )
+            except Exception as sw_err:
+                logging.error(f"{algorithm.upper()}: Sliding-Window-Erstellung fehlgeschlagen: {sw_err}", exc_info=True)
+                with shared_resource_lock:
+                    PIPELINE_STATE["retraining_status"] = "idle"
+                return
 
-            # Shifts für Zukunft
-            y_cols = []
-            for h in range(1, H + 1):
-                col_name = f"__y_t_plus_{h}__"
-                featured_all[col_name] = featured_all[target_col].shift(-h)
-                y_cols.append(col_name)
+            if X_retrain is None or y_retrain is None or len(X_retrain) == 0:
+                logging.info(f"{algorithm.upper()}: Zu wenige Daten für Fenster (lags={L}).")
+                with shared_resource_lock:
+                    PIPELINE_STATE["retraining_status"] = "idle"
+                return
 
-            # 5) NaNs entfernen (kommen von Lags/Rollings/Shift)
-            aligned_df = pd.concat([X_df_full, featured_all[y_cols]], axis=1)
-            aligned_df = aligned_df.dropna(axis=0, how='any')
-            if aligned_df.empty:
-                raise ValueError("Nach Ausrichtung/Dropna sind keine Zeilen übrig – bitte Fenstergrößen/Lags prüfen.")
+            # Kompilieren & inkrementell fitten (feines Nachtraining)
+            opt = config.get("optimizer", "adam")
+            loss = config.get("loss", "mse")
+            epochs = int(config.get("retraining_epochs", 3))
+            batch_size = int(config.get("batch_size", 32))
 
-            X_df = aligned_df[features_ref]
-            Y_df = aligned_df[y_cols]
+            try:
+                current_model.compile(optimizer=opt, loss=loss)
+                current_model.fit(
+                    X_retrain, y_retrain,
+                    epochs=epochs,
+                    batch_size=batch_size,
+                    verbose=0
+                )
+            except Exception as fit_err:
+                logging.error(f"{algorithm.upper()}: Fehler beim inkrementellen Fit: {fit_err}", exc_info=True)
+                with shared_resource_lock:
+                    PIPELINE_STATE["retraining_status"] = "idle"
+                return
 
-            # 6) Scaler NEU anpassen (wie beim initialen Training)
-            logging.info("Passe Scaler neu an...")
-            scaler_type = (config.get("scaler_type") or "standard").lower()
-            if scaler_type == "minmax":
-                new_scaler = MinMaxScaler()
-            elif scaler_type == "robust":
-                new_scaler = RobustScaler()
-            else:
-                new_scaler = StandardScaler()
+            logging.info(f"{algorithm.upper()}: Inkrementelles Retraining abgeschlossen "
+                         f"(samples={len(X_retrain)}, epochs={epochs}).")
 
-            X_scaled = new_scaler.fit_transform(X_df.values)
-            Y = Y_df.values  # Shape: (n_samples, H)
-
-            # 7) Modell trainieren – **immer** Multi-Output, wenn H>1
-            logging.info("Trainiere neues Random Forest Modell (Multi-Output)...")
-            rf_base = RandomForestRegressor(
-                n_estimators=config.get("n_estimators", 100),
-                max_depth=config.get("max_depth", None),
-                min_samples_split=config.get("min_samples_split", 2),
-                min_samples_leaf=config.get("min_samples_leaf", 1),
-                max_features=config.get("max_features", 1.0),
-                random_state=config.get("random_state", None),
-                n_jobs=config.get("n_jobs", -1)
-            )
-            if H > 1:
-                new_model = MultiOutputRegressor(rf_base)
-            else:
-                new_model = rf_base
-
-            new_model.fit(X_scaled, Y)
-
-            # 8) Artefakte für Hot-Swap bereitstellen
+            # Hot-Swap vorbereiten (nur In-Memory, NICHT speichern!)
             with shared_resource_lock:
-                # Feature-Liste bleibt exakt gleich!
+                shared_model.update({
+                    "model": current_model,      # nur Modell austauschen
+                    "scaler": scaler_ref,        # Scaler/Features bleiben gleich
+                    "y_scaler": y_scaler_ref,
+                    "features": features_ref,
+                    "config": config
+                })
+                PIPELINE_STATE["retraining_status"] = "ready_to_swap"
+            logging.info(f"--- RETRAINING THREAD ({algorithm.upper()}): Artefakte bereit zum Hot-Swap ---")
+            return
+
+        # === Random Forest: Refit auf kombinierten Daten ======================================
+        elif algo == "random_forest":
+            if initial_data is None:
+                logging.warning("RandomForest: initial_training_data fehlt; überspringe Retraining.")
+                with shared_resource_lock:
+                    PIPELINE_STATE["retraining_status"] = "idle"
+                return
+
+            logging.info("RandomForest: Kombiniere alte und neue Daten für Nachtraining...")
+            combined_data = pd.concat([initial_data, retraining_data_df]).drop_duplicates().sort_index()
+
+            logging.info("RandomForest: Feature Engineering für kombinierten Datensatz...")
+            combined_df_featured, features_dict = fe.add_all_features(combined_data, config)
+            new_features = features_dict["all"] if isinstance(features_dict, dict) else features_ref
+            if not new_features:
+                raise RuntimeError("RandomForest: Features nicht bestimmbar.")
+
+            combined_df_featured.dropna(inplace=True)
+            target_col_name = config["base_features"][0].lower()
+
+            X_retrain = combined_df_featured[new_features]
+            y_retrain = combined_df_featured[target_col_name]
+
+            logging.info("RandomForest: Scaler neu anpassen...")
+            scaler_class = RobustScaler if config.get("scaler_type", "minmax") == "robust" else MinMaxScaler
+            new_scaler = scaler_class()
+            X_retrain_scaled = new_scaler.fit_transform(X_retrain)
+
+            logging.info("RandomForest: Neues Modell trainieren (In-Memory)...")
+            new_model = RandomForestRegressor(**config.get("model_params", {}))
+            new_model.fit(X_retrain_scaled, y_retrain.values)
+
+            with shared_resource_lock:
                 shared_model.update({
                     "model": new_model,
                     "scaler": new_scaler,
-                    "features": features_ref,
-                    "config": config,
-                    # Für nächste Retrains: kombinierten Rohdatenstand merken
-                    "initial_training_data": combined_raw
+                    "features": new_features,
+                    "initial_training_data": combined_data
                 })
                 PIPELINE_STATE["retraining_status"] = "ready_to_swap"
-
             logging.info("--- RETRAINING THREAD (RF): Artefakte bereit zum Hot-Swap ---")
+            return
 
+        # === unbekannter Algorithmus ===========================================================
         else:
             raise ValueError(f"Unbekannter Algorithmus für Retraining: {algorithm}")
 
@@ -394,18 +283,46 @@ def retraining_thread_task(retraining_data_df: pd.DataFrame, algorithm: str):
             PIPELINE_STATE["retraining_status"] = "idle"
 
 
+
+def _merge_artifacts_for_swap(current_infer_obj, shared_dict):
+    """
+    Sicherheits-Merge für Hot-Swap ohne Truthiness:
+    - Nimmt jeweils den ersten Wert, der NICHT None ist.
+    - Wichtig: Keine 'or'-Verknüpfungen mit DataFrames/Listen/etc., da das
+      bei pandas.DataFrame zu 'ambiguous truth value' führt.
+    """
+    def pick(shared_key, infer_attr_name):
+        val = shared_dict.get(shared_key, None)
+        if val is not None:
+            return val
+        return getattr(current_infer_obj, infer_attr_name, None)
+
+    return {
+        "model": pick("model", "model"),
+        "scaler": pick("scaler", "scaler"),
+        "y_scaler": pick("y_scaler", "y_scaler"),
+        "features": pick("features", "feature_list"),
+        "config": pick("config", "config"),
+        "initial_training_data": pick("initial_training_data", "_batch_data_df"),
+    }
+
+
 def inference_manager(config: dict, inference_class, folder_flag: str, algorithm: str, mode: str):
     """
     Führt die Inferenz in Zyklen/Schritten aus.
     - Speichert pro Schritt: True, Forecast(H), inference_time_s (aus prediction_entry), total_time_s, CPU%, RAM.
     - Sammelt pro Schritt Retraining-Material und triggert am Zyklusende ein non-blocking Retraining.
     - Hot-Swap, sobald neues Modell/Abhängigkeiten bereitstehen.
+    - NEU: Falls nur Inferenz gestartet wird (mode != "retraining"), lade training_config.json aus dem
+           Modellordner und merge sie in die config (laufende Werte haben Vorrang).
     """
     import os
+    import json
     import time
     import threading
     import logging
     import pandas as pd
+    from copy import deepcopy
 
     # psutil optional verwenden (CPU/RAM)
     try:
@@ -419,7 +336,111 @@ def inference_manager(config: dict, inference_class, folder_flag: str, algorithm
     retraining_data_list = []
     inference_processor = None
 
+    # ------------------------------------------------------------
+    # Hilfsfunktionen: Config-Merge & Modell-Ordner finden
+    # ------------------------------------------------------------
+    def _deep_merge(base: dict, override: dict) -> dict:
+        """
+        Tiefen-Merge: Werte aus 'override' überschreiben 'base';
+        verschachtelte Dicts werden rekursiv zusammengeführt.
+        """
+        if not isinstance(base, dict) or not isinstance(override, dict):
+            return deepcopy(override)
+        out = deepcopy(base)
+        for k, v in override.items():
+            if isinstance(v, dict) and isinstance(out.get(k), dict):
+                out[k] = _deep_merge(out[k], v)
+            else:
+                # Wichtig: None aus override überschreibt NICHT (wir behalten base)
+                if v is not None:
+                    out[k] = v
+        return out
+
+    def _guess_model_dir(cfg: dict) -> str | None:
+        """
+        Rate den Modellordner. Priorität:
+          1) cfg['paths']['Models']
+          2) Ordner der Datei aus cfg['model_path_static'] (falls absolut und existent)
+          3) cfg['paths']['Base_Output_Path']/Models
+          4) cfg['artifacts_base_path']/Models
+        Fällt zurück auf None, wenn nichts existiert.
+        """
+        paths = (cfg or {}).get("paths", {}) or {}
+
+        # 1) Direkter Models-Pfad
+        p_models = paths.get("Models")
+        if p_models and os.path.isdir(p_models):
+            return p_models
+
+        # 2) Ordner der statischen Modell-Datei (absolute Pfade)
+        m_static = (cfg or {}).get("model_path_static")
+        if m_static and os.path.isabs(m_static) and os.path.isfile(m_static):
+            return os.path.dirname(m_static)
+
+        # 3) Base_Output_Path/Models
+        base_out = paths.get("Base_Output_Path")
+        if base_out:
+            cand = os.path.join(base_out, "Models")
+            if os.path.isdir(cand):
+                return cand
+
+        # 4) artifacts_base_path/Models
+        art_base = (cfg or {}).get("artifacts_base_path")
+        if art_base:
+            cand = os.path.join(art_base, "Models")
+            if os.path.isdir(cand):
+                return cand
+
+        # 5) Fallback: evtl. existiert Base_Output_Path selbst
+        if base_out and os.path.isdir(base_out):
+            return base_out
+
+        return None
+
+    def _try_load_training_config_for_inference_only(cfg: dict, _mode: str) -> dict:
+        """
+        Wenn wir NICHT im Retraining sind, versuche training_config.json aus dem
+        Modellordner zu laden und in cfg zu mergen (cfg hat Vorrang).
+        """
+        if str(_mode).lower() == "retraining":
+            return cfg  # Nur Inferenz-Case gewünscht
+
+        model_dir = _guess_model_dir(cfg)
+        if not model_dir:
+            logging.info("Kein Modellordner gefunden (Models). Überspringe training_config.json-Import.")
+            return cfg
+
+        # Suche training_config.json direkt im Modellordner, ggf. auch im Elternordner
+        candidates = [
+            os.path.join(model_dir, "training_config.json"),
+            os.path.join(os.path.dirname(model_dir), "training_config.json")
+        ]
+        found = None
+        for c in candidates:
+            if c and os.path.isfile(c):
+                found = c
+                break
+
+        if not found:
+            logging.info(f"Keine training_config.json in {model_dir} gefunden. (Optional)")
+            return cfg
+
+        try:
+            with open(found, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+            # CLI/Laufzeitwerte haben Vorrang -> cfg überschreibt loaded
+            merged = _deep_merge(loaded, cfg)
+            # Stelle sicher, dass der Laufzeit-Modus erhalten bleibt
+            merged["mode"] = _mode
+            logging.info(f"training_config.json geladen und gemergt: {found}")
+            return merged
+        except Exception as e:
+            logging.warning(f"training_config.json konnte nicht geladen/gewertet werden ({found}): {e}")
+            return cfg
+
+    # ------------------------------------------------------------
     # Prozess & CPU-Kerne für Prozentberechnung
+    # ------------------------------------------------------------
     if psutil is not None:
         try:
             proc = psutil.Process(os.getpid())
@@ -437,6 +458,9 @@ def inference_manager(config: dict, inference_class, folder_flag: str, algorithm
             logging.error("Inferenz-Manager startet nicht, da ein Fehler bei der Initialisierung aufgetreten ist.")
             return
 
+        # NEU: falls nur Inferenz läuft -> versuche training_config.json zu laden/mergen
+        config = _try_load_training_config_for_inference_only(config, mode)
+
         # Status setzen
         with shared_resource_lock:
             PIPELINE_STATE["status"] = "inference_running"
@@ -444,9 +468,11 @@ def inference_manager(config: dict, inference_class, folder_flag: str, algorithm
 
         # Inferenz-Objekt aufsetzen + Artefakte laden/übernehmen
         inference_processor = inference_class(config, folder_flag=folder_flag)
+
+        # 1) Falls bereits Artefakte im Speicher (z. B. nach initialem Training)
         if shared_model.get("model") is not None:
             inference_processor.set_artifacts_from_memory(shared_model)
-            # 🔧 Warm-Start: DataProcessor mit initialem Fenster vorfüttern
+            # Warm-Start des DataProcessors
             try:
                 init_df = shared_model.get("initial_training_data")
                 dp = getattr(inference_processor, "data_processor", None)
@@ -457,11 +483,37 @@ def inference_manager(config: dict, inference_class, folder_flag: str, algorithm
             except Exception as e:
                 logging.warning(f"Konnte DataProcessor nicht vorfüttern: {e}")
 
-
-        elif config.get('load_id'):
-            inference_processor.load_artifacts()
+        # 2) Sonst von Platte laden
         else:
-            raise RuntimeError("Kein trainiertes Modell und keine load_id zum Laden gefunden.")
+            # a) Harte Vorgabe durch load_id (bestehende Logik)
+            if config.get('load_id'):
+                inference_processor.load_artifacts()
+            else:
+                # b) Inferenz-only: versuche ohne load_id über Pfade/Dateien zu laden
+                #    (BaseInferenceProcessor.load_artifacts nutzt Pipeline_Utils und cfg.paths)
+                try:
+                    inference_processor.load_artifacts()
+                except SystemExit:
+                    # Pipeline_Utils kann sys.exit(1) werfen – fange ab, um saubere Fehlermeldung zu loggen
+                    logging.error("Artefakte konnten nicht geladen werden (SystemExit in load_artifacts).")
+                    raise
+                except Exception as e:
+                    raise RuntimeError(
+                        "Kein trainiertes Modell im Speicher und Artefakte konnten nicht von Platte geladen werden. "
+                        "Stelle sicher, dass 'paths.Models' korrekt gesetzt ist und dort 'model.keras' / "
+                        "'trained_*.joblib' sowie 'training_config.json' liegen."
+                    ) from e
+
+            # Nach Laden: shared_model BEFÜLLEN (wichtig für späteren Hot-Swap)
+            with shared_resource_lock:
+                shared_model.update({
+                    "model": getattr(inference_processor, "model", None),
+                    "scaler": getattr(inference_processor, "scaler", None),
+                    "y_scaler": getattr(inference_processor, "y_scaler", None),
+                    "features": getattr(inference_processor, "feature_list", None),
+                    "config": getattr(inference_processor, "config", None),
+                    "initial_training_data": getattr(inference_processor, "_batch_data_df", None)
+                })
 
         # Datenquelle (zustandsbehafteter Iterator-Fabrik)
         data_source_iterator = inference_processor.get_data_source_iterator()
@@ -504,20 +556,18 @@ def inference_manager(config: dict, inference_class, folder_flag: str, algorithm
             for step, payload in enumerate(current_cycle_iterator):
                 step_wall_t0 = time.perf_counter()
 
-                # --- KORREKTUR START: System-Ressourcen korrekt am Anfang messen ---
+                # System-Ressourcen Messung (Anfang)
                 cpu_t0, ram_usage_dict = None, None
-                if proc is not None:
+                if psutil is not None:
                     try:
+                        proc.cpu_percent(interval=None)  # Priming für genauere Messung
                         cpu_t0 = proc.cpu_times()
-                        # System-RAM-Auslastung über die Hilfsfunktion holen
+                        from ML_Helpfunctions.Pipeline_Utils import PipelineUtils
                         ram_usage_dict = PipelineUtils.get_memory_usage()
                     except Exception:
                         cpu_t0, ram_usage_dict = None, None
-                else:
-                    cpu_t0, ram_usage_dict = None, None
-                # --- KORREKTUR ENDE ---
 
-                # Pause/Stop behandeln
+                # Pause/Stop
                 while PIPELINE_STATE.get("is_paused"):
                     time.sleep(0.2)
                 if PIPELINE_STATE.get("is_finished"):
@@ -532,9 +582,9 @@ def inference_manager(config: dict, inference_class, folder_flag: str, algorithm
                     # Gesamtzeit (Wall)
                     step_total_time_s = time.perf_counter() - step_wall_t0
 
-                    # CPU% aus Prozess-CPU-Zeit relativ zu n_cpus
+                    # CPU%
                     cpu_percent = None
-                    if proc is not None and cpu_t0 is not None:
+                    if psutil is not None and cpu_t0 is not None:
                         try:
                             cpu_t1 = proc.cpu_times()
                             cpu_used = (cpu_t1.user + cpu_t1.system) - (cpu_t0.user + cpu_t0.system)
@@ -542,19 +592,15 @@ def inference_manager(config: dict, inference_class, folder_flag: str, algorithm
                         except Exception:
                             cpu_percent = None
 
-                    # --- KORREKTUR START: Werte für CSV und Web-App aus ram_usage_dict extrahieren ---
+                    # RAM
                     ram_mb_val, ram_percent_val = None, None
                     if ram_usage_dict and ram_usage_dict.get("used_gb") != "N/A":
                         try:
-                            # Für die CSV: Genutzte GB in MB umrechnen und Prozentwert extrahieren
                             ram_mb_val = float(ram_usage_dict["used_gb"]) * 1024
                             ram_percent_val = float(ram_usage_dict["percent"])
-                            
-                            # Für die Web-App: Das komplette Dictionary hinzufügen
-                            prediction_entry['ram_usage'] = ram_usage_dict
+                            prediction_entry['ram_usage'] = ram_usage_dict  # für Web-UI
                         except (ValueError, TypeError):
-                            pass # Werte bleiben None, wenn Konvertierung fehlschlägt
-                    # --- KORREKTUR ENDE ---
+                            pass
 
                     # Persistieren dieses Schritts
                     try:
@@ -562,7 +608,6 @@ def inference_manager(config: dict, inference_class, folder_flag: str, algorithm
                             prediction_entry=prediction_entry,
                             total_time_s=step_total_time_s,
                             cpu_percent=cpu_percent,
-                            # --- GEÄNDERTE ZEILEN: Korrekte RAM-Werte übergeben ---
                             ram_mb=ram_mb_val,
                             ram_percent=ram_percent_val
                         )
@@ -573,7 +618,7 @@ def inference_manager(config: dict, inference_class, folder_flag: str, algorithm
                     with shared_resource_lock:
                         all_predictions.append(prediction_entry)
 
-                    # --- NEU: Retraining-Material sammeln (nur im Modus 'retraining') ---
+                    # Retraining-Material sammeln (nur im Modus 'retraining')
                     if mode == "retraining":
                         try:
                             if hasattr(payload, "to_dict"):
@@ -582,18 +627,17 @@ def inference_manager(config: dict, inference_class, folder_flag: str, algorithm
                                 pl = dict(payload)
                         except Exception:
                             pl = {}
-
-                        # datetime sicherstellen
                         if "datetime" not in pl and "datetime" in prediction_entry:
                             pl["datetime"] = prediction_entry["datetime"]
-
                         retraining_data_list.append(pl)
 
                 # Hot-Swap, wenn Retraining fertig
                 with shared_resource_lock:
                     ready = PIPELINE_STATE.get("retraining_status") == "ready_to_swap"
                 if ready:
-                    inference_processor.set_artifacts_from_memory(shared_model)
+                    # Defensiver Merge, damit config/features nie auf None fallen
+                    to_swap = _merge_artifacts_for_swap(inference_processor, shared_model)
+                    inference_processor.set_artifacts_from_memory(to_swap)
                     with shared_resource_lock:
                         PIPELINE_STATE["retraining_status"] = "idle"
                     logging.info("--- INFERENCE MANAGER: Neues Modell & Abhängigkeiten aktiv (Hot-Swap) ---")
@@ -671,6 +715,9 @@ def inference_manager(config: dict, inference_class, folder_flag: str, algorithm
         except Exception as e:
             logging.error(f"Fehler beim finalen Speichern der Ergebnisse: {e}", exc_info=True)
 
+
+
+
 def main():
     parser = argparse.ArgumentParser(description="Vereinheitlichte ML-Pipeline mit Web-UI")
     parser.add_argument('--algorithm', type=str, required=True, choices=['random_forest', 'lstm', 'cnn1d', 'xgboost'],
@@ -727,7 +774,7 @@ def main():
         trainer_class = LSTMTrainer
         inference_class = LSTMInference
         folder_flag = "LSTM"
-    
+
     # --- CNN1D Support ---
     if args.algorithm == 'cnn1d':
         from ML_Algorithms.CNN1D.cnn1d_train import CNN1DTrainer
@@ -816,7 +863,7 @@ def main():
         )
         training_thread.start()
     else:
-        # Modell ist geladen → bereit für Inferenz
+        # Modell wird von Platte geladen – Status für Inferenz setzen
         with shared_resource_lock:
             PIPELINE_STATE["status"] = "ready_for_inference"
 
@@ -839,14 +886,12 @@ def main():
 
     # --- Steuerung Webserver ---
     if args.web_only:
-        # Nur Web-UI (blockierend) – simuliert den separaten Prozess in der Zielumgebung
         local_ip = PipelineUtils.get_local_ip()
         logging.info(f"\n🚀 Webserver (web-only) startet. Öffnen Sie http://{local_ip}:{port} in Ihrem Browser.")
         app.run(host=args.host, port=port, debug=False, use_reloader=False)
         return
 
     if not args.no_web:
-        # Web-UI im Hintergrund starten (damit Pipeline/Threads weiterlaufen)
         local_ip = PipelineUtils.get_local_ip()
         url = f"http://127.0.0.1:{port}"
 
@@ -866,20 +911,19 @@ def main():
 
     # Headless: warten, bis Inferenz fertig ist (wenn inference_steps gesetzt)
     if args.no_web:
-        # Optional warten auf Training (wenn es läuft)
         if training_thread is not None:
             training_thread.join()
-        # Warten auf Inferenzende
         inference_thread.join()
         logging.info("--- Pipeline (headless) beendet. ---")
         return
 
-    # Mit Web: Hauptthread blockiert nicht – optional hier eine einfache Keep-Alive-Schleife
+    # Mit Web: Keep-Alive-Schleife
     try:
         while True:
             time.sleep(1.0)
     except KeyboardInterrupt:
         logging.info("Beende auf Benutzerwunsch (Ctrl+C).")
+
 
 if __name__ == "__main__":
     main()

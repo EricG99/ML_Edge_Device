@@ -677,29 +677,33 @@ def run_timed_inference(model: object, input_data: np.ndarray) -> tuple[np.ndarr
     """
     Führt eine einzelne Inferenz durch und misst die exakte Dauer.
     Unterstützt Keras-Modelle, scikit-learn-Modelle und TFLite-Interpreter.
+    Achtung: Für INT8-TFLite wird korrekt mit scale/zero_point quantisiert.
     """
     start_time = time.perf_counter()
 
-    # Prüfe, ob das übergebene Modell ein TFLite-Interpreter ist
     if isinstance(model, tf.lite.Interpreter):
-        # TFLite-Inferenz
         input_details = model.get_input_details()
         output_details = model.get_output_details()
-        
-        # Stelle sicher, dass die Eingabedaten den vom Modell erwarteten Datentyp haben
-        input_data_tflite = np.asarray(input_data, dtype=input_details[0]['dtype'])
-        
-        # Setze den Input-Tensor, führe die Inferenz aus und hole den Output-Tensor
-        model.set_tensor(input_details[0]['index'], input_data_tflite)
+
+        tensor = np.asarray(input_data)
+
+        in_det = input_details[0]
+        if in_det['dtype'] == np.int8:
+            scale, zero_point = in_det.get('quantization', (0.0, 0))
+            if scale == 0.0:
+                tensor = tensor.astype(np.int8)
+            else:
+                tensor = np.round(tensor / scale + zero_point).astype(np.int8)
+        else:
+            tensor = tensor.astype(in_det['dtype'])
+
+        model.set_tensor(in_det['index'], tensor)
         model.invoke()
         prediction = model.get_tensor(output_details[0]['index'])
     else:
-        # Standard-Inferenz für Keras/scikit-learn-Modelle
         prediction = model.predict(input_data)
 
-    end_time = time.perf_counter()
-    duration_ms = (end_time - start_time) * 1000
-    
+    duration_ms = (time.perf_counter() - start_time) * 1000.0
     return prediction, duration_ms
 
 
@@ -1119,6 +1123,90 @@ class ModelScalerSaver:
         # Stelle sicher, dass die Basis-Verzeichnisse existieren
         self._ensure_output_dirs_exist(["Models", "Scalers", "Model_Structures", "Loss_Plots"])
 
+
+    def _export_tflite_variants(self, model, representative_dataset=None) -> dict:
+        """
+        Exportiert mehrere TFLite-Varianten:
+          - FLOAT16 (immer)
+          - INT8 dynamic range (immer)
+          - INT8 full integer (wenn representative_dataset angegeben ist)
+        Gibt Pfade zurück (dict).
+        """
+        import os, logging
+        import tensorflow as tf
+
+        results = {}
+        models_dir = self.paths.get("Models")
+        os.makedirs(models_dir, exist_ok=True)
+
+        # --- FLOAT16 ---
+        try:
+            conv = tf.lite.TFLiteConverter.from_keras_model(model)
+            conv.optimizations = [tf.lite.Optimize.DEFAULT]
+            conv.target_spec.supported_types = [tf.float16]
+            # RNN/GRU benötigen häufig SELECT_TF_OPS
+            if any(isinstance(l, (tf.keras.layers.LSTM, tf.keras.layers.GRU)) for l in model.layers):
+                conv.target_spec.supported_ops = [
+                    tf.lite.OpsSet.TFLITE_BUILTINS,
+                    tf.lite.OpsSet.SELECT_TF_OPS
+                ]
+                try:
+                    conv._experimental_lower_tensor_list_ops = False
+                except Exception:
+                    pass
+            tfl = conv.convert()
+            p = os.path.join(models_dir, "model_quant_float16.tflite")
+            with open(p, "wb") as f:
+                f.write(tfl)
+            results["tflite_float16"] = p
+            logging.info(f"TFLite FLOAT16 gespeichert: {p}")
+        except Exception as e:
+            logging.warning(f"Float16-TFLite fehlgeschlagen: {e}")
+
+        # --- INT8 (dynamic range) ---
+        try:
+            conv = tf.lite.TFLiteConverter.from_keras_model(model)
+            conv.optimizations = [tf.lite.Optimize.DEFAULT]
+            if any(isinstance(l, (tf.keras.layers.LSTM, tf.keras.layers.GRU)) for l in model.layers):
+                conv.target_spec.supported_ops = [
+                    tf.lite.OpsSet.TFLITE_BUILTINS,
+                    tf.lite.OpsSet.SELECT_TF_OPS
+                ]
+                try:
+                    conv._experimental_lower_tensor_list_ops = False
+                except Exception:
+                    pass
+            tfl = conv.convert()
+            p = os.path.join(models_dir, "model_quant_int8.tflite")
+            with open(p, "wb") as f:
+                f.write(tfl)
+            results["tflite_int8_dynamic"] = p
+            logging.info(f"TFLite INT8 (dynamic) gespeichert: {p}")
+        except Exception as e:
+            logging.warning(f"INT8-dynamic-TFLite fehlgeschlagen: {e}")
+
+        # --- INT8 (full integer) ---
+        if representative_dataset is not None:
+            try:
+                conv = tf.lite.TFLiteConverter.from_keras_model(model)
+                conv.optimizations = [tf.lite.Optimize.DEFAULT]
+                conv.representative_dataset = representative_dataset
+                conv.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS_INT8]
+                conv.inference_input_type = tf.int8
+                conv.inference_output_type = tf.int8
+                tfl = conv.convert()
+                p = os.path.join(models_dir, "model_quant_int8_full.tflite")
+                with open(p, "wb") as f:
+                    f.write(tfl)
+                results["tflite_int8_full"] = p
+                logging.info(f"TFLite INT8 (full) gespeichert: {p}")
+            except Exception as e:
+                logging.warning(f"INT8-full-TFLite fehlgeschlagen: {e}")
+        else:
+            logging.info("Kein representative_dataset übergeben – INT8 full wird übersprungen.")
+
+        return results
+
     def _save_config_as_json(self, output_path: str):
         """Speichert die Konfiguration als JSON-Datei."""
         try:
@@ -1239,10 +1327,11 @@ class ModelScalerSaver:
         return {}
 
     def _save_keras_artifacts(self, model: tf.keras.Model, **kwargs) -> dict:
-        """Speichert alle Artefakte für ein Keras-Modell."""
+        """Speichert alle Artefakte für ein Keras-Modell (inkl. TFLite-Varianten)."""
         results = {}
         base_filename = f"{self.config['model_name']}_{self.config['dataset'].split('.')[0]}_{self.config['run_id']}"
-        
+
+        # 1) Keras .keras speichern
         try:
             path = os.path.join(self.paths.get("Models"), "model.keras")
             model.save(path)
@@ -1250,22 +1339,25 @@ class ModelScalerSaver:
             print(f"✅ Normales Keras-Modell gespeichert unter: {path}")
         except Exception as e:
             print(f"❌ Fehler beim Speichern des Keras-Modells: {e}")
-            traceback.print_exc() 
+            traceback.print_exc()
 
-        if self.config.get("edge_device", False):
-            quantized_path = self._convert_and_quantize_tflite(model)
-            if quantized_path:
-                results["quantized_model_path"] = quantized_path
-        
+        # 2) Optional: TFLite-Varianten, wenn Edge-Flag aktiv
+        edge_flag = bool(self.config.get("edge_device", False) or self.config.get("enable_edge", False))
+        if edge_flag:
+            rep_ds = kwargs.get("representative_dataset") or kwargs.get("train_dataset") or None
+            tflite_paths = self._export_tflite_variants(model, representative_dataset=rep_ds)
+            results.update(tflite_paths)
+
+        # 3) Optional: Loss-Plot & Struktur
         if history := kwargs.get("history"):
             plot_path = os.path.join(self.paths.get("Loss_Plots"), f"loss_plot_{self.config['run_id']}.png")
             if saved_plot_path := self._save_loss_plot(history, plot_path):
                 results["loss_plot_path"] = saved_plot_path
-        
+
         struct_path = os.path.join(self.paths.get("Model_Structures"), f"structure_{self.config['run_id']}.png")
         if saved_struct_path := self._save_structure_plot(model, struct_path):
             results["model_structure_path"] = saved_struct_path
-            
+
         return results
 
 

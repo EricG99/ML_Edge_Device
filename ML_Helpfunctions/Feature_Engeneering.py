@@ -61,7 +61,7 @@ def add_time_features(df: pd.DataFrame, config: dict) -> tuple[pd.DataFrame, dic
 
 def add_rolling_features(df: pd.DataFrame, config: dict) -> tuple[pd.DataFrame, dict]:
     """ Fügt rollierende Mittelwerte und Standardabweichungen hinzu. """
-    print("\n[DEBUG] --- Betrete Funktion: add_rolling_features ---")
+    # print("\n[DEBUG] --- Betrete Funktion: add_rolling_features ---")
     rolling_features_dict = {"rolling_mean": [], "rolling_std": []}
     
     # Prüfen, ob der Schritt ausgeführt werden soll

@@ -63,6 +63,9 @@ class BaseTrainer(ABC):
         
         logging.info(f"Data preparation complete. Features: {len(self.features)}, X_train shape: {X_train.shape}")
 
+        # Representative-Dataset-Quelle für INT8-Full quantization
+        self._rep_source = X_train
+
 
         # --- SCHRITT 2: MODELLTRAINING ---
         logging.info("\nStep 2: Training model...")
@@ -107,7 +110,13 @@ class BaseTrainer(ABC):
             # Hier wird jetzt der korrekte, bereits erstellte Pfad verwendet.
             logging.info("Saving in 'path' mode with versioned directory...")
             saver = Pipeline_Utils.ModelScalerSaver(self.config, paths)
-            saved_artifacts = saver.save_artifacts(model=self.model, scaler=self.scaler)
+            saved_artifacts = rep_gen = None
+            try:
+                rep_gen = Pipeline_Utils.create_representative_dataset_generator(getattr(self, '_rep_source', None), config=self.config)
+            except TypeError:
+                # Fallback für ältere Signaturen (nur eine Positionals)
+                rep_gen = Pipeline_Utils.create_representative_dataset_generator(getattr(self, '_rep_source', None))
+            saved_artifacts = saver.save_artifacts(model=self.model, scaler=self.scaler, representative_dataset=rep_gen)
             
             # Speichere den dedizierten y_scaler, falls er existiert
             if getattr(self, 'y_scaler', None) is not None:

@@ -41,9 +41,70 @@ class LSTMInference(BaseInferenceProcessor):
         self.lags = int(config.get("lags", 1))
 
     def _post_load_artifacts(self):
-        if self.config.get("mode") == "retraining":
-            logging.info("Retraining-Modus aktiv. Keras-Modell wird für die Inferenz verwendet.")
-            return
+        """
+        Ladepolitik (vereinheitlicht):
+        - Wenn --model_filename gesetzt ist:
+            * Falls Pfad auf .tflite zeigt -> TFLite-Interpreter laden.
+            * Sonst: Standard (Keras/SK) beibehalten.
+        - Wenn KEIN model_filename und edge_device/enable_edge = True:
+            * Versuche model_quant_float16.tflite zu laden.
+        - Andernfalls: nichts tun (bereits geladenes Keras-Modell bleibt aktiv).
+        """
+        try:
+            models_dir = self.config.get("paths", {}).get("Models") or self.config.get("Models") or "."
+            explicit = self.config.get("model_filename")
+
+            # --model_filename hat Priorität
+            if explicit:
+                chosen = explicit if os.path.isabs(explicit) else os.path.join(models_dir, explicit)
+                if chosen.lower().endswith(".tflite") and os.path.exists(chosen):
+                    import tensorflow as tf
+                    interpreter = tf.lite.Interpreter(model_path=chosen)
+                    interpreter.allocate_tensors()
+                    self.model = interpreter
+                    logging.info(f"📦 Lade explizites TFLite-Modell: {chosen}")
+                else:
+                    logging.info(f"📦 Explizites Modell angegeben ({explicit}); verwende Standardladepfad (Keras/SK).")
+                return
+
+            # Edge-Flag: bevorzugt Float16-TFLite
+            edge_flag = bool(self.config.get("edge_device", False) or self.config.get("enable_edge", False))
+            if edge_flag:
+                candidate = os.path.join(models_dir, "model_quant_float16.tflite")
+                if os.path.exists(candidate):
+                    import tensorflow as tf
+                    interpreter = tf.lite.Interpreter(model_path=candidate)
+                    interpreter.allocate_tensors()
+                    self.model = interpreter
+                    logging.info(f"⚡ Edge-Flag aktiv: TFLite Float16 geladen: {candidate}")
+                else:
+                    logging.warning("⚠️ Edge-Flag aktiv, aber model_quant_float16.tflite nicht gefunden – nutze Standardmodell.")
+        except Exception as e:
+            logging.warning(f"⚠️ _post_load_artifacts: Ladepolitik konnte nicht angewendet werden ({e}).")
+        return
+
+        try:
+            models_dir = self.config["paths"].get("Models")
+            candidates = []
+            if self.config.get("model_filename"):
+                candidates.append(os.path.join(models_dir, self.config.get("model_filename")))
+            candidates += [
+                os.path.join(models_dir, "model_quant_int8_full.tflite"),
+                os.path.join(models_dir, "model_quant_int8.tflite"),
+                os.path.join(models_dir, "model_quant_float16.tflite"),
+            ]
+            chosen = next((p for p in candidates if p and os.path.exists(p)), None)
+            if chosen:
+                interpreter = tf.lite.Interpreter(model_path=chosen)
+                interpreter.allocate_tensors()
+                in_det = interpreter.get_input_details()[0]
+                out_det = interpreter.get_output_details()[0]
+                logger.info(f"TFLite gewählt: {os.path.basename(chosen)} | Input={in_det['dtype']} {in_det['shape']} → Output={out_det['dtype']} {out_det['shape']}")
+                self.model = interpreter
+                logging.info(f"ℹ️ LSTM-Inferenz nutzt TFLite-Interpreter: {chosen}")
+        except Exception as e:
+            logging.warning(f"⚠️ TFLite-Interpreter konnte nicht geladen werden ({e}), nutze Keras-Modell.")
+        return
         try:
             models_dir = self.config["paths"].get("Models")
             tfl_name = self.config.get("model_filename", "model_quant_float16.tflite")
