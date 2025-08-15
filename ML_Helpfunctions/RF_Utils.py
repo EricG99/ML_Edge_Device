@@ -56,71 +56,55 @@ def train_random_forest_pipeline(config: dict, mode: str = "server", ssh_config:
     }
 
 def train_random_forest_model(config: dict, X_train: np.ndarray,
-                              y_train: np.ndarray, features: list):
+                              y_train: np.ndarray, features: list | None = None):
     """
-    Trainiert ein Random Forest-Modell, ggf. mit MultiOutputRegressor.
-    Der Train-Validation-Split für die `fit`-Methode ist hier nicht enthalten.
-
-    Args:
-        config (dict): Konfigurationsparameter (n_estimators, max_depth, etc.).
-        X_train (np.ndarray): Trainingsdaten (Input, 2D: [samples, flat_features]).
-        y_train (np.ndarray): Trainingsdaten (Zielwerte). Die Form wird intern für
-                              single-output (1D) oder multi-output (2D) angepasst.
-        features (list): Liste der (geflachten) Feature-Namen (nicht direkt für das
-                         Training verwendet, aber Teil der üblichen Signatur).
-
-    Returns:
-        tuple: (model, history, train_time)
-            - model: Das trainierte Random Forest-Modell.
-            - history: Ein Dummy-Verlaufsobjekt.
-            - train_time: Die Trainingszeit in Sekunden.
+    Trainiert ein Random Forest-Modell.
+    - Bei horizon>1 wird IMMER MultiOutputRegressor genutzt.
+    - Gibt (model, train_time_seconds) zurück.
     """
+    import time
+    import numpy as np
+    from sklearn.ensemble import RandomForestRegressor
+    from sklearn.multioutput import MultiOutputRegressor
+
     print("Starte Training für Random Forest-Modell...")
-    start_time = time.time()
+    t0 = time.time()
 
-    # 1. Modell initialisieren
     rf_base = RandomForestRegressor(
         n_estimators=config.get("n_estimators", 100),
         max_depth=config.get("max_depth", None),
         min_samples_split=config.get("min_samples_split", 2),
         min_samples_leaf=config.get("min_samples_leaf", 1),
-        max_features=config.get("max_features", 1.0), 
+        max_features=config.get("max_features", 1.0),
         random_state=config.get("random_state", None),
-        n_jobs=config.get("n_jobs", -1)
+        n_jobs=config.get("n_jobs", -1),
     )
 
-    # 2. Multi-Output-Strategie und y_train-Anpassung
-    current_horizon = config.get("horizon", 1)
-    model_to_train = rf_base
-    y_train_for_fit = y_train # Wird ggf. angepasst
+    H = int(config.get("horizon", 1))
+    y_train_fit = y_train
 
-    if current_horizon > 1:
-        # y_train sollte für MultiOutputRegressor die Form (n_samples, n_outputs/horizon) haben
+    if H > 1:
+        # y muss 2D sein: (n_samples, H)
+        y_train_fit = np.asarray(y_train, dtype=float)
+        if y_train_fit.ndim != 2 or y_train_fit.shape[1] != H:
+            raise ValueError(f"RF-Training: Erwartet y in Form (n, {H}), bekam {y_train_fit.shape}.")
         model_to_train = MultiOutputRegressor(rf_base)
-        # y_train_for_fit bleibt y_train (erwartet 2D)
-        print(f"Random Forest: MultiOutputRegressor wird für horizon={current_horizon} verwendet.")
-    else: # horizon == 1
-        # RandomForestRegressor erwartet y als 1D-Array (n_samples,).
-        if y_train.ndim == 2 and y_train.shape[1] == 1:
-            y_train_for_fit = y_train.ravel()
-            print("Random Forest: y_train wurde für single-output von 2D zu 1D (ravel) angepasst.")
-        # Falls y_train bereits 1D ist, ist keine Anpassung nötig.
-        # model_to_train bleibt rf_base
+        print(f"Random Forest: MultiOutputRegressor wird für horizon={H} verwendet.")
+    else:
+        # Single-Output → 1D
+        y_train_fit = np.asarray(y_train, dtype=float).ravel()
+        model_to_train = rf_base
 
-    # 3. Modell trainieren
-    # Scikit-learn Modelle werden auf den gesamten übergebenen Trainingsdaten trainiert.
-    # Ein separater Validierungssplit für die fit-Methode ist hier nicht üblich.
-    print(f"Starte Scikit-learn model.fit() für RandomForest auf Daten mit Shape X: {X_train.shape}, Y: {y_train_for_fit.shape}...")
-    model_to_train.fit(X_train, y_train_for_fit)
+    print(f"Starte Scikit-learn model.fit() auf Daten mit Shape X: {X_train.shape}, Y: {y_train_fit.shape}...")
+    model_to_train.fit(X_train, y_train_fit)
     print("Random Forest-Modell Training abgeschlossen.")
 
-
-    training_duration_seconds = time.time() - start_time
-    print(f"Trainingszeit für Random Forest: {training_duration_seconds:.2f} Sekunden.")
+    dt = time.time() - t0
+    print(f"Trainingszeit für Random Forest: {dt:.2f} Sekunden.")
     print(f"Model type after training: {type(model_to_train)}")
 
+    return model_to_train, dt
 
-    return model_to_train, training_duration_seconds
 
 def train_random_forest_edge(config, X_train, y_train, features):
     X_train, X_val, y_train, y_val = LoadPrepareData._create_train_val_split(X_train, y_train, 0.2)

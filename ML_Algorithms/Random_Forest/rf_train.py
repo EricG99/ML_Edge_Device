@@ -33,13 +33,42 @@ class RandomForestTrainer(BaseTrainer):
         return DataPipeline2D(self.config)
 
     def _train_model(self, X_train, y_train):
-        """Trainiert das Random Forest Modell."""
-        self.model, self.train_time = RFUtils.train_random_forest_model(
-            config=self.config,
-            X_train=X_train,
-            y_train=y_train,
-            features=self.features
-        )
+        """Trainiert das Random Forest Modell (Multi-Output wird bei H>1 sichergestellt)."""
+        import time
+        import numpy as np
+        import logging
+        from sklearn.ensemble import RandomForestRegressor
+        from sklearn.multioutput import MultiOutputRegressor
+
+        H = int(self.config.get("horizon", 1))
+        rf_params = (self.config.get("rf_params") or {}).copy()
+
+        # Safety: y als 2D-Array
+        y_arr = np.asarray(y_train)
+        if y_arr.ndim == 1:
+            y_arr = y_arr.reshape(-1, 1)
+
+        # Modell bauen: bei mehrspaltigem y => MultiOutput, sonst je nach H
+        base_rf = RandomForestRegressor(**rf_params)
+        if y_arr.shape[1] > 1:
+            model = MultiOutputRegressor(base_rf)
+            logging.info("Random Forest: MultiOutputRegressor wird für horizon=%d verwendet.", y_arr.shape[1])
+        else:
+            model = base_rf if H == 1 else MultiOutputRegressor(base_rf)
+            if H > 1 and y_arr.shape[1] == 1:
+                logging.warning("RF-Training: y_train hat nur 1 Spalte, horizon=%d. "
+                                "Verwende MultiOutputRegressor (semantisch sollten Trainingslabels (N,H) sein).", H)
+
+        t0 = time.perf_counter()
+        model.fit(X_train, y_arr)
+        t1 = time.perf_counter()
+
+        self.model = model
+        self.train_time = t1 - t0
+
+        logging.info("Random Forest-Modell Training abgeschlossen.")
+        logging.info("Trainingszeit für Random Forest: %.2f Sekunden.", self.train_time)
+        logging.info("Model type after training: %s", type(self.model))
 
 
 if __name__ == "__main__":

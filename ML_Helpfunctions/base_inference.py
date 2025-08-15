@@ -51,28 +51,61 @@ class BaseInferenceProcessor(ABC):
         total_time_s: float | None = None,
         cpu_percent: float | None = None,
         ram_mb: float | None = None,
+        # --- NEUE ZEILE START ---
+        ram_percent: float | None = None,
+        # --- NEUE ZEILE ENDE ---
         output_path: str | None = None
     ) -> str | None:
         """
         Persistiert einen Inferenz-Schritt (True, n-Step-Forecast, Zeiten, CPU/RAM).
         Erwartete Keys in prediction_entry:
-          - 'datetime', 'true_value',
-          - 'future_forecast' ODER 'rolling_forecast' (Liste mit H Werten),
-          - optional: 'inference_time_s', 'time_breakdown'
+        - 'datetime', 'true_value',
+        - 'future_forecast' ODER 'rolling_forecast' (Liste mit H Werten),
+        - optional: 'inference_time_s', 'time_breakdown'
         """
+        import os
+        import logging
+
         if not prediction_entry:
             return None
 
-        # 🔒 Robust gegen fehlendes Attribut (fix für deinen Fehler)
+        # 🔒 Robust gegen fehlendes Attribut
         if not hasattr(self, "_predictions_file_path"):
             self._predictions_file_path = None
 
         date = prediction_entry.get("datetime")
         true_value = prediction_entry.get("true_value")
-        forecast = prediction_entry.get("future_forecast") or prediction_entry.get("rolling_forecast") or []
+
+        # --- RF-spezifisches Alignment: pred_h1 = Vorhersage FÜR t; danach t+1..t+(H-1)
+        future_list = (
+            prediction_entry.get("future_forecast")
+            or prediction_entry.get("rolling_forecast")
+            or []
+        )
+        pred_t = prediction_entry.get("prediction", None)
+        horizon = int(self.config.get("horizon", 1))
+
+        folder_lower = str(getattr(self, "folder_flag", "")).lower()
+        is_rf = folder_lower in ("random_forest", "random forest", "rf")
+
+        if is_rf:
+            aligned_forecast = []
+            if horizon >= 1:
+                if pred_t is not None:
+                    aligned_forecast.append(pred_t)
+                else:
+                    aligned_forecast.append(future_list[0] if len(future_list) > 0 else None)
+            if horizon > 1:
+                aligned_forecast.extend(list(future_list[:max(0, horizon - 1)]))
+            forecast = aligned_forecast
+        else:
+            # LSTM (und andere): unverändert – future_list entspricht bereits der Logik
+            forecast = list(future_list[:horizon]) if horizon > 0 else list(future_list)
+
         inference_time_s = prediction_entry.get("inference_time_s", None)
         breakdown = prediction_entry.get("time_breakdown", None)
 
+        # --- Schreiben / Anhängen der Step-CSV
         path = Pipeline_Utils.append_prediction_step(
             config=self.config,
             date=date,
@@ -82,6 +115,9 @@ class BaseInferenceProcessor(ABC):
             total_time_s=total_time_s,
             cpu_percent=cpu_percent,
             ram_mb=ram_mb,
+            # --- NEUE ZEILE START ---
+            ram_percent=ram_percent,
+            # --- NEUE ZEILE ENDE ---
             breakdown=breakdown,
             output_path=output_path or self._predictions_file_path  # darf None sein
         )
@@ -89,12 +125,35 @@ class BaseInferenceProcessor(ABC):
         # Merken (ab hier existiert der Pfad garantiert)
         if self._predictions_file_path is None:
             self._predictions_file_path = path
-            try:
-                import os
-                logging.info(f"📄 StepPredictions gestartet: {os.path.abspath(path)}")
-            except Exception:
-                pass
+
+        # ✅ GEWÜNSCHTES LOGGING DER PFADE
+        try:
+            abs_step_path = os.path.abspath(path) if path else None
+            if abs_step_path:
+                logging.info(f"📝 append_prediction_step -> Datei: {abs_step_path}")
+        except Exception:
+            pass
+
+        try:
+            metrics_dir = (self.config.get("paths") or {}).get("Error_Metrics")
+            if metrics_dir:
+                metrics_summary_path = os.path.abspath(os.path.join(metrics_dir, "metrics_summary.csv"))
+                if os.path.exists(metrics_summary_path):
+                    logging.info(f"📈 Error-Metrics (Summary) vorhanden: {metrics_summary_path}")
+                else:
+                    logging.info(f"📈 Error-Metrics (Summary, geplant): {metrics_summary_path}")
+        except Exception:
+            pass
+
+        # Zusätzlich einmalig (beim ersten Schreiben) einen klaren Hinweis loggen
+        try:
+            if prediction_entry.get("_first_write_log_once") and abs_step_path:
+                logging.info(f"📄 StepPredictions gestartet: {abs_step_path}")
+        except Exception:
+            pass
+
         return path
+
 
     def flush_pending_entry(self) -> dict | None:
         """Gibt den letzten, noch nicht abgeschlossenen Vorhersage-Eintrag zurück."""
@@ -144,70 +203,100 @@ class BaseInferenceProcessor(ABC):
 
     
     def process_step(self, payload: dict) -> dict | None:
+        import time
+        import numpy as np
+        import pandas as pd
+        import logging
+
         if not payload:
             return None
 
         start_processing_time = time.perf_counter()
 
-        # 1) Payload -> Modellinput + t/Zielwert extrahieren (modell-spezifisch)
+        # 1) modell-spezifische Aufbereitung
         input_data, timestamp_t, true_value_t = self._prepare_input_data(payload)
 
-        # 2) Wenn (noch) kein Fenster bereit ist
+        # 2) noch kein ausreichend gefülltes Fenster
         if input_data is None:
             if true_value_t is not None:
-                # Wir liefern zumindest True-Value + leeren Forecast, damit der Logger/CSV fortlaufend bleibt
                 return {
                     "datetime": timestamp_t,
                     "prediction": None,
                     "true_value": float(true_value_t),
-                    "future_forecast": []
+                    "future_forecast": [],
+                    # für UI/CSV: trotzdem mit erwarteten Keys schreiben
+                    "cpu_percent": None,
+                    "ram_mb": None,
                 }
             return None
 
-        # 3) Inferenz (vereinheitlicht: TFLite oder Keras) + Rückskalierung
+        # Für Hot-Swap-Reseed merken
+        self._last_input_data = input_data
+
+        # 3) Inferenz (skaliert) + Rückskalierung
         future_pred_scaled, t_inf_ms = self._run_inference_unified(input_data)
         future_pred_unscaled = self._inverse_transform_prediction(future_pred_scaled)
 
-        # 4) Den fertigzustellenden Eintrag für Zeitpunkt t aus dem "pending" von t-1 holen
+        # 4) Horizon hart auf H bringen (ohne künstliche Wiederholung)
+        H = int(self.config.get("horizon", 1))
+        future_pred_unscaled = np.asarray(future_pred_unscaled, dtype=float).reshape(-1)
+        if future_pred_unscaled.size < H:
+            pad = np.full(H - future_pred_unscaled.size, np.nan, dtype=float)
+            future_pred_unscaled = np.concatenate([future_pred_unscaled, pad], axis=0)
+        elif future_pred_unscaled.size > H:
+            future_pred_unscaled = future_pred_unscaled[:H]
+
+        # 5) Eintrag für Zeitpunkt t aus Pending von t-1 übernehmen
         completed_entry_for_t = None
         if self._pending_entry is not None:
             completed_entry_for_t = self._pending_entry.copy()
             completed_entry_for_t["true_value"] = None if true_value_t is None else float(true_value_t)
+            # inference_time_s aus pending übernehmen
+            it_ms = self._pending_entry.get("model_inference_time_ms")
+            if it_ms is not None:
+                completed_entry_for_t["inference_time_s"] = float(it_ms) / 1000.0
+            # **NEU/Backcompat:** System-Metriken in erwarteten Keys
+            completed_entry_for_t["cpu_percent"] = self._pending_entry.get("cpu_percent")
+            completed_entry_for_t["ram_mb"] = self._pending_entry.get("ram_mb")
 
-            # NEU: Inferenzzeit aus dem Pending-Eintrag (ms) in Sekunden übernehmen -> kommt in die CSV als 'inference_time_s'
-            try:
-                if "model_inference_time_ms" in self._pending_entry and self._pending_entry["model_inference_time_ms"] is not None:
-                    completed_entry_for_t["inference_time_s"] = float(self._pending_entry["model_inference_time_ms"]) / 1000.0
-            except Exception:
-                pass
+        # 6) System-Metriken abgreifen (in erwarteten Keys!)
+        cpu_percent = None
+        ram_mb = None
+        try:
+            from ML_Helpfunctions.Pipeline_Utils import PipelineUtils
+            cpu_percent = float(PipelineUtils.get_cpu_usage())
+            ram_mb = float(PipelineUtils.get_memory_usage())
+        except Exception:
+            pass
 
-        # 5) Neuen Pending-Eintrag für Zeitpunkt t+1 vorbereiten
+        # 7) neuen Pending für t+1 setzen (mit erwarteten Keys)
+        import pandas as pd
         self._pending_entry = {
             "datetime": timestamp_t + pd.Timedelta(seconds=self.config.get("inference_interval_sec", 1.0)),
-            "prediction": float(future_pred_unscaled[0]) if future_pred_unscaled.size > 0 else None,
+            "prediction": float(future_pred_unscaled[0]) if np.isfinite(future_pred_unscaled[0]) else None,
             "true_value": None,
             "rolling_forecast": future_pred_unscaled.tolist(),
-            "cpu_load": Pipeline_Utils.get_cpu_usage(),
-            "ram_usage": Pipeline_Utils.get_memory_usage(),
+            "cpu_percent": cpu_percent,
+            "ram_mb": ram_mb,
             "model_inference_time_ms": float(t_inf_ms),
-            "total_processing_time_ms": float((time.perf_counter() - start_processing_time) * 1000.0)
+            "total_processing_time_ms": float((time.perf_counter() - start_processing_time) * 1000.0),
         }
 
-        # 6) Housekeeping
+        # 8) Housekeeping + Fallback für ersten Schritt
         self.step_counter += 1
-
-        # Falls dies der allererste Schritt war, gibt es noch keinen completed_entry_for_t
         if completed_entry_for_t is None:
             completed_entry_for_t = {
                 "datetime": timestamp_t,
                 "prediction": None,
                 "true_value": float(true_value_t) if true_value_t is not None else None,
+                "cpu_percent": cpu_percent,
+                "ram_mb": ram_mb,
             }
 
-        # Forecast (H-Schritte) am Eintrag für t hinterlegen
+        # kompletten Horizon am t-Eintrag hinterlegen
         completed_entry_for_t["future_forecast"] = future_pred_unscaled.tolist()
 
-        # 7) Logging für Übersicht
+        # 9) Logging
         true_str = (
             f"{completed_entry_for_t['true_value']:.4f}"
             if completed_entry_for_t.get("true_value") is not None else "N/A"
@@ -216,7 +305,9 @@ class BaseInferenceProcessor(ABC):
             f"{completed_entry_for_t['prediction']:.4f}"
             if completed_entry_for_t.get("prediction") is not None else "Warte..."
         )
-        pred_str_t_plus_1 = f"{future_pred_unscaled[0]:.4f}" if future_pred_unscaled.size > 0 else "N/A"
+        pred_str_t_plus_1 = (
+            f"{future_pred_unscaled[0]:.4f}" if np.isfinite(future_pred_unscaled[0]) else "N/A"
+        )
         ts_str = timestamp_t.strftime("%H:%M:%S.%f")[:-3] if hasattr(timestamp_t, "strftime") else str(timestamp_t)
 
         logging.info(
@@ -226,6 +317,8 @@ class BaseInferenceProcessor(ABC):
         )
 
         return completed_entry_for_t
+
+
 
     def get_data_source_iterator(self):
         strategy = self.config.get("loading_strategy", "split")
@@ -258,7 +351,29 @@ class BaseInferenceProcessor(ABC):
                 return
 
             horizon = int(self.config.get("horizon", 1))
-            y_pred = np.stack(df_valid["rolling_forecast"].to_numpy())
+
+            import numpy as np
+            h = int(self.config.get("horizon", 1))
+
+            # Forecast-Spalte erkennen
+            if "rolling_forecast" in df_valid.columns:
+                fc_col = "rolling_forecast"
+            elif "future_forecast" in df_valid.columns:
+                fc_col = "future_forecast"
+            else:
+                logging.error("Finale Auswertung: Keine Forecast-Spalte ('rolling_forecast' oder 'future_forecast') gefunden.")
+                return None
+
+            def _to_fixed(vec, H):
+                arr = np.asarray(vec, dtype=float).reshape(-1)
+                if arr.size >= H:
+                    return arr[:H]
+                out = np.empty(H, dtype=float)
+                out[:] = np.nan
+                out[:arr.size] = arr
+                return out
+
+            y_pred = np.vstack([_to_fixed(v, h) for v in df_valid[fc_col].tolist()])
             y_true_1d = df_valid["true_value"].to_numpy()
             y_true = np.tile(y_true_1d.reshape(-1, 1), reps=(1, y_pred.shape[1]))
 

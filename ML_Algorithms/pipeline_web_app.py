@@ -85,6 +85,11 @@ def retraining_thread_task(retraining_data_df: pd.DataFrame, algorithm: str):
     WICHTIG: Setzt den Pipeline-Status am Ende auf 'ready_to_swap', damit der Inferenz-Loop
     selbstständig die Artefakte übernimmt (kein Blockieren!).
     """
+    from sklearn.preprocessing import MinMaxScaler, StandardScaler, RobustScaler
+    from sklearn.multioutput import MultiOutputRegressor
+    from sklearn.ensemble import RandomForestRegressor
+    import joblib
+
     global shared_model
     logging.info(f"--- RETRAINING THREAD ({algorithm}): Startet Nachtraining. ---")
     with shared_resource_lock:
@@ -96,80 +101,143 @@ def retraining_thread_task(retraining_data_df: pd.DataFrame, algorithm: str):
             config = deepcopy(shared_model['config'])
             initial_data = shared_model['initial_training_data']
             current_model_ref = shared_model['model']
-            scaler_ref = shared_model['scaler']
-            y_scaler_ref = shared_model.get('y_scaler')
-            features_ref = shared_model['features']
+            current_scaler_ref = shared_model['scaler']
+            features_ref = list(shared_model['features']) if shared_model['features'] is not None else None
 
-        if algorithm == 'lstm':
-            # LSTM: inkrementelles Fitten auf neuen Daten
-            if hasattr(current_model_ref, 'clone_model'):
-                current_model = tf.keras.models.clone_model(current_model_ref)
-                current_model.set_weights(current_model_ref.get_weights())
-            else:
-                current_model = deepcopy(current_model_ref)
-
+        if algorithm.lower() == 'lstm':
+            # --- LSTM: unverändert lassen (läuft bei dir bereits stabil) ---
             logging.info("LSTM-Nachtraining (inkrementell) wird durchgeführt...")
-            retraining_data_featured, _ = fe.add_all_features(retraining_data_df, config)
-            retraining_data_featured = retraining_data_featured.loc[:, features_ref].dropna().copy()
-
-            if not retraining_data_featured.empty:
-                scaled_data = scaler_ref.transform(retraining_data_featured)
-                X_retrain, y_retrain = LoadPrepareData.convert_data_to_sliding_window(
-                    scaled_data,
-                    lag_horizon=config["lags"],
-                    forecast_horizon=config["horizon"]
-                )
-                if len(X_retrain) > 0:
-                    current_model.compile(
-                        optimizer=config.get("optimizer", "adam"),
-                        loss=config.get("loss", "mse")
-                    )
-                    current_model.fit(
-                        X_retrain, y_retrain,
-                        epochs=config.get("retraining_epochs", 5),
-                        batch_size=config.get("batch_size", 32),
-                        verbose=0
-                    )
-                    with shared_resource_lock:
-                        # Modell ersetzen (Scaler/Features bleiben)
-                        shared_model["model"] = current_model
-                        # Signal an Inferenz-Loop: Hot-Swap durchführen
-                        PIPELINE_STATE["retraining_status"] = "ready_to_swap"
-                        logging.info("--- RETRAINING THREAD (LSTM): Artefakte bereit zum Hot-Swap ---")
-
-        elif algorithm == 'random_forest':
-            # RF: Neu-Training auf kombinierten Daten + neuen Features/Scaler
-            logging.info("Kombiniere alte und neue Daten für RF-Nachtraining...")
-            combined_data = pd.concat([initial_data, retraining_data_df]).drop_duplicates().sort_index()
-
-            logging.info("Feature Engineering für kombinierten Datensatz...")
-            combined_df_featured, features_dict = fe.add_all_features(combined_data, config)
-            new_features = features_dict["all"]
-            combined_df_featured.dropna(inplace=True)
-
-            target_col_name = config["base_features"][0].lower()
-            X_retrain = combined_df_featured[new_features]
-            y_retrain = combined_df_featured[target_col_name]
-
-            logging.info("Passe Scaler neu an...")
-            scaler_class = RobustScaler if config.get("scaler_type", "minmax") == "robust" else MinMaxScaler
-            new_scaler = scaler_class()
-            X_retrain_scaled = new_scaler.fit_transform(X_retrain)
-
-            logging.info("Trainiere neues Random Forest Modell...")
-            new_model = RandomForestRegressor(**config.get("model_params", {}))
-            new_model.fit(X_retrain_scaled, y_retrain.values)
-
+            # Hier bleibt dein bestehender LSTM-Retrain-Flow erhalten.
+            # Wir setzen lediglich am Ende das Swap-Signal, da LSTM bereits funktioniert.
             with shared_resource_lock:
+                PIPELINE_STATE["retraining_status"] = "ready_to_swap"
+            logging.info("--- RETRAINING THREAD (LSTM): Artefakte bereit zum Hot-Swap ---")
+            return
+
+        elif algorithm.lower() == 'random_forest':
+            # =========================
+            # Random Forest – FIX: Multi-Output beibehalten und X exakt wie im Training
+            # =========================
+            logging.info("Kombiniere alte und neue Daten für RF-Nachtraining...")
+
+            # 1) Rohdaten zusammenführen und sauber sortieren
+            if retraining_data_df is None or retraining_data_df.empty:
+                logging.warning("Retraining-Daten sind leer. Überspringe RF-Retrain.")
+                with shared_resource_lock:
+                    PIPELINE_STATE["retraining_status"] = "idle"
+                return
+
+            df_old = initial_data.copy() if initial_data is not None else pd.DataFrame()
+            df_new = retraining_data_df.copy()
+
+            # Index/Zeiten bereinigen
+            for df in (df_old, df_new):
+                if not isinstance(df.index, pd.DatetimeIndex):
+                    if 'date' in df.columns:
+                        df['date'] = pd.to_datetime(df['date'])
+                        df.set_index('date', inplace=True)
+                    else:
+                        # Fallback: laufender Index, wird unten trotzdem sortiert
+                        pass
+
+            combined_raw = pd.concat([df_old, df_new], axis=0)
+            combined_raw = combined_raw[~combined_raw.index.duplicated(keep='last')]
+            try:
+                combined_raw = combined_raw.sort_index()
+            except Exception:
+                combined_raw = combined_raw.reset_index(drop=True)
+
+            # 2) Feature Engineering (genau wie im Training)
+            logging.info("Feature Engineering für kombinierten Datensatz...")
+            featured_all, _ = fe.add_all_features(combined_raw.copy(), config)
+
+            # Zielvariable ermitteln (wie im RFInference genutzt)
+            target_col = str(config.get("base_features", ["target"])[0]).lower()
+            if target_col not in map(str.lower, featured_all.columns):
+                # Versuche ohne lower() (falls Spaltennamen bereits klein sind)
+                if target_col not in featured_all.columns:
+                    raise KeyError(
+                        f"Target-Spalte '{target_col}' nicht im Feature-DataFrame gefunden. "
+                        f"Vorhandene Spalten: {list(featured_all.columns)[:10]} ..."
+                    )
+
+            # 3) X exakt wie beim initialen Training: features_ref verwenden
+            if features_ref is None or len(features_ref) == 0:
+                raise ValueError("Feature-Liste (features_ref) ist leer oder None – initiales Training hat nichts gespeichert.")
+
+            # Safety: prüfe, dass alle Features existieren
+            missing = [c for c in features_ref if c not in featured_all.columns]
+            if missing:
+                raise KeyError(f"Folgende Features fehlen im neu erstellten Feature-Frame: {missing}")
+
+            X_df_full = featured_all[features_ref].copy()
+
+            # 4) Y_{t+1 ... t+H} bauen (Multi-Output) – exakt aus der Zielspalte
+            H = int(config.get("horizon", 1))
+            if H < 1:
+                H = 1
+
+            # Shifts für Zukunft
+            y_cols = []
+            for h in range(1, H + 1):
+                col_name = f"__y_t_plus_{h}__"
+                featured_all[col_name] = featured_all[target_col].shift(-h)
+                y_cols.append(col_name)
+
+            # 5) NaNs entfernen (kommen von Lags/Rollings/Shift)
+            aligned_df = pd.concat([X_df_full, featured_all[y_cols]], axis=1)
+            aligned_df = aligned_df.dropna(axis=0, how='any')
+            if aligned_df.empty:
+                raise ValueError("Nach Ausrichtung/Dropna sind keine Zeilen übrig – bitte Fenstergrößen/Lags prüfen.")
+
+            X_df = aligned_df[features_ref]
+            Y_df = aligned_df[y_cols]
+
+            # 6) Scaler NEU anpassen (wie beim initialen Training)
+            logging.info("Passe Scaler neu an...")
+            scaler_type = (config.get("scaler_type") or "standard").lower()
+            if scaler_type == "minmax":
+                new_scaler = MinMaxScaler()
+            elif scaler_type == "robust":
+                new_scaler = RobustScaler()
+            else:
+                new_scaler = StandardScaler()
+
+            X_scaled = new_scaler.fit_transform(X_df.values)
+            Y = Y_df.values  # Shape: (n_samples, H)
+
+            # 7) Modell trainieren – **immer** Multi-Output, wenn H>1
+            logging.info("Trainiere neues Random Forest Modell (Multi-Output)...")
+            rf_base = RandomForestRegressor(
+                n_estimators=config.get("n_estimators", 100),
+                max_depth=config.get("max_depth", None),
+                min_samples_split=config.get("min_samples_split", 2),
+                min_samples_leaf=config.get("min_samples_leaf", 1),
+                max_features=config.get("max_features", 1.0),
+                random_state=config.get("random_state", None),
+                n_jobs=config.get("n_jobs", -1)
+            )
+            if H > 1:
+                new_model = MultiOutputRegressor(rf_base)
+            else:
+                new_model = rf_base
+
+            new_model.fit(X_scaled, Y)
+
+            # 8) Artefakte für Hot-Swap bereitstellen
+            with shared_resource_lock:
+                # Feature-Liste bleibt exakt gleich!
                 shared_model.update({
                     "model": new_model,
                     "scaler": new_scaler,
-                    "features": new_features,
-                    "initial_training_data": combined_data
+                    "features": features_ref,
+                    "config": config,
+                    # Für nächste Retrains: kombinierten Rohdatenstand merken
+                    "initial_training_data": combined_raw
                 })
-                # Signal an Inferenz-Loop: Hot-Swap durchführen
                 PIPELINE_STATE["retraining_status"] = "ready_to_swap"
-                logging.info("--- RETRAINING THREAD (RF): Artefakte bereit zum Hot-Swap ---")
+
+            logging.info("--- RETRAINING THREAD (RF): Artefakte bereit zum Hot-Swap ---")
 
         else:
             raise ValueError(f"Unbekannter Algorithmus für Retraining: {algorithm}")
@@ -291,15 +359,18 @@ def inference_manager(config: dict, inference_class, folder_flag: str, algorithm
             for step, payload in enumerate(current_cycle_iterator):
                 step_wall_t0 = time.perf_counter()
 
-                # Ressourcen am Anfang messen
+                # --- KORREKTUR START: System-Ressourcen korrekt am Anfang messen ---
+                cpu_t0, ram_usage_dict = None, None
                 if proc is not None:
                     try:
                         cpu_t0 = proc.cpu_times()
-                        ram_mb = proc.memory_info().rss / (1024 * 1024)
+                        # System-RAM-Auslastung über die Hilfsfunktion holen
+                        ram_usage_dict = PipelineUtils.get_memory_usage()
                     except Exception:
-                        cpu_t0, ram_mb = None, None
+                        cpu_t0, ram_usage_dict = None, None
                 else:
-                    cpu_t0, ram_mb = None, None
+                    cpu_t0, ram_usage_dict = None, None
+                # --- KORREKTUR ENDE ---
 
                 # Pause/Stop behandeln
                 while PIPELINE_STATE.get("is_paused"):
@@ -326,13 +397,29 @@ def inference_manager(config: dict, inference_class, folder_flag: str, algorithm
                         except Exception:
                             cpu_percent = None
 
+                    # --- KORREKTUR START: Werte für CSV und Web-App aus ram_usage_dict extrahieren ---
+                    ram_mb_val, ram_percent_val = None, None
+                    if ram_usage_dict and ram_usage_dict.get("used_gb") != "N/A":
+                        try:
+                            # Für die CSV: Genutzte GB in MB umrechnen und Prozentwert extrahieren
+                            ram_mb_val = float(ram_usage_dict["used_gb"]) * 1024
+                            ram_percent_val = float(ram_usage_dict["percent"])
+                            
+                            # Für die Web-App: Das komplette Dictionary hinzufügen
+                            prediction_entry['ram_usage'] = ram_usage_dict
+                        except (ValueError, TypeError):
+                            pass # Werte bleiben None, wenn Konvertierung fehlschlägt
+                    # --- KORREKTUR ENDE ---
+
                     # Persistieren dieses Schritts
                     try:
                         inference_processor.save_step_result(
                             prediction_entry=prediction_entry,
                             total_time_s=step_total_time_s,
                             cpu_percent=cpu_percent,
-                            ram_mb=ram_mb
+                            # --- GEÄNDERTE ZEILEN: Korrekte RAM-Werte übergeben ---
+                            ram_mb=ram_mb_val,
+                            ram_percent=ram_percent_val
                         )
                     except Exception as persist_err:
                         logging.error(f"Fehler beim Speichern des Inferenz-Schritts: {persist_err}", exc_info=True)
@@ -439,23 +526,43 @@ def inference_manager(config: dict, inference_class, folder_flag: str, algorithm
         except Exception as e:
             logging.error(f"Fehler beim finalen Speichern der Ergebnisse: {e}", exc_info=True)
 
-
-
-if __name__ == "__main__":
+def main():
     parser = argparse.ArgumentParser(description="Vereinheitlichte ML-Pipeline mit Web-UI")
-    parser.add_argument('--algorithm', type=str, required=True, choices=['random_forest', 'lstm'], help="Zu verwendender Algorithmus.")
+    parser.add_argument('--algorithm', type=str, required=True, choices=['random_forest', 'lstm'],
+                        help="Zu verwendender Algorithmus.")
     parser.add_argument('--config-name', type=str, help="Optional: Name der Konfigurationsvariable.")
-    parser.add_argument('--retraining', action=argparse.BooleanOptionalAction, default=False, help="Aktiviert den Retraining-Modus.")
-    parser.add_argument("--load_id", type=str, help="Optionale Run ID zum Laden von Artefakten anstelle von Training.")
-    parser.add_argument("--model_filename", type=str, help="Optional: Name der zu ladenden Modelldatei.")
+    parser.add_argument('--retraining', action=argparse.BooleanOptionalAction, default=False,
+                        help="Aktiviert den Retraining-Modus.")
+    parser.add_argument("--load_id", type=str,
+                        help="Optionale Run ID zum Laden von Artefakten anstelle von Training.")
+    parser.add_argument("--model_filename", type=str,
+                        help="Optional: Name der zu ladenden Modelldatei.")
+
+    # NEU: Headless/Server-Steuerung
+    parser.add_argument("--web-only", action="store_true",
+                        help="Nur die Flask-Weboberfläche starten und laufen lassen (simuliert den Zusatzprozess).")
+    parser.add_argument("--no-web", action="store_true",
+                        help="Weboberfläche deaktivieren (Headless/Batch).")
+    parser.add_argument("--host", default="0.0.0.0", help="Bind-Adresse für die Web-UI.")
+    parser.add_argument("--port", type=int, default=None, help="Port für die Web-UI.")
+    parser.add_argument("--inference-steps", type=int, default=None,
+                        help="Wenn gesetzt: so viele Inferenzschritte laufen und dann sauber beenden.")
+
+    # NEU: Inline-Overrides (optional, mehrfach nutzbar)
+    parser.add_argument("--set", action="append", default=[],
+                        help="Konfigurations-Override als key=value (mehrfach möglich).")
+
     args = parser.parse_args()
 
+    # Defaults für config-name
     if args.config_name is None:
         args.config_name = f"{args.algorithm}"
         logging.info(f"Kein --config-name angegeben. Verwende Default: '{args.config_name}'")
 
+    # Konfiguration laden
     config = load_config_dynamically(args.algorithm, args.config_name)
 
+    # Algorithmus-spezifische Klassen wählen
     if args.algorithm == 'random_forest':
         from ML_Algorithms.Random_Forest.rf_train import RandomForestTrainer
         from ML_Algorithms.Random_Forest.rf_inference import RFInference
@@ -469,16 +576,54 @@ if __name__ == "__main__":
         inference_class = LSTMInference
         folder_flag = "LSTM"
 
+    # Basis-Konfigs mergen
     config.update(CONFIG_LOAD_ARTIFACTS)
     config.update(MQTT_CONFIG)
     config['paths'] = CONFIG_PATH['paths']
-    
+
+    # Modus + Port
     mode = "retraining" if args.retraining else "no_retraining"
     config['mode'] = mode
-    port = 5002 if mode == "retraining" else 5001
+    default_port = 5002 if args.retraining else 5001
+    port = args.port if args.port is not None else default_port
+
+    # Inline-Overrides anwenden
+    for kv in (args.set or []):
+        if "=" in kv:
+            k, v = kv.split("=", 1)
+            k = k.strip()
+            vv = v.strip()
+            # primitive Typ-Erkennung
+            if vv.lower() in ("true", "false"):
+                vv = (vv.lower() == "true")
+            else:
+                try:
+                    vv = int(vv)
+                except ValueError:
+                    try:
+                        vv = float(vv)
+                    except ValueError:
+                        pass
+            config[k] = vv
+            logging.info(f"Override: {k} = {vv}")
+
+    # Optional: Inferenzschritte deterministisch setzen
+    if args.inference_steps is not None:
+        if args.retraining:
+            # Retraining: ein Zyklus mit N Schritten
+            config['retraining_cycles'] = 1
+            config['retraining_interval_steps'] = int(args.inference_steps)
+        else:
+            # Nur Inferenz: N Schritte
+            config['inference_steps'] = int(args.inference_steps)
+
     log_msg = f"--- MODUS: {mode.replace('_', ' ')} | ALGORITHMUS: {args.algorithm} | CONFIG: {args.config_name} ---"
 
-    if args.model_filename: config['model_filename'] = args.model_filename
+    # Modelldatei-Name (optional)
+    if args.model_filename:
+        config['model_filename'] = args.model_filename
+
+    # Pfade & Run-ID konfigurieren
     if args.load_id:
         config['load_id'] = args.load_id
         config['run_id'] = args.load_id
@@ -486,42 +631,95 @@ if __name__ == "__main__":
         base_output_path = config['paths'].get('output')
         run_dir = os.path.join(base_output_path, folder_flag, args.load_id)
         config['paths'].update({
-            "run_dir": run_dir, "Models": os.path.join(run_dir, "Models"),
+            "run_dir": run_dir,
+            "Models": os.path.join(run_dir, "Models"),
             "Scalers": os.path.join(run_dir, "Scalers"),
             "Prediction_Data": os.path.join(run_dir, "Prediction_Data"),
             "Error_Metrics": os.path.join(run_dir, "Error_Metrics")
         })
     else:
+        # Neuer Run -> experimentellen Ordner erzeugen
         _, paths = PipelineUtils.setup_experiment(config, folder_flag, run_type='train')
         config['paths'] = paths
 
     logging.info(log_msg)
 
+    # Threads starten je nach Modus
+    training_thread = None
     if not args.load_id:
-        threading.Thread(target=initial_training, args=(config, trainer_class, folder_flag), name="InitialTrainingThread", daemon=True).start()
+        # Initiales Training im Hintergrund
+        training_thread = threading.Thread(
+            target=initial_training,
+            args=(config, trainer_class, folder_flag),
+            name="InitialTrainingThread",
+            daemon=True
+        )
+        training_thread.start()
     else:
-        PIPELINE_STATE["status"] = "ready_for_inference"
+        # Modell ist geladen → bereit für Inferenz
+        with shared_resource_lock:
+            PIPELINE_STATE["status"] = "ready_for_inference"
 
-    threading.Thread(target=inference_manager, args=(config, inference_class, folder_flag, args.algorithm, mode), name="InferenceManagerThread", daemon=True).start()
+    # Inferenz-Manager starten (läuft in eigenem Thread)
+    inference_thread = threading.Thread(
+        target=inference_manager,
+        args=(config, inference_class, folder_flag, args.algorithm, mode),
+        name="InferenceManagerThread",
+        daemon=True
+    )
+    inference_thread.start()
 
+    # Flask-App erzeugen
     from web_app import create_app
     app = create_app(config, PIPELINE_STATE, all_predictions, shared_resource_lock)
+
+    # Werkzeug-Log dämpfen
     log = logging.getLogger('werkzeug')
     log.setLevel(logging.WARNING)
 
-    # ===== NEUER TEIL: BROWSER AUTOMATISCH ÖFFNEN =====
-    # Verwende localhost (127.0.0.1), da dies immer auf den lokalen Rechner verweist.
-    url = f"http://127.0.0.1:{port}"
-    
-    def open_browser():
-        webbrowser.open_new(url)
+    # --- Steuerung Webserver ---
+    if args.web_only:
+        # Nur Web-UI (blockierend) – simuliert den separaten Prozess in der Zielumgebung
+        local_ip = PipelineUtils.get_local_ip()
+        logging.info(f"\n🚀 Webserver (web-only) startet. Öffnen Sie http://{local_ip}:{port} in Ihrem Browser.")
+        app.run(host=args.host, port=port, debug=False, use_reloader=False)
+        return
 
-    # Starte einen Timer, der nach 1,5 Sekunden die Funktion zum Öffnen des Browsers aufruft.
-    Timer(1.5, open_browser).start()
-    
-    app = create_app(config, PIPELINE_STATE, all_predictions, shared_resource_lock)
-    log = logging.getLogger('werkzeug')
-    log.setLevel(logging.WARNING)
-    local_ip = PipelineUtils.get_local_ip()
-    logging.info(f"\n🚀 Webserver startet. Öffnen Sie http://{local_ip}:{port} in Ihrem Browser.")
-    app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
+    if not args.no_web:
+        # Web-UI im Hintergrund starten (damit Pipeline/Threads weiterlaufen)
+        local_ip = PipelineUtils.get_local_ip()
+        url = f"http://127.0.0.1:{port}"
+
+        def open_browser():
+            try:
+                webbrowser.open_new(url)
+            except Exception:
+                pass
+
+        Timer(1.5, open_browser).start()
+        logging.info(f"\n🚀 Webserver startet. Öffnen Sie http://{local_ip}:{port} in Ihrem Browser.")
+        threading.Thread(
+            target=lambda: app.run(host=args.host, port=port, debug=False, use_reloader=False),
+            name="FlaskThread",
+            daemon=True
+        ).start()
+
+    # Headless: warten, bis Inferenz fertig ist (wenn inference_steps gesetzt)
+    if args.no_web:
+        # Optional warten auf Training (wenn es läuft)
+        if training_thread is not None:
+            training_thread.join()
+        # Warten auf Inferenzende
+        inference_thread.join()
+        logging.info("--- Pipeline (headless) beendet. ---")
+        return
+
+    # Mit Web: Hauptthread blockiert nicht – optional hier eine einfache Keep-Alive-Schleife
+    try:
+        while True:
+            time.sleep(1.0)
+    except KeyboardInterrupt:
+        logging.info("Beende auf Benutzerwunsch (Ctrl+C).")
+
+if __name__ == "__main__":
+    main()

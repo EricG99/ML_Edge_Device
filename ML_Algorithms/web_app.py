@@ -31,56 +31,111 @@ def create_app(app_config, pipeline_state, predictions_list, lock, *, template_n
         with app.config['LOCK']:
             return jsonify(app.config['PIPELINE_STATE'].copy())
 
+# In web_app.py, innerhalb create_app(...):
+
     @app.route('/api/data')
     def get_data():
         """
-        Liefert den Eintrag für den angefragten Schritt (inkl. abgeleiteter Felder
-        für 1-Schritt-Prognose und Zukunftsprognose). Verwendet IMMER
-        'inference_interval_sec' für die Zeitstempel-Berechnung.
+        Liefert den nächsten verfügbaren Schritt für das Dashboard.
+        Bricht Forecast in (1-Schritt + restliche Zukunft) auf und liefert CPU/RAM mit.
         """
-        step_index = request.args.get('step', type=int, default=0)
+        # Optional: gezielt einen Schritt holen (?step=N)
+        try:
+            step_idx = int(request.args.get('step')) if 'step' in request.args else None
+        except Exception:
+            step_idx = None
 
         with app.config['LOCK']:
             preds = app.config['PREDICTIONS']
             state = app.config['PIPELINE_STATE']
+            cfg = app.config['APP_CONFIG']
 
-            if step_index < len(preds):
-                entry = dict(preds[step_index])  # shallow copy
-
-                # Datetime normalisieren
-                dt = entry.get('datetime')
-                if isinstance(dt, (datetime, Timestamp)):
-                    entry['datetime'] = dt.isoformat()
-                elif hasattr(dt, 'to_pydatetime'):
-                    entry['datetime'] = dt.to_pydatetime().isoformat()
-
-                # Zukunfts-Prognosefeld auftrennen
-                full_forecast = entry.get("future_forecast", [])
-                if full_forecast:
-                    # KORREKTUR: Immer inference_interval_sec verwenden
-                    interval_sec = app.config['APP_CONFIG'].get("inference_interval_sec", 1.0)
-                    base_ts = Timestamp(entry['datetime']) if not isinstance(dt, (datetime, Timestamp)) else dt
-
-                    # 1-Schritt-Prognose
-                    entry['prediction_1_step'] = full_forecast[0]
-                    entry['prediction_1_step_date'] = (base_ts + timedelta(seconds=interval_sec)).isoformat()
-
-                    # Restliche Zukunft
-                    remaining_forecast = full_forecast[1:]
-                    entry['future_forecast'] = remaining_forecast
-                    entry['future_forecast_dates'] = [
-                        (base_ts + timedelta(seconds=(i + 2) * interval_sec)).isoformat()
-                        for i in range(len(remaining_forecast))
-                    ]
-                else:
-                    entry['prediction_1_step'] = None
-                    entry['prediction_1_step_date'] = None
-                    entry['future_forecast'] = []
-                    entry['future_forecast_dates'] = []
-
-                return jsonify({"status": "success", "data": entry})
+            # Schritt selektieren
+            if step_idx is not None:
+                entry = preds[step_idx] if 0 <= step_idx < len(preds) else None
             else:
-                return jsonify({"status": "waiting"})
+                entry = preds[-1] if preds else None
+
+        if entry is None:
+            return jsonify({"status": "waiting"})
+
+        # --- Datum normalisieren ---
+        from datetime import datetime, timedelta
+        try:
+            from pandas import Timestamp
+        except Exception:
+            Timestamp = datetime
+
+        dt = entry.get('datetime')
+        if dt is not None and not isinstance(dt, (datetime, Timestamp)):
+            # ISO-String -> Timestamp
+            try:
+                dt = Timestamp(dt)
+            except Exception:
+                pass
+        # Für JSON: ISO-String ausgeben
+        if isinstance(dt, (datetime, Timestamp)):
+            entry['datetime'] = (dt.to_pydatetime() if hasattr(dt, 'to_pydatetime') else dt).isoformat()
+
+        # --- Forecast aufsplitten: (h1) + (h2..hH) ---
+        full_forecast = entry.get("future_forecast", []) or entry.get("rolling_forecast", []) or []
+        horizon = int(cfg.get("horizon", 1))
+        interval_sec = float(cfg.get("inference_interval_sec", 1.0))
+
+        if isinstance(dt, (datetime, Timestamp)):
+            base_ts = dt if isinstance(dt, Timestamp) else Timestamp(dt)
+        else:
+            base_ts = None
+
+        if full_forecast and base_ts is not None:
+            pred_1 = full_forecast[0]
+            pred_1_date = (base_ts + timedelta(seconds=interval_sec)).isoformat()
+
+            rest = full_forecast[1:horizon]
+            rest_dates = [
+                (base_ts + timedelta(seconds=(i + 2) * interval_sec)).isoformat()
+                for i in range(len(rest))
+            ]
+        else:
+            pred_1, pred_1_date, rest, rest_dates = None, None, [], []
+
+        # --- CPU/RAM: Schritt-Werte bevorzugen, sonst live messen ---
+        # CPU:
+        cpu_from_step = entry.get("cpu_load")
+        if cpu_from_step is None:
+            cpu_from_step = entry.get("cpu_percent")
+        if cpu_from_step is None:
+            from ML_Helpfunctions import Pipeline_Utils
+            cpu_from_step = Pipeline_Utils.get_cpu_usage()
+        try:
+            cpu_from_step = float(cpu_from_step) if cpu_from_step is not None else None
+        except Exception:
+            cpu_from_step = None
+
+        # RAM:
+        ram_from_step = entry.get("ram_usage")
+        if ram_from_step is None and entry.get("ram_mb") is not None:
+            # In MB: in GB/Percent umrechnen so gut es geht (Percent unbekannt)
+            try:
+                used_gb = float(entry["ram_mb"]) / 1024.0
+                ram_from_step = {"total_gb": "N/A", "used_gb": round(used_gb, 2), "percent": None}
+            except Exception:
+                ram_from_step = None
+
+        if ram_from_step is None:
+            from ML_Helpfunctions import Pipeline_Utils
+            ram_from_step = Pipeline_Utils.get_memory_usage()
+
+        # Antwort-Objekt zusammenbauen (nur Felder, die das Frontend nutzt)
+        out = dict(entry)  # Kopie
+        out["prediction_1_step"] = pred_1
+        out["prediction_1_step_date"] = pred_1_date
+        out["future_forecast"] = rest
+        out["future_forecast_dates"] = rest_dates
+        out["cpu_load"] = cpu_from_step
+        out["ram"] = ram_from_step
+
+        return jsonify({"status": "success", "data": out})
 
 
     @app.route('/api/control', methods=['POST'])

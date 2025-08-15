@@ -270,6 +270,8 @@ def save_metrics_summary(
     return os.path.abspath(json_path)
 
 
+# In Pipeline_Utils.py
+
 def append_prediction_step(
     config: dict,
     date: datetime,
@@ -279,6 +281,9 @@ def append_prediction_step(
     total_time_s: float | None,
     cpu_percent: float | None = None,   # CPU in %
     ram_mb: float | None = None,        # RAM in MB (RSS)
+    # --- NEUE ZEILE START ---
+    ram_percent: float | None = None,   # RAM in %
+    # --- NEUE ZEILE ENDE ---
     breakdown: dict | None = None,
     output_path: str | None = None
 ) -> str:
@@ -316,6 +321,9 @@ def append_prediction_step(
         "total_time_s": float(total_time_s) if total_time_s is not None else None,
         "cpu_percent": float(cpu_percent) if cpu_percent is not None else None,
         "ram_mb": float(ram_mb) if ram_mb is not None else None,
+        # --- NEUE ZEILE START ---
+        "ram_percent": float(ram_percent) if ram_percent is not None else None,
+        # --- NEUE ZEILE ENDE ---
     }
     for h in range(horizon):
         row[f"pred_h{h+1}"] = forecast[h]
@@ -327,6 +335,7 @@ def append_prediction_step(
     write_header = not os.path.exists(output_path)
     pd.DataFrame([row]).to_csv(output_path, index=False, mode="a", header=write_header)
     return os.path.abspath(output_path)
+
 
 def evaluate_all_metrics(y_true, y_pred, y_train=None, horizon=1, alpha=0.8):
     """
@@ -573,16 +582,36 @@ def setup_experiment(config: dict, folder_flag: str, run_type: str = None) -> tu
 # Modellbewertung
 # -------------------------------------------
 
+# In Pipeline_Utils.py
+import psutil
+import logging
+
+# Kleiner Priming-Status für Windows/Threads
+_CPU_PRIMED = False
+
 def get_cpu_usage() -> float:
     """
-    Gibt die aktuelle systemweite CPU-Auslastung als Prozentwert zurück.
-    
-    Returns:
-        float: CPU-Auslastung in Prozent.
+    Liefert die systemweite CPU-Last in Prozent (0..100).
+    Vermeidet das bekannte '0.0' beim ersten Aufruf durch kurzes Priming.
     """
-    # Der Parameter interval=None macht den Aufruf nicht-blockierend.
-    # Er misst die Auslastung seit dem letzten Aufruf.
-    return psutil.cpu_percent(interval=None)
+    global _CPU_PRIMED
+    try:
+        # Beim ersten Aufruf einmal kurz blockierend messen (Priming)
+        if not _CPU_PRIMED:
+            try:
+                psutil.cpu_percent(interval=0.15)  # ~150 ms
+            finally:
+                _CPU_PRIMED = True
+
+        # Danach non-blocking; wenn 0.0 zurückkommt, einmal kurz nachmessen
+        val = psutil.cpu_percent(interval=None)
+        if val == 0.0:
+            val = psutil.cpu_percent(interval=0.15)
+        return float(val)
+    except Exception:
+        logging.exception("get_cpu_usage() fehlgeschlagen.")
+        return 0.0
+
 
 def get_memory_usage():
     """
