@@ -1,0 +1,15 @@
+{
+  "model_name": "random_forest",
+  "deployment_profile": "edge",
+  "dataset": "C:\\Users\\ericg\\Documents\\Mechatronik M Sc\\6. Semster\\MA\\Dev_Ma\\ML_Edge_Device\\Input\\Input_Data\\mqtt_data_rate_limited.csv",
+  "lags": 4,
+  "horizon": 4,
+  "n_estimators": 97,
+  "max_depth": null,
+  "min_samples_split": 9,
+  "min_samples_leaf": 8,
+  "max_features": 0.7927942675868571,
+  "bootstrap": true,
+  "n_jobs": -1,
+  "random_state": 42
+}

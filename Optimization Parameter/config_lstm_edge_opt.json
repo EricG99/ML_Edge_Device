@@ -1,0 +1,84 @@
+{
+  "loading_strategy": "split",
+  "train_fraction": 0.8,
+  "validation_fraction": 0.2,
+  "inference_interval_sec": 1.0,
+  "dataset": "C:\\Users\\ericg\\Documents\\Mechatronik M Sc\\6. Semster\\MA\\Dev_Ma\\ML_Edge_Device\\Input\\Input_Data\\mqtt_data_rate_limited.csv",
+  "target_column": "Group4-2_S6_VolumetricFlowRate",
+  "exclude_columns": [
+    "time",
+    "datetime",
+    "recording_timestamp",
+    "duration"
+  ],
+  "lags": 4,
+  "horizon": 4,
+  "base_features": [
+    "Group4-2_S6_VolumetricFlowRate"
+  ],
+  "model_name": "lstm_edge_opt",
+  "search_space": {
+    "num_layers": {
+      "type": "fixed",
+      "value": 1
+    },
+    "initial_units": {
+      "type": "int",
+      "min": 18,
+      "max": 64
+    },
+    "dropout": {
+      "type": "float",
+      "min": 0.0,
+      "max": 0.35
+    },
+    "batch_size": {
+      "type": "int_choice",
+      "choices": [
+        16,
+        24,
+        32,
+        48,
+        64
+      ]
+    },
+    "epochs": {
+      "type": "int",
+      "min": 20,
+      "max": 60
+    },
+    "learning_rate": {
+      "type": "log_float",
+      "min": 0.0001,
+      "max": 0.005
+    },
+    "loss": {
+      "type": "choice",
+      "choices": [
+        "mse",
+        "mae",
+        "huber"
+      ]
+    },
+    "optimizer": {
+      "type": "choice",
+      "choices": [
+        "adam",
+        "rmsprop",
+        "nadam"
+      ]
+    },
+    "clipnorm": {
+      "type": "float",
+      "min": 0.5,
+      "max": 3.0
+    },
+    "weight_decay": {
+      "type": "log_float",
+      "min": 1e-06,
+      "max": 0.0003
+    }
+  },
+  "optimize_on": "server",
+  "deployment_profile": "edge"
+}

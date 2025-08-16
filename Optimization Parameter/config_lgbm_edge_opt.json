@@ -1,0 +1,76 @@
+{
+  "loading_strategy": "split",
+  "train_fraction": 0.8,
+  "validation_fraction": 0.2,
+  "dataset": "C:\\Users\\ericg\\Documents\\Mechatronik M Sc\\6. Semster\\MA\\Dev_Ma\\ML_Edge_Device\\Input\\Input_Data\\mqtt_data_rate_limited.csv",
+  "target_column": "Group4-2_S6_VolumetricFlowRate",
+  "exclude_columns": [
+    "time",
+    "datetime",
+    "recording_timestamp",
+    "duration"
+  ],
+  "lags": 4,
+  "horizon": 4,
+  "base_features": [
+    "Group4-2_S6_VolumetricFlowRate"
+  ],
+  "optimize_on": "server",
+  "model_name": "lightgbm_edge_opt",
+  "deployment_profile": "edge",
+  "search_space": {
+    "n_estimators": {
+      "type": "int",
+      "min": 200,
+      "max": 1000
+    },
+    "learning_rate": {
+      "type": "log_float",
+      "min": 0.01,
+      "max": 0.2
+    },
+    "num_leaves": {
+      "type": "int",
+      "min": 16,
+      "max": 64
+    },
+    "min_child_samples": {
+      "type": "int",
+      "min": 5,
+      "max": 50
+    },
+    "subsample": {
+      "type": "float",
+      "min": 0.6,
+      "max": 1.0
+    },
+    "colsample_bytree": {
+      "type": "float",
+      "min": 0.6,
+      "max": 1.0
+    },
+    "reg_alpha": {
+      "type": "log_float",
+      "min": 1e-06,
+      "max": 0.1
+    },
+    "reg_lambda": {
+      "type": "log_float",
+      "min": 0.001,
+      "max": 10.0
+    },
+    "max_bin": {
+      "type": "int",
+      "min": 63,
+      "max": 255
+    },
+    "random_state": {
+      "type": "fixed",
+      "value": 42
+    },
+    "n_jobs": {
+      "type": "fixed",
+      "value": -1
+    }
+  }
+}

@@ -16,7 +16,7 @@ if project_root not in sys.path:
 from ML_Helpfunctions.base_trainer import BaseTrainer
 from ML_Helpfunctions.Load_Prepare_Data import DataPipeline2D
 from ML_Helpfunctions import Pipeline_Utils as PipelineUtils
-from ML_Helpfunctions import RF_Utils as RFUtils
+from ML_Helpfunctions import RF_Utils as RFUtils # RF_Utils is already imported
 
 from config.config_ml_random_forest import random_forest
 from config.config_general import CONFIG_PATH
@@ -33,38 +33,21 @@ class RandomForestTrainer(BaseTrainer):
         return DataPipeline2D(self.config)
 
     def _train_model(self, X_train, y_train):
-        """Trainiert das Random Forest Modell (Multi-Output wird bei H>1 sichergestellt)."""
-        import time
-        import numpy as np
-        import logging
-        from sklearn.ensemble import RandomForestRegressor
-        from sklearn.multioutput import MultiOutputRegressor
-
-        H = int(self.config.get("horizon", 1))
-        rf_params = (self.config.get("rf_params") or {}).copy()
-
-        # Safety: y als 2D-Array
-        y_arr = np.asarray(y_train)
-        if y_arr.ndim == 1:
-            y_arr = y_arr.reshape(-1, 1)
-
-        # Modell bauen: bei mehrspaltigem y => MultiOutput, sonst je nach H
-        base_rf = RandomForestRegressor(**rf_params)
-        if y_arr.shape[1] > 1:
-            model = MultiOutputRegressor(base_rf)
-            logging.info("Random Forest: MultiOutputRegressor wird für horizon=%d verwendet.", y_arr.shape[1])
-        else:
-            model = base_rf if H == 1 else MultiOutputRegressor(base_rf)
-            if H > 1 and y_arr.shape[1] == 1:
-                logging.warning("RF-Training: y_train hat nur 1 Spalte, horizon=%d. "
-                                "Verwende MultiOutputRegressor (semantisch sollten Trainingslabels (N,H) sein).", H)
-
-        t0 = time.perf_counter()
-        model.fit(X_train, y_arr)
-        t1 = time.perf_counter()
-
+        """
+        Trainiert das Random Forest Modell durch Aufruf der zentralisierten 
+        Funktion in RF_Utils, um Code-Dopplung zu vermeiden.
+        """
+        logging.info("Delegating model training to RF_Utils.train_random_forest_model...")
+        
+        # The training logic is now centralized in RF_Utils
+        model, train_time = RFUtils.train_random_forest_model(
+            config=self.config,
+            X_train=X_train,
+            y_train=y_train
+        )
+        
         self.model = model
-        self.train_time = t1 - t0
+        self.train_time = train_time
 
         logging.info("Random Forest-Modell Training abgeschlossen.")
         logging.info("Trainingszeit für Random Forest: %.2f Sekunden.", self.train_time)
@@ -77,6 +60,10 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     # --- Basiskonfiguration (unverändert) ---
+    # NOTE: param_rf_test is not defined in the provided context, assuming it exists elsewhere.
+    # For demonstration, it's initialized as an empty dict.
+    param_rf_test = {} 
+    
     training_config = {**CONFIG_PATH, **param_rf_test}
     training_config.update({
         "dataset": "mqtt_data_rate_limited.csv",
@@ -91,5 +78,4 @@ if __name__ == "__main__":
     # Führe das Training aus und speichere die Artefakte standardmäßig
     trainer = RandomForestTrainer(config=training_config, folder_flag= FOLDER_FLAG)
     trainer.run(save_artifacts=True)  
-    # run_training(config=training_config, save_artifacts=True)
     logging.info("\n✅ Training complete. Artifacts have been saved.")

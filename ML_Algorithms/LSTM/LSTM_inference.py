@@ -83,45 +83,7 @@ class LSTMInference(BaseInferenceProcessor):
             logging.warning(f"⚠️ _post_load_artifacts: Ladepolitik konnte nicht angewendet werden ({e}).")
         return
 
-        try:
-            models_dir = self.config["paths"].get("Models")
-            candidates = []
-            if self.config.get("model_filename"):
-                candidates.append(os.path.join(models_dir, self.config.get("model_filename")))
-            candidates += [
-                os.path.join(models_dir, "model_quant_int8_full.tflite"),
-                os.path.join(models_dir, "model_quant_int8.tflite"),
-                os.path.join(models_dir, "model_quant_float16.tflite"),
-            ]
-            chosen = next((p for p in candidates if p and os.path.exists(p)), None)
-            if chosen:
-                interpreter = tf.lite.Interpreter(model_path=chosen)
-                interpreter.allocate_tensors()
-                in_det = interpreter.get_input_details()[0]
-                out_det = interpreter.get_output_details()[0]
-                logger.info(f"TFLite gewählt: {os.path.basename(chosen)} | Input={in_det['dtype']} {in_det['shape']} → Output={out_det['dtype']} {out_det['shape']}")
-                self.model = interpreter
-                logging.info(f"ℹ️ LSTM-Inferenz nutzt TFLite-Interpreter: {chosen}")
-        except Exception as e:
-            logging.warning(f"⚠️ TFLite-Interpreter konnte nicht geladen werden ({e}), nutze Keras-Modell.")
-        return
-        try:
-            models_dir = self.config["paths"].get("Models")
-            tfl_name = self.config.get("model_filename", "model_quant_float16.tflite")
-            tfl_path = os.path.join(models_dir, tfl_name)
-            if os.path.exists(tfl_path):
-                interpreter = tf.lite.Interpreter(model_path=tfl_path)
-                interpreter.allocate_tensors()
-                
-                in_det = interpreter.get_input_details()[0]
-                out_det = interpreter.get_output_details()[0]
-                logger.info(f"TFLite Input: Shape={in_det['shape']}, DType={in_det['dtype']}")
-                logger.info(f"TFLite Output: Shape={out_det['shape']}, DType={out_det['dtype']}")
-                
-                self.model = interpreter
-                logging.info(f"ℹ️ LSTM-Inferenz nutzt TFLite-Interpreter: {tfl_path}")
-        except Exception as e:
-            logging.warning(f"⚠️ TFLite-Interpreter konnte nicht geladen werden ({e}), nutze Keras-Modell.")
+
 
     # --- PATCH START ---
     # Patch: Robuste Methode zum Übernehmen des Puffers beim Hot-Swap
@@ -202,3 +164,44 @@ class LSTMInference(BaseInferenceProcessor):
             )
         pred_reshaped = np.asarray(prediction_scaled).reshape(-1, 1)
         return self.y_scaler.inverse_transform(pred_reshaped).flatten()
+    
+
+        #     try:
+        #     models_dir = self.config["paths"].get("Models")
+        #     candidates = []
+        #     if self.config.get("model_filename"):
+        #         candidates.append(os.path.join(models_dir, self.config.get("model_filename")))
+        #     candidates += [
+        #         os.path.join(models_dir, "model_quant_int8_full.tflite"),
+        #         os.path.join(models_dir, "model_quant_int8.tflite"),
+        #         os.path.join(models_dir, "model_quant_float16.tflite"),
+        #     ]
+        #     chosen = next((p for p in candidates if p and os.path.exists(p)), None)
+        #     if chosen:
+        #         interpreter = tf.lite.Interpreter(model_path=chosen)
+        #         interpreter.allocate_tensors()
+        #         in_det = interpreter.get_input_details()[0]
+        #         out_det = interpreter.get_output_details()[0]
+        #         logger.info(f"TFLite gewählt: {os.path.basename(chosen)} | Input={in_det['dtype']} {in_det['shape']} → Output={out_det['dtype']} {out_det['shape']}")
+        #         self.model = interpreter
+        #         logging.info(f"ℹ️ LSTM-Inferenz nutzt TFLite-Interpreter: {chosen}")
+        # except Exception as e:
+        #     logging.warning(f"⚠️ TFLite-Interpreter konnte nicht geladen werden ({e}), nutze Keras-Modell.")
+        # return
+        # try:
+        #     models_dir = self.config["paths"].get("Models")
+        #     tfl_name = self.config.get("model_filename", "model_quant_float16.tflite")
+        #     tfl_path = os.path.join(models_dir, tfl_name)
+        #     if os.path.exists(tfl_path):
+        #         interpreter = tf.lite.Interpreter(model_path=tfl_path)
+        #         interpreter.allocate_tensors()
+                
+        #         in_det = interpreter.get_input_details()[0]
+        #         out_det = interpreter.get_output_details()[0]
+        #         logger.info(f"TFLite Input: Shape={in_det['shape']}, DType={in_det['dtype']}")
+        #         logger.info(f"TFLite Output: Shape={out_det['shape']}, DType={out_det['dtype']}")
+                
+        #         self.model = interpreter
+        #         logging.info(f"ℹ️ LSTM-Inferenz nutzt TFLite-Interpreter: {tfl_path}")
+        # except Exception as e:
+        #     logging.warning(f"⚠️ TFLite-Interpreter konnte nicht geladen werden ({e}), nutze Keras-Modell.")
