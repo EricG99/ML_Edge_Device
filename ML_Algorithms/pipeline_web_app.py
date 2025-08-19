@@ -85,39 +85,82 @@ def initial_training(config: dict, trainer_class, folder_flag: str):
 def retraining_thread_task(retraining_data_df: pd.DataFrame, algorithm: str):
     """
     Führt das Nachtraining im Hintergrund durch und bereitet Artefakte für den Hot-Swap vor.
-    WICHTIG: Setzt den Pipeline-Status am Ende auf 'ready_to_swap', damit der Inferenz-Loop
-    selbstständig die Artefakte übernimmt (kein Blockieren!).
-    - Für LSTM/CNN1D: inkrementelles Fitten auf neuen Daten (nur In-Memory, kein Speichern).
-    - Für Random Forest: Neu-Training auf kombinierten Daten (ebenfalls nur In-Memory).
+    - LSTM/CNN1D: inkrementelles Fitten (nur In-Memory)
+    - Random Forest: Refit auf kombinierten Daten (nur In-Memory)
+    Persistiert: last_retraining_time_s, retraining_count, retraining_history in training_config.json
     """
-    import logging
+    import logging, json, os, time
+    from copy import deepcopy
+
     global shared_model, PIPELINE_STATE, shared_resource_lock
 
+    # --- Helper: Retraining-Metriken (zeit, count, history) in Config & JSON speichern ---
+    def _persist_retrain_metrics(cfg_in: dict, algo_name: str, retrain_time_s: float) -> None:
+        import pandas as pd  # lokaler Import
+        # In-Memory (mit Lock) aktualisieren
+        with shared_resource_lock:
+            cfg = deepcopy(cfg_in or {})
+            cfg["last_retraining_time_s"] = float(retrain_time_s)
+            cfg["retraining_count"] = int(cfg.get("retraining_count", 0)) + 1
+            hist = cfg.get("retraining_history", [])
+            if not isinstance(hist, list):
+                hist = []
+            hist.append({
+                "timestamp": pd.Timestamp.utcnow().isoformat(),
+                "algorithm": str(algo_name),
+                "duration_s": float(retrain_time_s),
+            })
+            cfg["retraining_history"] = hist
+            shared_model["config"] = cfg
+
+            paths = cfg.get("paths") or {}
+            models_dir = paths.get("Models") or paths.get("models_dir") or cfg.get("models_dir")
+
+        # Auf Platte (außerhalb Lock)
+        try:
+            if models_dir:
+                cfg_path = os.path.join(models_dir, "training_config.json")
+                on_disk = {}
+                if os.path.exists(cfg_path):
+                    with open(cfg_path, "r", encoding="utf-8") as f:
+                        try:
+                            on_disk = json.load(f) or {}
+                        except Exception:
+                            on_disk = {}
+                on_disk.update({
+                    "last_retraining_time_s": cfg["last_retraining_time_s"],
+                    "retraining_count": cfg["retraining_count"],
+                    "retraining_history": cfg["retraining_history"],
+                })
+                with open(cfg_path, "w", encoding="utf-8") as f:
+                    json.dump(on_disk, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            logging.warning(f"Retraining-Zeit konnte nicht in training_config.json geschrieben werden: {e}")
+
+    # --- Setup ---
     algo = (algorithm or "").lower()
-    # gleiche Behandlung für verschiedene Schreibweisen
     is_seq_model = algo in ("lstm", "cnn1d", "1dcnn", "cnn")
 
     logging.info(f"--- RETRAINING THREAD ({algorithm}): Startet Nachtraining. ---")
+    t0_retrain = time.perf_counter()
+
     with shared_resource_lock:
         PIPELINE_STATE["retraining_status"] = "training"
+        # Thread-sichere Kopie holen
+        config = deepcopy(shared_model.get('config') or {})
+        initial_data = shared_model.get('initial_training_data')
+        current_model_ref = shared_model.get('model')
+        scaler_ref = shared_model.get('scaler')
+        y_scaler_ref = shared_model.get('y_scaler')
+        features_ref = shared_model.get('features')
+
+    if isinstance(features_ref, dict):
+        features_ref = features_ref.get("all")
+    if features_ref is not None:
+        features_ref = list(features_ref)
 
     try:
-        # Thread-sichere Kopie der Artefakte/Konfig holen
-        with shared_resource_lock:
-            config = deepcopy(shared_model.get('config') or {})
-            initial_data = shared_model.get('initial_training_data')  # für RF benötigt
-            current_model_ref = shared_model.get('model')
-            scaler_ref = shared_model.get('scaler')
-            y_scaler_ref = shared_model.get('y_scaler')
-            features_ref = shared_model.get('features')
-
-        # Features können als Liste oder Dict kommen (z.B. {"all": [...], ...})
-        if isinstance(features_ref, dict):
-            features_ref = features_ref.get("all")
-        if features_ref is not None:
-            features_ref = list(features_ref)
-
-        # === Sequenz-Modelle (LSTM / 1D-CNN): inkrementelles Fitten ===========================
+        # === Sequenz-Modelle (LSTM/CNN1D) ===
         if is_seq_model:
             if current_model_ref is None or scaler_ref is None or not features_ref:
                 logging.warning(f"{algorithm.upper()}: Fehlende Artefakte (Modell/Scaler/Features). Retraining abgebrochen.")
@@ -125,24 +168,25 @@ def retraining_thread_task(retraining_data_df: pd.DataFrame, algorithm: str):
                     PIPELINE_STATE["retraining_status"] = "idle"
                 return
 
-            # Prüfen, ob das aktuelle Modell fit-bar ist (kein TFLite/Interpreter)
             can_fit = hasattr(current_model_ref, "fit") and hasattr(current_model_ref, "get_weights")
             if not can_fit:
-                logging.warning(f"{algorithm.upper()}: Aktuelles Modell ist nicht trainierbar (z. B. TFLite). Überspringe Retraining.")
+                logging.warning(f"{algorithm.upper()}: Modell nicht trainierbar (z. B. TFLite). Überspringe Retraining.")
                 with shared_resource_lock:
                     PIPELINE_STATE["retraining_status"] = "idle"
                 return
 
-            # Modell klonen, um während des Fit keine Live-Gewichte zu mutieren
+            # Modell klonen
             try:
+                import tensorflow as tf
                 cloned = tf.keras.models.clone_model(current_model_ref)
                 cloned.set_weights(current_model_ref.get_weights())
                 current_model = cloned
             except Exception:
                 current_model = deepcopy(current_model_ref)
 
-            # Feature Engineering auf den neuen Daten
+            # Feature-Engineering
             try:
+                from ML_Helpfunctions import Feature_Engeneering as fe
                 retraining_df_feat, _ = fe.add_all_features(retraining_data_df.copy(), config)
             except Exception as fe_err:
                 logging.error(f"{algorithm.upper()}: Feature-Engineering fehlgeschlagen: {fe_err}", exc_info=True)
@@ -150,22 +194,21 @@ def retraining_thread_task(retraining_data_df: pd.DataFrame, algorithm: str):
                     PIPELINE_STATE["retraining_status"] = "idle"
                 return
 
-            # exakt dieselben Feature-Spalten wie im Training (gleiche Reihenfolge)
+            # gleiche Spalten/Order
             try:
                 X_feat = retraining_df_feat.loc[:, features_ref].dropna().copy()
             except KeyError as kerr:
-                logging.error(f"{algorithm.upper()}: Erwartete Features fehlen in Retraining-Daten: {kerr}")
+                logging.error(f"{algorithm.upper()}: Erwartete Features fehlen: {kerr}")
                 with shared_resource_lock:
                     PIPELINE_STATE["retraining_status"] = "idle"
                 return
-
             if X_feat.empty:
-                logging.info(f"{algorithm.upper()}: Keine verwertbaren Zeilen nach Feature-Engineering (leer nach Drop-NA).")
+                logging.info(f"{algorithm.upper()}: Keine verwertbaren Zeilen nach Drop-NA.")
                 with shared_resource_lock:
                     PIPELINE_STATE["retraining_status"] = "idle"
                 return
 
-            # Skalieren wie im Training
+            # Skalieren
             try:
                 X_scaled = scaler_ref.transform(X_feat.values)
             except Exception as sc_err:
@@ -174,10 +217,11 @@ def retraining_thread_task(retraining_data_df: pd.DataFrame, algorithm: str):
                     PIPELINE_STATE["retraining_status"] = "idle"
                 return
 
-            # Sliding-Window erstellen
-            H = int(config.get("horizon", 1))
-            L = int(config.get("lags", 1))
+            # Sliding-Window
             try:
+                from ML_Helpfunctions import Load_Prepare_Data as LoadPrepareData
+                H = int(config.get("horizon", 1))
+                L = int(config.get("lags", 1))
                 X_retrain, y_retrain = LoadPrepareData.convert_data_to_sliding_window(
                     X_scaled, lag_horizon=L, forecast_horizon=H
                 )
@@ -186,56 +230,61 @@ def retraining_thread_task(retraining_data_df: pd.DataFrame, algorithm: str):
                 with shared_resource_lock:
                     PIPELINE_STATE["retraining_status"] = "idle"
                 return
-
             if X_retrain is None or y_retrain is None or len(X_retrain) == 0:
                 logging.info(f"{algorithm.upper()}: Zu wenige Daten für Fenster (lags={L}).")
                 with shared_resource_lock:
                     PIPELINE_STATE["retraining_status"] = "idle"
                 return
 
-            # Kompilieren & inkrementell fitten (feines Nachtraining)
+            # Inkrementelles Fitten
             opt = config.get("optimizer", "adam")
             loss = config.get("loss", "mse")
             epochs = int(config.get("retraining_epochs", 3))
             batch_size = int(config.get("batch_size", 32))
-
             try:
                 current_model.compile(optimizer=opt, loss=loss)
-                current_model.fit(
-                    X_retrain, y_retrain,
-                    epochs=epochs,
-                    batch_size=batch_size,
-                    verbose=0
-                )
+                current_model.fit(X_retrain, y_retrain, epochs=epochs, batch_size=batch_size, verbose=0)
             except Exception as fit_err:
                 logging.error(f"{algorithm.upper()}: Fehler beim inkrementellen Fit: {fit_err}", exc_info=True)
                 with shared_resource_lock:
                     PIPELINE_STATE["retraining_status"] = "idle"
                 return
 
-            logging.info(f"{algorithm.upper()}: Inkrementelles Retraining abgeschlossen "
-                         f"(samples={len(X_retrain)}, epochs={epochs}).")
+            # Zeit messen & speichern
+            retrain_time_s = time.perf_counter() - t0_retrain
+            _persist_retrain_metrics(config, algorithm, retrain_time_s)
 
-            # Hot-Swap vorbereiten (nur In-Memory, NICHT speichern!)
+            # Hot-Swap vorbereiten
             with shared_resource_lock:
+                cfg_updated = deepcopy(shared_model.get("config") or config)
                 shared_model.update({
-                    "model": current_model,      # nur Modell austauschen
-                    "scaler": scaler_ref,        # Scaler/Features bleiben gleich
+                    "model": current_model,
+                    "scaler": scaler_ref,
                     "y_scaler": y_scaler_ref,
                     "features": features_ref,
-                    "config": config
+                    "config": cfg_updated,
                 })
                 PIPELINE_STATE["retraining_status"] = "ready_to_swap"
+
+            logging.info(f"{algorithm.upper()}: Retraining abgeschlossen (samples={len(X_retrain)}, epochs={epochs}).")
             logging.info(f"--- RETRAINING THREAD ({algorithm.upper()}): Artefakte bereit zum Hot-Swap ---")
             return
 
-        # === Random Forest: Refit auf kombinierten Daten ======================================
         elif algo == "random_forest":
+            import pandas as pd
+            from sklearn.ensemble import RandomForestRegressor
+            from sklearn.preprocessing import MinMaxScaler, RobustScaler
+            from sklearn.multioutput import MultiOutputRegressor
+            from ML_Helpfunctions import Feature_Engeneering as fe
+
             if initial_data is None:
                 logging.warning("RandomForest: initial_training_data fehlt; überspringe Retraining.")
                 with shared_resource_lock:
                     PIPELINE_STATE["retraining_status"] = "idle"
                 return
+
+            H = int(config.get("horizon", 1))
+            target_col_name = config["base_features"][0].lower()
 
             logging.info("RandomForest: Kombiniere alte und neue Daten für Nachtraining...")
             combined_data = pd.concat([initial_data, retraining_data_df]).drop_duplicates().sort_index()
@@ -246,39 +295,61 @@ def retraining_thread_task(retraining_data_df: pd.DataFrame, algorithm: str):
             if not new_features:
                 raise RuntimeError("RandomForest: Features nicht bestimmbar.")
 
-            combined_df_featured.dropna(inplace=True)
-            target_col_name = config["base_features"][0].lower()
+            # X (t) + Y (t+1...t+H) sauber ausrichten
+            X_all = combined_df_featured[new_features].copy()
+            # Multi-Horizon Zielmatrix über Shifts bauen
+            y_shifts = [combined_df_featured[target_col_name].shift(-k) for k in range(1, H + 1)]
+            Y_all = pd.concat(y_shifts, axis=1)
+            # Nur Zeilen, wo ALLE Horizonte vorhanden sind
+            mask = Y_all.notna().all(axis=1)
+            X_retrain = X_all.loc[mask]
+            Y_retrain = (Y_all.loc[mask].iloc[:, 0] if H == 1 else Y_all.loc[mask])
 
-            X_retrain = combined_df_featured[new_features]
-            y_retrain = combined_df_featured[target_col_name]
+            if X_retrain.empty or len(X_retrain) < 5:
+                logging.warning("RandomForest: Zu wenige gültige Zeilen für Retraining. Abbruch.")
+                with shared_resource_lock:
+                    PIPELINE_STATE["retraining_status"] = "idle"
+                return
 
             logging.info("RandomForest: Scaler neu anpassen...")
             scaler_class = RobustScaler if config.get("scaler_type", "minmax") == "robust" else MinMaxScaler
             new_scaler = scaler_class()
-            X_retrain_scaled = new_scaler.fit_transform(X_retrain)
+            X_retrain_scaled = new_scaler.fit_transform(X_retrain.values)
 
-            logging.info("RandomForest: Neues Modell trainieren (In-Memory)...")
-            new_model = RandomForestRegressor(**config.get("model_params", {}))
-            new_model.fit(X_retrain_scaled, y_retrain.values)
+            logging.info("RandomForest: Neues Modell trainieren (In-Memory, horizon=%d)...", H)
+            base_rf = RandomForestRegressor(**config.get("model_params", {}))
+            if H == 1:
+                new_model = base_rf
+                new_model.fit(X_retrain_scaled, Y_retrain.values)
+            else:
+                # Explizit MultiOutput, passend zum Training
+                new_model = MultiOutputRegressor(base_rf)
+                new_model.fit(X_retrain_scaled, Y_retrain.values)
 
+            # --- Dauer messen & persistieren (einheitlich) ---
+            retrain_time_s = time.perf_counter() - t0_retrain
+            _persist_retrain_metrics(config, algorithm, retrain_time_s)
+
+            # Hot-Swap vorbereiten (nur In-Memory)
             with shared_resource_lock:
+                cfg_updated = deepcopy(shared_model.get("config") or config)
                 shared_model.update({
                     "model": new_model,
                     "scaler": new_scaler,
                     "features": new_features,
-                    "initial_training_data": combined_data
+                    "initial_training_data": combined_data,
+                    "config": cfg_updated,
                 })
                 PIPELINE_STATE["retraining_status"] = "ready_to_swap"
+
             logging.info("--- RETRAINING THREAD (RF): Artefakte bereit zum Hot-Swap ---")
             return
 
-        # === unbekannter Algorithmus ===========================================================
         else:
             raise ValueError(f"Unbekannter Algorithmus für Retraining: {algorithm}")
 
     except Exception as e:
         logging.error(f"RETRAINING THREAD: Fehler: {e}", exc_info=True)
-        # Fehlerfall: Status zurücksetzen, damit ein späterer Versuch möglich bleibt
         with shared_resource_lock:
             PIPELINE_STATE["retraining_status"] = "idle"
 
@@ -562,7 +633,6 @@ def inference_manager(config: dict, inference_class, folder_flag: str, algorithm
                     try:
                         proc.cpu_percent(interval=None)  # Priming für genauere Messung
                         cpu_t0 = proc.cpu_times()
-                        from ML_Helpfunctions.Pipeline_Utils import PipelineUtils
                         ram_usage_dict = PipelineUtils.get_memory_usage()
                     except Exception:
                         cpu_t0, ram_usage_dict = None, None

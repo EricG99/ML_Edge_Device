@@ -91,9 +91,11 @@ class RFInference(BaseInferenceProcessor):
 
             # System-Metriken (in erwarteten Keys)
             try:
-                from ML_Helpfunctions.Pipeline_Utils import PipelineUtils
-                cpu = float(PipelineUtils.get_cpu_usage())
-                ram = float(PipelineUtils.get_memory_usage())
+                from ML_Helpfunctions import Pipeline_Utils as PU
+                cpu = float(PU.get_cpu_usage())
+                mem = PU.get_memory_usage()
+                ram_mb = float(mem["used_gb"]) * 1024.0 if isinstance(mem, dict) and mem.get("used_gb") != "N/A" else None
+                ram_percent = float(mem["percent"]) if isinstance(mem, dict) and mem.get("used_gb") != "N/A" else None
             except Exception:
                 cpu, ram = None, None
 
@@ -102,8 +104,6 @@ class RFInference(BaseInferenceProcessor):
                 "prediction": float(pred_unscaled[0]) if pred_unscaled.size > 0 and np.isfinite(pred_unscaled[0]) else None,
                 "true_value": None,
                 "rolling_forecast": pred_unscaled.tolist(),
-                "cpu_percent": cpu,
-                "ram_mb": ram,
                 "model_inference_time_ms": float(t_inf_ms),
                 "total_processing_time_ms": 0.0,
             }

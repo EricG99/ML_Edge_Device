@@ -242,9 +242,11 @@ class BaseInferenceProcessor(ABC):
         cpu_percent = None
         ram_mb = None
         try:
-            from ML_Helpfunctions.Pipeline_Utils import PipelineUtils
-            cpu_percent = float(PipelineUtils.get_cpu_usage())
-            ram_mb = float(PipelineUtils.get_memory_usage())
+            from ML_Helpfunctions import Pipeline_Utils as PU
+            cpu_percent = float(PU.get_cpu_usage())
+            mem = PU.get_memory_usage()  # dict: {"total_gb","used_gb","percent"} oder "N/A"
+            ram_mb = float(mem["used_gb"]) * 1024.0 if isinstance(mem, dict) and mem.get("used_gb") != "N/A" else None
+            ram_percent = float(mem["percent"]) if isinstance(mem, dict) and mem.get("used_gb") != "N/A" else None
         except Exception:
             pass
 
@@ -256,7 +258,8 @@ class BaseInferenceProcessor(ABC):
             "true_value": None,
             "rolling_forecast": future_pred_unscaled.tolist(),
             "cpu_percent": cpu_percent,
-            "ram_mb": ram_mb,
+            "ram_percent": ram_percent,
+            "ram_usage": mem,  
             "model_inference_time_ms": float(t_inf_ms),
             "total_processing_time_ms": float((time.perf_counter() - start_processing_time) * 1000.0),
         }
@@ -270,6 +273,7 @@ class BaseInferenceProcessor(ABC):
                 "true_value": float(true_value_t) if true_value_t is not None else None,
                 "cpu_percent": cpu_percent,
                 "ram_mb": ram_mb,
+                "ram_percent": ram_percent,
             }
 
         # kompletten Horizon am t-Eintrag hinterlegen

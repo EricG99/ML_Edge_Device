@@ -87,6 +87,8 @@ class BaseTrainer(ABC):
         """Speichert die trainierten Artefakte (Modell, Scaler, Features)."""
         logging.info("\nStep 3: Saving artifacts for inference...")
         mode = self.config.get("inference_mode", "load_artifacts_path")
+
+        
         
         paths = self.config.get("paths")
         if not paths:
@@ -107,6 +109,11 @@ class BaseTrainer(ABC):
             logging.info(f"Artifacts saved to static paths: {static_paths}")
 
         elif mode == 'load_artifacts_path':
+
+            try:
+                self.config["train_time_s"] = float(self.train_time)
+            except Exception:
+                pass
             # Hier wird jetzt der korrekte, bereits erstellte Pfad verwendet.
             logging.info("Saving in 'path' mode with versioned directory...")
             saver = Pipeline_Utils.ModelScalerSaver(self.config, paths)
