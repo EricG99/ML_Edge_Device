@@ -23,21 +23,26 @@ class RealTimeDataProcessor:
         self.config = config
         self._buffer = pd.DataFrame()
 
-        # FIX 3: Bestimme die wahre minimale Anzahl an Datenpunkten, die für alle Features benötigt wird.
-        min_for_lags = self.config.get('lags', 1)
-        # Berücksichtige sowohl eine einzelne Fenstergröße als auch eine Liste von Fenstern
+        # --- FINALE KORREKTUR START ---
+        # Lese 'lags' aus der Trainingskonfiguration, die zuverlässiger ist.
+        # Der fallback auf die Haupt-config bleibt als Sicherheit.
+        training_cfg = self.config.get('training_config', {})
+        min_for_lags = int(training_cfg.get('lags', self.config.get('lags', 1)))
+
         rolling_windows = self.config.get('rolling_windows', [])
-        if not isinstance(rolling_windows, list): rolling_windows = [rolling_windows] # Mache es zur Liste, falls es nur eine Zahl ist
+        if not isinstance(rolling_windows, list):
+            rolling_windows = [rolling_windows]
         
         min_for_rolling_features = max(
             self.config.get('rolling_window_size', 1),
             max(rolling_windows) if rolling_windows else 1
         )
+        
+        # Die tatsächliche Mindestanzahl ist das Maximum aus beiden Anforderungen.
         self._min_data_points = max(min_for_lags, min_for_rolling_features)
+        # --- FINALE KORREKTUR ENDE ---
 
-
-        # Die Puffergröße muss groß genug sein für die minimalen Datenpunkte und die Lags für das LSTM.
-        self._max_buffer_size = self.config.get('max_fe_window', 50) + self.config.get('lags', 1)
+        self._max_buffer_size = self.config.get('max_fe_window', 50) + min_for_lags
         
         logging.info(
             f"RealTimeDataProcessor initialisiert. "
@@ -88,11 +93,19 @@ class RealTimeDataProcessor:
 
         # 4. Feature Engineering auf dem kleinen, optimierten Puffer ausführen
         try:
+            # --- HINZUGEFÜGTE DIAGNOSE-ZEILE ---
+            # Diese Log-Ausgabe hilft zu überprüfen, ob die bei der Inferenz verwendete 
+            # Konfiguration die korrekten Werte für das Feature Engineering enthält.
+            logging.debug(f"Übergebe Konfiguration an FE: lags={self.config.get('lags')}, rolling_windows={self.config.get('rolling_windows')}")
+            # --- ENDE DIAGNOSE-ZEILE ---
+
             featured_buffer, _ = fe.add_all_features(self._buffer.copy(), self.config)
             return featured_buffer
         except Exception as e:
             logging.error(f"Fehler beim Feature Engineering im RealTimeDataProcessor: {e}", exc_info=True)
             return None
+
+
         
     def prime_buffer(self, df_like: pd.DataFrame):
             """

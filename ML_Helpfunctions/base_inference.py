@@ -11,6 +11,11 @@ import os
 from ML_Helpfunctions import Pipeline_Utils, Load_Prepare_Data
 from ML_Helpfunctions.MQTT_Client import MqttInferenceClient
 
+from ML_Helpfunctions import Pipeline_Utils, Load_Prepare_Data
+from ML_Helpfunctions.MQTT_Client import MqttInferenceClient
+# Hinzugefügter Import für die Typ-Annotation und Initialisierung
+from ML_Helpfunctions.base_data_processing import RealTimeDataProcessor
+
 class BaseInferenceProcessor(ABC):
     """
     Abstrakte Basisklasse für die Inferenz. Definiert die Schnittstelle für alle Modelle.
@@ -31,6 +36,13 @@ class BaseInferenceProcessor(ABC):
         self.step_counter = 0
         self._pending_entry = None
 
+        # --- ANGEPASSTER/NEUER TEIL START ---
+        # Gemeinsame Attribute werden zentral in der Basisklasse initialisiert,
+        # um Codeduplizierung in den Subklassen (CNN1D, LSTM, etc.) zu vermeiden.
+        self.data_processor = RealTimeDataProcessor(config)
+        self.lags = int(self.config.get("lags", 1))
+        # --- ANGEPASSTER/NEUER TEIL ENDE ---
+
         # FINALER FIX: Daten für den Batch-Iterator einmalig vorladen, um den Zustand zu halten
         self._batch_data_df = None
         self._batch_data_position = 0
@@ -45,23 +57,55 @@ class BaseInferenceProcessor(ABC):
             self._batch_data_df = df.sort_values("datetime").reset_index(drop=True)
             logging.info(f"{len(self._batch_data_df)} Zeilen für die Inferenz vorgeladen.")
 
+    def _model_tag(self) -> str | None:
+        """
+        Erzeugt einen robusten, kurzen Tag für den Dateinamen: 
+        'keras', 'tflite_<stem>' oder 'sklearn'.
+        """
+        tag = "unknown"
+        try:
+            import os
+            model_instance = getattr(self, "model", None)
+            if model_instance is None:
+                return "unloaded"
+
+            # Hole den Klassennamen für eine robuste Prüfung
+            class_name = model_instance.__class__.__name__.lower()
+
+            # --- KORRIGIERTE, ROBUSTE PRÜFUNG ---
+            # 1. Prüfe auf TFLite Interpreter
+            if class_name == 'interpreter':
+                stem = "model"
+                # Hole den spezifischen Dateinamen aus der Konfig (z.B. 'model_quant_float16.tflite')
+                model_filename = (self.config or {}).get("model_filename")
+                if model_filename:
+                    stem = os.path.splitext(os.path.basename(model_filename))[0]
+                tag = f"tflite_{stem}"
+            
+            # 2. Prüfe auf Keras Modell
+            elif 'keras' in str(type(model_instance)):
+                tag = "keras"
+            
+            # 3. Prüfe auf Scikit-Learn Modelle (z.B. RandomForest)
+            elif hasattr(model_instance, '_estimator_type'):
+                tag = "sklearn"
+            
+        except Exception:
+            tag = "error" # Fallback-Tag im Fehlerfall
+        
+        return tag
+
     def save_step_result(
         self,
         prediction_entry: dict,
         total_time_s: float | None = None,
         cpu_percent: float | None = None,
         ram_mb: float | None = None,
-        # --- NEUE ZEILE START ---
         ram_percent: float | None = None,
-        # --- NEUE ZEILE ENDE ---
         output_path: str | None = None
     ) -> str | None:
         """
-        Persistiert einen Inferenz-Schritt (True, n-Step-Forecast, Zeiten, CPU/RAM).
-        Erwartete Keys in prediction_entry:
-        - 'datetime', 'true_value',
-        - 'future_forecast' ODER 'rolling_forecast' (Liste mit H Werten),
-        - optional: 'inference_time_s', 'time_breakdown'
+        Persistiert einen Inferenz-Schritt in eine eindeutige CSV-Datei pro Modellvariante.
         """
         import os
         import logging
@@ -69,14 +113,49 @@ class BaseInferenceProcessor(ABC):
         if not prediction_entry:
             return None
 
-        # 🔒 Robust gegen fehlendes Attribut
         if not hasattr(self, "_predictions_file_path"):
             self._predictions_file_path = None
+
+        # --- NEU: Eindeutigen Dateinamen pro Modellvariante erstellen (nur beim ersten Aufruf) ---
+        path_to_use = output_path
+        if path_to_use is None and self._predictions_file_path is None:
+            try:
+                paths = self.config.get("paths", {})
+                pred_dir = paths.get("Prediction_Data", ".")
+                os.makedirs(pred_dir, exist_ok=True) # Sicherstellen, dass der Ordner existiert
+
+                run_id = self.config.get("run_id", "unknown_run")
+                algo = getattr(self, "folder_flag", "algo")
+                
+                # Verwende einen stabilen Namen für die Datenquelle
+                data_name = os.path.splitext(os.path.basename(self.config.get("dataset", "live_data")))[0]
+                
+                model_tag = self._model_tag()
+                
+                # Dateinamen zusammensetzen
+                filename = f"StepPredictions_{run_id}_{algo}_{data_name}"
+                if model_tag:
+                    filename += f"__{model_tag}"
+                filename += ".csv"
+                
+                generated_path = os.path.join(pred_dir, filename)
+                self._predictions_file_path = generated_path
+                path_to_use = self._predictions_file_path
+                logging.info(f"Ergebnis-CSV für diesen Lauf: {generated_path}")
+
+            except Exception as e:
+                logging.error(f"Fehler bei der Erstellung des eindeutigen Dateipfads: {e}")
+                # Fallback, um einen Absturz zu verhindern
+                path_to_use = self._predictions_file_path or None
+
+        elif path_to_use is None:
+            path_to_use = self._predictions_file_path
+        # --- ENDE NEU ---
 
         date = prediction_entry.get("datetime")
         true_value = prediction_entry.get("true_value")
 
-        # --- RF-spezifisches Alignment: pred_h1 = Vorhersage FÜR t; danach t+1..t+(H-1)
+        # RF-spezifisches Alignment (Logik bleibt unverändert)
         future_list = (
             prediction_entry.get("future_forecast")
             or prediction_entry.get("rolling_forecast")
@@ -84,7 +163,6 @@ class BaseInferenceProcessor(ABC):
         )
         pred_t = prediction_entry.get("prediction", None)
         horizon = int(self.config.get("horizon", 1))
-
         folder_lower = str(getattr(self, "folder_flag", "")).lower()
         is_rf = folder_lower in ("random_forest", "random forest", "rf")
 
@@ -94,19 +172,18 @@ class BaseInferenceProcessor(ABC):
                 if pred_t is not None:
                     aligned_forecast.append(pred_t)
                 else:
-                    aligned_forecast.append(future_list[0] if len(future_list) > 0 else None)
+                    aligned_forecast.append(future_list[0] if future_list else None)
             if horizon > 1:
                 aligned_forecast.extend(list(future_list[:max(0, horizon - 1)]))
             forecast = aligned_forecast
         else:
-            # LSTM (und andere): unverändert – future_list entspricht bereits der Logik
             forecast = list(future_list[:horizon]) if horizon > 0 else list(future_list)
 
         inference_time_s = prediction_entry.get("inference_time_s", None)
         breakdown = prediction_entry.get("time_breakdown", None)
 
-        # --- Schreiben / Anhängen der Step-CSV
-        path = Pipeline_Utils.append_prediction_step(
+        # Der Aufruf der Hilfsfunktion schreibt nun in den eindeutigen Pfad
+        final_path = Pipeline_Utils.append_prediction_step(
             config=self.config,
             date=date,
             true_value=true_value,
@@ -115,25 +192,12 @@ class BaseInferenceProcessor(ABC):
             total_time_s=total_time_s,
             cpu_percent=cpu_percent,
             ram_mb=ram_mb,
-            # --- NEUE ZEILE START ---
             ram_percent=ram_percent,
-            # --- NEUE ZEILE ENDE ---
             breakdown=breakdown,
-            output_path=output_path or self._predictions_file_path  # darf None sein
+            output_path=path_to_use
         )
 
-        # Merken (ab hier existiert der Pfad garantiert)
-        if self._predictions_file_path is None:
-            self._predictions_file_path = path
-
-        try:
-            metrics_dir = (self.config.get("paths") or {}).get("Error_Metrics")
-            if metrics_dir:
-                metrics_summary_path = os.path.abspath(os.path.join(metrics_dir, "metrics_summary.csv"))
-        except Exception:
-            pass
-
-        return path
+        return final_path
 
 
     def flush_pending_entry(self) -> dict | None:
@@ -326,46 +390,62 @@ class BaseInferenceProcessor(ABC):
         logging.info(f"Speichere {len(all_predictions)} Vorhersagen...")
         try:
             df = pd.DataFrame(all_predictions)
-            valid_rows_mask = df["true_value"].notna() & df["rolling_forecast"].notna()
+            valid_rows_mask = df["true_value"].notna() & (df["rolling_forecast"].notna() | df["future_forecast"].notna())
             df_valid = df[valid_rows_mask]
 
             if df_valid.empty:
                 logging.warning("Keine gültigen Paare aus wahren Werten und Vorhersagen gefunden. Metriken können nicht berechnet werden.")
+                # Speichere trotzdem eine leere Metrik-Datei, um Folgefehler zu vermeiden
+                Pipeline_Utils.save_metrics_summary(
+                    metrics={"error": "No valid data to calculate metrics"},
+                    run_config=self.config,
+                    training_config=self.training_config or {},
+                    paths=self.config.get("paths", {})
+                )
                 return
 
             horizon = int(self.config.get("horizon", 1))
-
             import numpy as np
             h = int(self.config.get("horizon", 1))
 
-            # Forecast-Spalte erkennen
-            if "rolling_forecast" in df_valid.columns:
+            if "rolling_forecast" in df_valid.columns and df_valid["rolling_forecast"].iloc[0] is not None:
                 fc_col = "rolling_forecast"
-            elif "future_forecast" in df_valid.columns:
+            elif "future_forecast" in df_valid.columns and df_valid["future_forecast"].iloc[0] is not None:
                 fc_col = "future_forecast"
             else:
-                logging.error("Finale Auswertung: Keine Forecast-Spalte ('rolling_forecast' oder 'future_forecast') gefunden.")
-                return None
+                logging.error("Finale Auswertung: Keine Forecast-Spalte gefunden.")
+                return
 
             def _to_fixed(vec, H):
                 arr = np.asarray(vec, dtype=float).reshape(-1)
                 if arr.size >= H:
                     return arr[:H]
-                out = np.empty(H, dtype=float)
-                out[:] = np.nan
+                out = np.full(H, np.nan, dtype=float)
                 out[:arr.size] = arr
                 return out
 
-            y_pred = np.vstack([_to_fixed(v, h) for v in df_valid[fc_col].tolist()])
+            y_pred_list = [v for v in df_valid[fc_col] if v is not None]
+            if not y_pred_list:
+                logging.warning("Forecast-Spalte enthält keine gültigen Listen. Metriken können nicht berechnet werden.")
+                return
+            
+            y_pred = np.vstack([_to_fixed(v, h) for v in y_pred_list])
             y_true_1d = df_valid["true_value"].to_numpy()
             y_true = np.tile(y_true_1d.reshape(-1, 1), reps=(1, y_pred.shape[1]))
 
             logging.info(f"Berechne Metriken für {len(y_true)} konsistente Datenpunkte.")
             metrics = Pipeline_Utils.evaluate_all_metrics(y_true, y_pred, horizon=horizon)
 
+            # --- KORRIGIERTE VERSION START ---
             extra = {}
             if hasattr(self, "_predictions_file_path") and self._predictions_file_path:
                 extra["predictions_file_path"] = self._predictions_file_path
+            
+            # Füge den eindeutigen Modell-Tag hinzu, damit die Hilfsfunktion ihn verwenden kann
+            model_tag = self._model_tag()
+            if model_tag:
+                extra["model_tag"] = model_tag
+            # --- KORRIGIERTE VERSION ENDE ---
 
             metrics_json_path = Pipeline_Utils.save_metrics_summary(
                 metrics=metrics,
@@ -380,7 +460,7 @@ class BaseInferenceProcessor(ABC):
                     logging.info(f"📄 StepPredictions CSV: {os.path.abspath(self._predictions_file_path)}")
                 if metrics_json_path:
                     logging.info(f"📁 ErrorMetrics JSON: {os.path.abspath(metrics_json_path)}")
-                agg_csv = os.path.join(self.config.get("paths", {}).get("Error_Metrics", self.config.get("paths", {}).get("Prediction_Data", ".")), "ErrorMetrics_all_runs.csv")
+                agg_csv = os.path.join(self.config.get("paths", {}).get("Error_Metrics", "."), "ErrorMetrics_all_runs.csv")
                 logging.info(f"📊 ErrorMetrics (aggregiert, CSV): {os.path.abspath(agg_csv)}")
             except Exception:
                 pass
@@ -392,15 +472,23 @@ class BaseInferenceProcessor(ABC):
     def _run_inference_unified(self, input_data: np.ndarray):
         start = time.perf_counter()
         if hasattr(self.model, "get_input_details"):
+            # --- KORRIGIERTE VERSION START ---
+            # Der Interpreter wird nun VOR der Schleife alloziert.
+            # Hier erfolgen nur noch die Schritte pro Inferenz.
             interpreter = self.model
             input_details = interpreter.get_input_details()
             output_details = interpreter.get_output_details()
-            if tuple(input_details[0]["shape"]) != tuple(input_data.shape):
-                interpreter.resize_tensor_input(input_details[0]["index"], input_data.shape, strict=False)
-                interpreter.allocate_tensors()
+            
+            # 1. Daten in den Input-Tensor schreiben
             interpreter.set_tensor(input_details[0]["index"], input_data.astype(np.float32))
+            
+            # 2. Inferenz ausführen
             interpreter.invoke()
+            
+            # 3. Ergebnis aus dem Output-Tensor lesen
             pred = interpreter.get_tensor(output_details[0]["index"])
+            # --- KORRIGIERTE VERSION ENDE ---
+
         elif hasattr(self.model, "predict"):
             try:
                 pred = self.model.predict(input_data, verbose=0)

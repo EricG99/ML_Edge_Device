@@ -468,41 +468,53 @@ def inference_manager(config: dict, inference_class, folder_flag: str, algorithm
 
         return None
 
+
     def _try_load_training_config_for_inference_only(cfg: dict, _mode: str) -> dict:
         """
         Wenn wir NICHT im Retraining sind, versuche training_config.json aus dem
-        Modellordner zu laden und in cfg zu mergen (cfg hat Vorrang).
+        Modellordner zu laden und in cfg zu mergen.
+        WICHTIG: Kommandozeilen-Argumente wie 'model_filename' haben Priorität.
         """
         if str(_mode).lower() == "retraining":
-            return cfg  # Nur Inferenz-Case gewünscht
+            return cfg
 
         model_dir = _guess_model_dir(cfg)
         if not model_dir:
-            logging.info("Kein Modellordner gefunden (Models). Überspringe training_config.json-Import.")
+            logging.info("Kein Modellordner gefunden. Überspringe training_config.json-Import.")
             return cfg
-
-        # Suche training_config.json direkt im Modellordner, ggf. auch im Elternordner
+            
         candidates = [
             os.path.join(model_dir, "training_config.json"),
             os.path.join(os.path.dirname(model_dir), "training_config.json")
         ]
-        found = None
-        for c in candidates:
-            if c and os.path.isfile(c):
-                found = c
-                break
+        found = next((c for c in candidates if c and os.path.isfile(c)), None)
 
         if not found:
             logging.info(f"Keine training_config.json in {model_dir} gefunden. (Optional)")
             return cfg
 
         try:
+            # --- KORRIGIERTE LOGIK START ---
+            # 1. Merke dir wichtige Kommandozeilen-Argumente, die nicht überschrieben werden dürfen.
+            cli_model_filename = cfg.get("model_filename")
+            cli_loading_strategy = cfg.get("loading_strategy")
+
+            # 2. Lade die Konfiguration aus dem Trainingslauf.
             with open(found, "r", encoding="utf-8") as f:
                 loaded = json.load(f)
-            # CLI/Laufzeitwerte haben Vorrang -> cfg überschreibt loaded
-            merged = _deep_merge(loaded, cfg)
-            # Stelle sicher, dass der Laufzeit-Modus erhalten bleibt
+                
+            # 3. Führe die Konfigurationen zusammen. Die geladene (`loaded`) überschreibt die Defaults (`cfg`).
+            merged = _deep_merge(cfg, loaded)
+
+            # 4. Stelle sicher, dass die Kommandozeilen-Argumente erhalten bleiben (höchste Priorität).
+            if cli_model_filename:
+                merged["model_filename"] = cli_model_filename
+            if cli_loading_strategy:
+                merged["loading_strategy"] = cli_loading_strategy
+                
             merged["mode"] = _mode
+            # --- KORRIGIERTE LOGIK ENDE ---
+
             logging.info(f"training_config.json geladen und gemergt: {found}")
             return merged
         except Exception as e:

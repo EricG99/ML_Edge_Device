@@ -195,6 +195,27 @@ def _to_jsonable(obj):
         return repr(obj)
 
 
+import os
+import json
+import pandas as pd
+import numpy as np # Import für _to_jsonable hinzufügen
+
+# Annahme: Eine Hilfsfunktion _to_jsonable existiert bereits in Ihrer Datei.
+def _to_jsonable(obj):
+    if isinstance(obj, dict):
+        return {k: _to_jsonable(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [_to_jsonable(i) for i in obj]
+    elif isinstance(obj, (np.integer, np.int64)):
+        return int(obj)
+    elif isinstance(obj, (np.floating, np.float64)):
+        return float(obj)
+    elif isinstance(obj, (np.ndarray, pd.Series)):
+        return _to_jsonable(obj.tolist())
+    elif pd.isna(obj):
+        return None
+    return obj
+
 def save_metrics_summary(
     metrics: dict,
     run_config: dict,
@@ -204,7 +225,7 @@ def save_metrics_summary(
 ) -> str:
     """
     Speichert die Metriken als:
-      1) Run-spezifische JSON (neue Datei je Run).
+      1) Run-spezifische und modell-spezifische JSON (neue Datei je Variante).
       2) Aggregierte CSV 'ErrorMetrics_all_runs.csv' (wird immer ergänzt).
     Rückgabe: absoluter Pfad zur JSON-Datei.
     """
@@ -212,21 +233,38 @@ def save_metrics_summary(
     out_dir = os.fspath(out_dir)
     os.makedirs(out_dir, exist_ok=True)
 
+    # --- KORRIGIERTE VERSION START ---
+    run_id = run_config.get("run_id", "run")
     model_name = run_config.get("model_name", "model")
-    dataset    = run_config.get("dataset", "data")
-    run_id     = run_config.get("run_id", "run")
-    timestamp  = run_config.get("time_stamp", "timestamp")
+    dataset_raw = run_config.get("dataset", "data")
+    dataset_clean = os.path.splitext(os.path.basename(dataset_raw))[0]
+    model_tag = (extra_info or {}).get("model_tag")
 
-    base      = f"ErrorMetrics_{run_id}_{model_name}_{dataset}_{timestamp}"
-    json_path = os.path.join(out_dir, base + ".json")
+    # Baue den Basis-Dateinamen sauber zusammen
+    base_parts = [
+        "ErrorMetrics",
+        run_id,
+        model_name,
+        dataset_clean
+    ]
+    base_name = "_".join(filter(None, base_parts))
 
-    # JSON-Payload zusammenbauen und serialisierbar machen
+    # Füge den Modell-Tag sauber an
+    if model_tag:
+        final_filename = f"{base_name}__{model_tag}.json"
+    else:
+        final_filename = f"{base_name}.json"
+        
+    json_path = os.path.join(out_dir, final_filename)
+    # --- KORRIGIERTE VERSION ENDE ---
+
+    # JSON-Payload zusammenbauen (Logik bleibt gleich)
     payload = {
         "run": {
             "run_id": run_id,
             "model_name": model_name,
-            "dataset": dataset,
-            "time_stamp": timestamp
+            "dataset": dataset_raw,
+            "time_stamp": run_config.get("time_stamp", "timestamp")
         },
         "metrics": metrics or {},
         "training_config": training_config or {},
@@ -245,8 +283,9 @@ def save_metrics_summary(
     flat = {
         "run_id": run_id,
         "model_name": model_name,
-        "dataset": dataset,
-        "time_stamp": timestamp,
+        "dataset": dataset_raw,
+        "time_stamp": run_config.get("time_stamp", "timestamp"),
+        "model_variant": model_tag, # Spalte für die Aggregation hinzufügen
         "json_path": os.fspath(json_path)
     }
     for k in ["MAE", "MSE", "RMSE", "MAPE", "SMAPE", "R2"]:
@@ -268,9 +307,6 @@ def save_metrics_summary(
     )
 
     return os.path.abspath(json_path)
-
-
-# In Pipeline_Utils.py
 
 def append_prediction_step(
     config: dict,

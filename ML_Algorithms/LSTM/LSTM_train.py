@@ -22,7 +22,7 @@ from ML_Helpfunctions.base_trainer import BaseTrainer
 
 
 # Import der Konfigurationen
-from config.config_ml_lstm import param_lstm_test
+from config.config_ml_lstm import lstm
 # from config.config_general import CONFIG_PATH # Auskommentiert, falls nicht vorhanden
 
 # Konfiguriere das Logging-Format

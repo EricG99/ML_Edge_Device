@@ -41,49 +41,29 @@ class LSTMInference(BaseInferenceProcessor):
         self.lags = int(config.get("lags", 1))
 
     def _post_load_artifacts(self):
-        """
-        Ladepolitik (vereinheitlicht):
-        - Wenn --model_filename gesetzt ist:
-            * Falls Pfad auf .tflite zeigt -> TFLite-Interpreter laden.
-            * Sonst: Standard (Keras/SK) beibehalten.
-        - Wenn KEIN model_filename und edge_device/enable_edge = True:
-            * Versuche model_quant_float16.tflite zu laden.
-        - Andernfalls: nichts tun (bereits geladenes Keras-Modell bleibt aktiv).
-        """
+        # Optional: TFLite bevorzugen, wenn vorhanden (analog zur LSTM-Implementierung)
         try:
-            models_dir = self.config.get("paths", {}).get("Models") or self.config.get("Models") or "."
-            explicit = self.config.get("model_filename")
+            models_dir = self.config["paths"].get("Models")
+            tfl_name = self.config.get("model_filename", "model_quant_float16.tflite")
+            tfl_path = os.path.join(models_dir, tfl_name)
 
-            # --model_filename hat Priorität
-            if explicit:
-                chosen = explicit if os.path.isabs(explicit) else os.path.join(models_dir, explicit)
-                if chosen.lower().endswith(".tflite") and os.path.exists(chosen):
-                    import tensorflow as tf
-                    interpreter = tf.lite.Interpreter(model_path=chosen)
-                    interpreter.allocate_tensors()
-                    self.model = interpreter
-                    logging.info(f"📦 Lade explizites TFLite-Modell: {chosen}")
-                else:
-                    logging.info(f"📦 Explizites Modell angegeben ({explicit}); verwende Standardladepfad (Keras/SK).")
-                return
+            if os.path.exists(tfl_path) and tfl_name.endswith('.tflite'):
+                interpreter = tf.lite.Interpreter(model_path=tfl_path)
+                
+                # --- KORRIGIERTE VERSION START ---
+                # Den Interpreter EINMALIG nach dem Laden vorbereiten.
+                # Dies verhindert die XNNPack-Fehler in der Inferenzschleife.
+                interpreter.allocate_tensors()
+                # --- KORRIGIERTE VERSION ENDE ---
 
-            # Edge-Flag: bevorzugt Float16-TFLite
-            edge_flag = bool(self.config.get("edge_device", False) or self.config.get("enable_edge", False))
-            if edge_flag:
-                candidate = os.path.join(models_dir, "model_quant_float16.tflite")
-                if os.path.exists(candidate):
-                    import tensorflow as tf
-                    interpreter = tf.lite.Interpreter(model_path=candidate)
-                    interpreter.allocate_tensors()
-                    self.model = interpreter
-                    logging.info(f"⚡ Edge-Flag aktiv: TFLite Float16 geladen: {candidate}")
-                else:
-                    logging.warning("⚠️ Edge-Flag aktiv, aber model_quant_float16.tflite nicht gefunden – nutze Standardmodell.")
+                in_det = interpreter.get_input_details()[0]
+                out_det = interpreter.get_output_details()[0]
+                logger.info(f"CNN1D TFLite Input: Shape={in_det['shape']}, DType={in_det['dtype']}")
+                logger.info(f"CNN1D TFLite Output: Shape={out_det['shape']}, DType={out_det['dtype']}")
+                self.model = interpreter
+                logging.info(f"CNN1D-Inferenz nutzt TFLite-Interpreter: {tfl_path}")
         except Exception as e:
-            logging.warning(f"⚠️ _post_load_artifacts: Ladepolitik konnte nicht angewendet werden ({e}).")
-        return
-
-
+            logging.warning(f"CNN1D: TFLite-Interpreter nicht geladen ({e}), nutze Keras-Modell.")
 
     # --- PATCH START ---
     # Patch: Robuste Methode zum Übernehmen des Puffers beim Hot-Swap
@@ -122,39 +102,46 @@ class LSTMInference(BaseInferenceProcessor):
     def _prepare_input_data(self, payload: dict) -> tuple[np.ndarray | None, any, float | None]:
         if not payload:
             return None, None, None
-            
         try:
             payload_lower = {str(k).lower(): v for k, v in payload.items()}
         except AttributeError:
-            logging.error("Fehler beim Konvertieren der Payload-Schlüssel in Kleinbuchstaben.")
+            logging.error("CNN1D: Fehler beim Normalisieren der Payload-Schlüssel.")
             return None, None, None
 
         featured_buffer = self.data_processor.update_and_process(payload_lower)
-        
         if featured_buffer is None or len(featured_buffer) < self.lags:
             return None, None, None
-            
+
+        # --- KORRIGIERTE VERSION START ---
+        # Graceful Skip: Prüfen, ob alle vom Training bekannten Features auch
+        # im live generierten Puffer vorhanden sind.
+        missing_features = [col for col in self.feature_list if col not in featured_buffer.columns]
+        if missing_features:
+            logger.warning(
+                f"Warte: {len(missing_features)} Feature-Spalten fehlen noch (z.B. {missing_features[:3]}). "
+                f"Puffer hat {len(featured_buffer)} Zeilen. Inferenz-Schritt wird übersprungen."
+            )
+            return None, None, None  # Signalisiert, dass der Schritt übersprungen werden soll
+        
         window_df = featured_buffer[self.feature_list].iloc[-self.lags:]
+        # --- KORRIGIERTE VERSION ENDE ---
         
         if window_df.isnull().values.any():
-            logging.warning("NaNs im Inferenz-Fenster entdeckt. Überspringe Schritt.")
+            logging.warning("CNN1D: NaNs im Inferenzfenster – Schritt übersprungen.")
             return None, None, None
-            
+
         window_scaled = self.scaler.transform(window_df.values)
-        inference_window = np.expand_dims(window_scaled, axis=0)
-        
+        inference_window = np.expand_dims(window_scaled, axis=0)  # (1, lags, features)
+
         timestamp = pd.to_datetime(payload_lower.get('datetime'))
         if pd.isna(timestamp):
-            timestamp = pd.Timestamp.utcnow() # Fallback
+            timestamp = pd.Timestamp.utcnow()
 
         key_to_find = self.target_feature.lower()
         true_value = payload_lower.get(key_to_find)
-
         if true_value is None:
-            logging.warning(f"FEHLER (LSTM): 'true_value' für Schlüssel '{key_to_find}' nicht im Payload gefunden.")
+            logging.warning(f"CNN1D: Zielwert '{key_to_find}' nicht im Payload gefunden.")
 
-        logger.debug(f"Input-Window Shape: {inference_window.shape}")
-        
         return inference_window, timestamp, true_value
 
     def _inverse_transform_prediction(self, prediction_scaled: np.ndarray) -> np.ndarray:
@@ -165,43 +152,3 @@ class LSTMInference(BaseInferenceProcessor):
         pred_reshaped = np.asarray(prediction_scaled).reshape(-1, 1)
         return self.y_scaler.inverse_transform(pred_reshaped).flatten()
     
-
-        #     try:
-        #     models_dir = self.config["paths"].get("Models")
-        #     candidates = []
-        #     if self.config.get("model_filename"):
-        #         candidates.append(os.path.join(models_dir, self.config.get("model_filename")))
-        #     candidates += [
-        #         os.path.join(models_dir, "model_quant_int8_full.tflite"),
-        #         os.path.join(models_dir, "model_quant_int8.tflite"),
-        #         os.path.join(models_dir, "model_quant_float16.tflite"),
-        #     ]
-        #     chosen = next((p for p in candidates if p and os.path.exists(p)), None)
-        #     if chosen:
-        #         interpreter = tf.lite.Interpreter(model_path=chosen)
-        #         interpreter.allocate_tensors()
-        #         in_det = interpreter.get_input_details()[0]
-        #         out_det = interpreter.get_output_details()[0]
-        #         logger.info(f"TFLite gewählt: {os.path.basename(chosen)} | Input={in_det['dtype']} {in_det['shape']} → Output={out_det['dtype']} {out_det['shape']}")
-        #         self.model = interpreter
-        #         logging.info(f"ℹ️ LSTM-Inferenz nutzt TFLite-Interpreter: {chosen}")
-        # except Exception as e:
-        #     logging.warning(f"⚠️ TFLite-Interpreter konnte nicht geladen werden ({e}), nutze Keras-Modell.")
-        # return
-        # try:
-        #     models_dir = self.config["paths"].get("Models")
-        #     tfl_name = self.config.get("model_filename", "model_quant_float16.tflite")
-        #     tfl_path = os.path.join(models_dir, tfl_name)
-        #     if os.path.exists(tfl_path):
-        #         interpreter = tf.lite.Interpreter(model_path=tfl_path)
-        #         interpreter.allocate_tensors()
-                
-        #         in_det = interpreter.get_input_details()[0]
-        #         out_det = interpreter.get_output_details()[0]
-        #         logger.info(f"TFLite Input: Shape={in_det['shape']}, DType={in_det['dtype']}")
-        #         logger.info(f"TFLite Output: Shape={out_det['shape']}, DType={out_det['dtype']}")
-                
-        #         self.model = interpreter
-        #         logging.info(f"ℹ️ LSTM-Inferenz nutzt TFLite-Interpreter: {tfl_path}")
-        # except Exception as e:
-        #     logging.warning(f"⚠️ TFLite-Interpreter konnte nicht geladen werden ({e}), nutze Keras-Modell.")

@@ -37,22 +37,51 @@ class CNN1DInference(BaseInferenceProcessor):
         self.lags = int(config.get("lags", 1))
 
     def _post_load_artifacts(self):
-        # Optional: TFLite bevorzugen, wenn vorhanden (analog zur LSTM-Implementierung)
+        """
+        Ladepolitik (vereinheitlicht und robust):
+        - Wenn --model_filename gesetzt ist:
+            * Falls Pfad auf .tflite zeigt -> TFLite-Interpreter laden.
+            * Sonst: Standard (Keras/SK) beibehalten.
+        - Wenn KEIN model_filename und edge_device/enable_edge = True:
+            * Versuche model_quant_float16.tflite zu laden.
+        - Andernfalls: nichts tun (bereits geladenes Keras-Modell bleibt aktiv).
+        """
         try:
-            models_dir = self.config["paths"].get("Models")
-            tfl_name = self.config.get("model_filename", "model_quant_float16.tflite")
-            tfl_path = os.path.join(models_dir, tfl_name)
-            if os.path.exists(tfl_path):
-                interpreter = tf.lite.Interpreter(model_path=tfl_path)
-                interpreter.allocate_tensors()
-                in_det = interpreter.get_input_details()[0]
-                out_det = interpreter.get_output_details()[0]
-                logger.info(f"CNN1D TFLite Input: Shape={in_det['shape']}, DType={in_det['dtype']}")
-                logger.info(f"CNN1D TFLite Output: Shape={out_det['shape']}, DType={out_det['dtype']}")
-                self.model = interpreter
-                logging.info(f"CNN1D-Inferenz nutzt TFLite-Interpreter: {tfl_path}")
+            # Pfad zum Modellordner aus der Konfiguration holen
+            models_dir = self.config.get("paths", {}).get("Models") or self.config.get("Models") or "."
+            # Explizit übergebenen Modellnamen aus der Konfiguration holen
+            explicit_filename = self.config.get("model_filename")
+
+            # Priorität 1: Ein expliziter Modellname wurde übergeben
+            if explicit_filename:
+                chosen_path = explicit_filename if os.path.isabs(explicit_filename) else os.path.join(models_dir, explicit_filename)
+                
+                # Wenn es sich um eine TFLite-Datei handelt, lade den Interpreter
+                if chosen_path.lower().endswith(".tflite") and os.path.exists(chosen_path):
+                    import tensorflow as tf
+                    interpreter = tf.lite.Interpreter(model_path=chosen_path)
+                    interpreter.allocate_tensors()
+                    self.model = interpreter # WICHTIG: Überschreibe das Standard-Keras-Modell
+                    logging.info(f"📦 CNN1D: Explizites TFLite-Modell geladen: {chosen_path}")
+                else:
+                    logging.info(f"📦 CNN1D: Explizites Modell ({explicit_filename}) ist kein TFLite-Modell, verwende Standard-Ladepfad.")
+                return
+
+            # Priorität 2 (Fallback): Wenn kein Modellname gegeben wurde, aber der Edge-Flag aktiv ist
+            edge_flag = bool(self.config.get("edge_device", False) or self.config.get("enable_edge", False))
+            if edge_flag:
+                candidate_path = os.path.join(models_dir, "model_quant_float16.tflite")
+                if os.path.exists(candidate_path):
+                    import tensorflow as tf
+                    interpreter = tf.lite.Interpreter(model_path=candidate_path)
+                    interpreter.allocate_tensors()
+                    self.model = interpreter # WICHTIG: Überschreibe das Standard-Keras-Modell
+                    logging.info(f"⚡ CNN1D: Edge-Flag aktiv, TFLite Float16 geladen: {candidate_path}")
+                else:
+                    logging.warning("⚠️ CNN1D: Edge-Flag aktiv, aber model_quant_float16.tflite nicht gefunden – nutze Standardmodell.")
+        
         except Exception as e:
-            logging.warning(f"CNN1D: TFLite-Interpreter nicht geladen ({e}), nutze Keras-Modell.")
+            logging.warning(f"⚠️ Fehler in _post_load_artifacts: Ladepolitik konnte nicht angewendet werden ({e}). Nutze Standardmodell.")
 
     def _on_artifacts_swapped(self):
         """Puffer‑Warmstart nach Hot‑Swap (analog LSTM/RF)."""
@@ -89,7 +118,20 @@ class CNN1DInference(BaseInferenceProcessor):
         if featured_buffer is None or len(featured_buffer) < self.lags:
             return None, None, None
 
+        # --- KORRIGIERTE VERSION START ---
+        # Graceful Skip: Prüfen, ob alle vom Training bekannten Features auch
+        # im live generierten Puffer vorhanden sind.
+        missing_features = [col for col in self.feature_list if col not in featured_buffer.columns]
+        if missing_features:
+            logger.warning(
+                f"Warte: {len(missing_features)} Feature-Spalten fehlen noch (z.B. {missing_features[:3]}). "
+                f"Puffer hat {len(featured_buffer)} Zeilen. Inferenz-Schritt wird übersprungen."
+            )
+            return None, None, None  # Signalisiert, dass der Schritt übersprungen werden soll
+        
         window_df = featured_buffer[self.feature_list].iloc[-self.lags:]
+        # --- KORRIGIERTE VERSION ENDE ---
+        
         if window_df.isnull().values.any():
             logging.warning("CNN1D: NaNs im Inferenzfenster – Schritt übersprungen.")
             return None, None, None
