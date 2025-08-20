@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from __future__ import annotations
 """
 Experiment Pipeline
 -------------------
@@ -30,15 +31,13 @@ Kompatibel mit:
   - Basistrainer in `ML_Algorithms` (Training programmatisch)
 
 """
-from __future__ import annotations
 import argparse
 import json
 import os
 import sys
 import time
 import csv
-import shutil
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 
@@ -74,9 +73,8 @@ def _import_pipeline_web_app():
     ]
     # Ensure candidate dirs are importable
     ml_path = PROJECT_ROOT / 'ML_Algorithms'
-    if ml_path.exists():
-        if str(ml_path) not in sys.path:
-            sys.path.append(str(ml_path))
+    if ml_path.exists() and str(ml_path) not in sys.path:
+        sys.path.append(str(ml_path))
     for modname, fpath in candidates:
         try:
             return __import__(modname, fromlist=['*'])
@@ -122,22 +120,26 @@ TRAINER_MAP = {
     "cnn1d": ("ML_Algorithms.CNN1D.cnn1d_train", "CNN1DTrainer", "CNN1D"),
     "random_forest": ("ML_Algorithms.Random_Forest.rf_train", "RandomForestTrainer", "Random_Forest"),
     "xgboost": ("ML_Algorithms.XGBOOST.XGBOOST_train", "XGBoostTrainer", "XGBOOST"),
+    # Light XGBoost -> nutzt den XGBoost-Trainer (leichtere Hyperparameter via Config), eigener Ordner-Flag
+    "light_xgboost": ("ML_Algorithms.XGBOOST.XGBOOST_train", "XGBoostTrainer", "LIGHT_XGBOOST"),
 }
 
 # Default-Config-Variablen pro Profil (werden versucht; sonst Fallback -> Basisvariable == Algorithmus)
-DEFAULT_PROFILE_VARS = {
+# Für light_xgboost wahlweise eigene Profile oder Fallback auf xgboost_*.
+DEFAULT_PROFILE_VARS: Dict[str, Dict[str, str]] = {
     "lstm": {"server": "param_lstm_server", "edge": "param_lstm_edge"},
     "cnn1d": {"server": "param_cnn1d_server", "edge": "param_cnn1d_edge"},
     "random_forest": {"server": "random_forest_server", "edge": "random_forest_edge"},
     "xgboost": {"server": "xgboost_server", "edge": "xgboost_edge"},
+    "light_xgboost": {"server": "light_xgboost_server", "edge": "light_xgboost_edge"},
 }
 
 # Modell-Dateien, die als "groß" gelten und nach der Inferenz entfernt werden dürfen
 MODEL_BLOBS_WHITELIST = {
     "keras": ["model.keras"],
     "tflite": ["model_quant_float16.tflite", "model_quant_int8.tflite", "model_quant_int8_full.tflite"],
-    "sklearn": ["model.joblib"],  # RF, ggf. XGBoost speichert .json, behandeln wir separat
-    "xgb": ["model.json"],
+    "sklearn": ["model.joblib"],  # z. B. RF, evtl. Lasso/SVM später
+    "xgb": ["model.json"],        # XGBoost & Light-XGBoost
 }
 
 # Datei- und Ordnernamen
@@ -221,11 +223,13 @@ def _safe_float(v) -> Optional[float]:
 # ---------------------------
 
 def load_profile_config(algorithm: str, profile: str) -> Tuple[dict, str]:
-    """Versucht, ein Profil-Config-Objekt dynamisch zu laden; fällt andernfalls auf Basisvariable zurück."""
+    """Versucht, ein Profil-Config-Objekt dynamisch zu laden; fällt andernfalls auf Basisvariable zurück.
+       Für light_xgboost wird bei Bedarf auf die xgboost-Configs zurückgefallen.
+    """
     algo = algorithm.lower()
     varname = DEFAULT_PROFILE_VARS.get(algo, {}).get(profile)
     cfg = None
-    used = None
+    used: Optional[str] = None
 
     # 1) Versuche Profil-Variable (z. B. param_cnn1d_server)
     if varname:
@@ -237,38 +241,31 @@ def load_profile_config(algorithm: str, profile: str) -> Tuple[dict, str]:
         except Exception:
             cfg = None
 
-    # 2) Fallback: Basisvariable == Algorithmus (z. B. cnn1d, lstm, random_forest, xgboost)
+    # 2) Fallback: Basisvariable == Algorithmus
     if cfg is None:
-        cfg = load_config_dynamically(algo, algo)
-        used = algo
+        try:
+            cfg = load_config_dynamically(algo, algo)
+            used = algo
+        except Exception:
+            cfg = None
 
-    return cfg, used  # (dict, varname)
+    # 3) Spezieller Fallback: light_xgboost -> xgboost
+    if cfg is None and algo == "light_xgboost":
+        try:
+            base_var = DEFAULT_PROFILE_VARS.get("xgboost", {}).get(profile, "xgboost")
+            cfg = load_config_dynamically("xgboost", base_var)
+            used = base_var + " (via light_xgboost)"
+        except Exception:
+            cfg = load_config_dynamically("xgboost", "xgboost")
+            used = "xgboost (via light_xgboost)"
 
-
-def build_training_config(base_cfg: dict, profile: str, lags: int, horizon: int) -> dict:
-    """Mergt allgemeine Pfade/Flags, setzt Lags/Horizon, Profile-Flags etc."""
-    # Pfade aus config_general
-    merged = _deep_merge(base_cfg, {
-        "paths": CONFIG_PATH["paths"],
-        # keine Web-UI, keine Retrainings in diesem Trainingsteil
-        "inference_mode": "load_artifacts_path",
-        "edge_device": (profile == "edge"),
-        "enable_edge": (profile == "edge"),
-        "lags": int(lags),
-        "horizon": int(horizon),
-    })
-
-    # MQTT/Allg. Laufzeitwerte NICHT zwingend fürs Training nötig – für Einheitlichkeit setzen
-    merged = _deep_merge(merged, CONFIG_LOAD_ARTIFACTS)
-    merged = _deep_merge(merged, MQTT_CONFIG)
-
-    # Experimentordner erzeugen (train)
-    merged, _ = PU.setup_experiment(merged, merged.get("model_name", base_cfg.get("model_name", algorithm_to_folder(base_cfg.get("model_name", "MODEL")))), run_type="train")
-    return merged
+    return cfg, (used or algo)
 
 
 def algorithm_to_folder(name_or_flag: str) -> str:
     n = (name_or_flag or "").lower()
+    if "light_xgboost" in n or "light-xgboost" in n or "light xgboost" in n:
+        return "Light_XGBOOST"
     if "lstm" in n:
         return "LSTM"
     if "cnn" in n:
@@ -280,6 +277,31 @@ def algorithm_to_folder(name_or_flag: str) -> str:
     return name_or_flag.upper() or "MODEL"
 
 
+def build_training_config(base_cfg: dict, profile: str, lags: int, horizon: int, folder_flag: str) -> dict:
+    """Mergt allgemeine Pfade/Flags, setzt Lags/Horizon, Profile-Flags etc.
+       Wichtig: setup_experiment mit dem kanonischen Ordner-Flag ausführen,
+       damit die Run-Ordner exakt zum Algorithmus-Ordner passen.
+    """
+    merged = _deep_merge(base_cfg, {
+        "paths": CONFIG_PATH["paths"],
+        # keine Web-UI, keine Retrainings in diesem Trainingsteil
+        "inference_mode": "load_artifacts_path",
+        "edge_device": (profile == "edge"),
+        "enable_edge": (profile == "edge"),
+        # Exakt vorgegebene Lags/Horizon übernehmen
+        "lags": int(lags),
+        "horizon": int(horizon),
+    })
+
+    # MQTT/Allg. Laufzeitwerte für Einheitlichkeit setzen
+    merged = _deep_merge(merged, CONFIG_LOAD_ARTIFACTS)
+    merged = _deep_merge(merged, MQTT_CONFIG)
+
+    # Experimentordner erzeugen (train) – *mit* folder_flag
+    merged, _ = PU.setup_experiment(merged, folder_flag, run_type="train")
+    return merged
+
+
 # ---------------------------
 # Training (programmatisch)
 # ---------------------------
@@ -288,8 +310,24 @@ def run_training(algorithm: str, config: dict, folder_flag: str) -> Tuple[str, P
     """Startet das programmatische Training und gibt (run_id, models_dir) zurück."""
     module, clsname, default_flag = TRAINER_MAP[algorithm]
     Trainer = _try_import(module, clsname)
-    trainer = Trainer(config=config, folder_flag=folder_flag or default_flag)
+    use_flag = folder_flag or default_flag
+    t0 = time.perf_counter()
+    trainer = Trainer(config=config, folder_flag=use_flag)
     trainer.run(save_artifacts=True)
+    dur_s = time.perf_counter() - t0
+
+    # Trainingszeit in training_config.json mitschreiben (für spätere Auswertung)
+    try:
+        training_cfg_json = Path(config["paths"]["Models"]) / "training_config.json"
+        if training_cfg_json.exists():
+            with open(training_cfg_json, "r", encoding="utf-8") as f:
+                js = json.load(f)
+            js["training_time_s"] = round(float(dur_s), 3)
+            with open(training_cfg_json, "w", encoding="utf-8") as f:
+                json.dump(js, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        print(f"⚠️ Could not write training_time_s: {e}")
+
     run_id = str(config.get("run_id"))
     models_dir = Path(config["paths"]["Models"])  # durch setup_experiment gesetzt
     return run_id, models_dir
@@ -301,7 +339,7 @@ def run_training(algorithm: str, config: dict, folder_flag: str) -> Tuple[str, P
 
 def list_model_variants(models_dir: Path, algorithm: str) -> List[str]:
     """Findet vorhandene Modellvarianten in einem Models-Ordner und gibt Dateinamen zurück."""
-    candidates = []
+    candidates: List[str] = []
     # Keras / TFLite Varianten
     for p in MODEL_BLOBS_WHITELIST["keras"] + MODEL_BLOBS_WHITELIST["tflite"]:
         if (models_dir / p).exists():
@@ -310,7 +348,7 @@ def list_model_variants(models_dir: Path, algorithm: str) -> List[str]:
     for p in MODEL_BLOBS_WHITELIST["sklearn"]:
         if (models_dir / p).exists():
             candidates.append(p)
-    # XGBoost
+    # XGBoost (inkl. Light)
     for p in MODEL_BLOBS_WHITELIST["xgb"]:
         if (models_dir / p).exists():
             candidates.append(p)
@@ -332,7 +370,7 @@ def run_inference_via_subprocess(
     """Ruft pipeline_web_app.py für eine reine Inferenz auf. Gibt den Exitcode zurück."""
     py = sys.executable
     # Resolve pipeline_web_app path robustly (root or ML_Algorithms)
-    app_path_candidates = []
+    app_path_candidates: List[Path] = []
     try:
         from types import ModuleType
         if '_pwa' in globals() and isinstance(_pwa, ModuleType):
@@ -343,7 +381,7 @@ def run_inference_via_subprocess(
         PROJECT_ROOT / 'pipeline_web_app.py',
         PROJECT_ROOT / 'ML_Algorithms' / 'pipeline_web_app.py',
     ]
-    app = None
+    app: Optional[Path] = None
     for cand in app_path_candidates:
         if cand and isinstance(cand, Path) and cand.exists():
             app = cand
@@ -473,7 +511,6 @@ def cleanup_scalers(scalers_dir: Path) -> None:
         print(f"ℹ️ No scaler files found in {scalers_dir} to delete.")
 
 
-
 def cleanup_model_binaries(models_dir: Path) -> None:
     """Löscht große Modellbinaries (bevorzugt Whitelist), belässt Metadaten & CSVs."""
     to_delete = set()
@@ -481,7 +518,6 @@ def cleanup_model_binaries(models_dir: Path) -> None:
         fp = models_dir / p
         if fp.exists():
             to_delete.add(fp)
-    
 
     for fp in sorted(to_delete):
         try:
@@ -495,12 +531,83 @@ def cleanup_model_binaries(models_dir: Path) -> None:
 # Orchestrierung
 # ---------------------------
 
+def _run_all_inferences_and_summarize(
+    algo: str,
+    cfg: dict,
+    run_id: str,
+    models_dir: Path,
+    inference_steps: int,
+    loading_strategy: str,
+    interval_sec: float,
+    summary_csv: Path,
+    delete_models_after_inference: bool,
+) -> None:
+    """Führt für einen Run alle vorhandenen Modellvarianten aus, fasst zusammen, räumt *am Ende* auf."""
+    variants = list_model_variants(models_dir, algo)
+    if not variants:
+        print("⚠️ No model variants found – skipping inference for this run.")
+        return
+
+    for variant in variants:
+        rc = run_inference_via_subprocess(
+            algorithm=algo,
+            run_id=run_id,
+            model_filename=variant,
+            inference_steps=inference_steps,
+            loading_strategy=loading_strategy,
+            interval_sec=interval_sec,
+        )
+        if rc != 0:
+            print(f"⚠️ Inference subprocess returned code {rc} for {variant} (run_id={run_id})")
+
+        # --- Auswertung
+        err_dir = Path(cfg["paths"]["Error_Metrics"]) if "paths" in cfg else (Path(CONFIG_PATH["paths"]["output"]) / "Error_Metrics")
+        pred_dir = Path(cfg["paths"].get("Prediction_Data"))
+        step_csv = _discover_predictions_file_from_json(run_id, err_dir) or _fallback_find_step_csv(run_id, pred_dir)
+
+        avg_inf_ms, avg_total_ms, avg_cpu, avg_ram = (None, None, None, None)
+        if step_csv and step_csv.exists():
+            avg_inf_ms, avg_total_ms, avg_cpu, avg_ram = summarize_step_csv(step_csv)
+        else:
+            print("⚠️ StepPredictions CSV not found for run – summary metrics will be empty.")
+
+        # Trainings-Config lesen (Modellgröße)
+        training_cfg_json = Path(cfg["paths"]["Models"]) / "training_config.json"
+        model_size_mb = read_model_size_mb(training_cfg_json)
+
+        res = InferenceResult(
+            algorithm=algo,
+            profile="edge" if cfg.get("edge_device") or cfg.get("enable_edge") else "server",
+            lags=int(cfg.get("lags", 0)),
+            horizon=int(cfg.get("horizon", 0)),
+            model_variant=variant,
+            avg_inference_time_ms=avg_inf_ms,
+            avg_total_time_ms=avg_total_ms,
+            avg_cpu_percent=avg_cpu,
+            avg_ram_percent=avg_ram,
+            model_size_mb=model_size_mb,
+            run_id=run_id,
+        )
+        append_summary_row(summary_csv, res)
+        print(f"📈 Summary row appended for {variant} -> {summary_csv}")
+
+    # --- Aufräumen *nach* allen Varianten (wichtiger Fix: Scaler erst am Ende löschen!)
+    if delete_models_after_inference:
+        cleanup_model_binaries(models_dir)
+        try:
+            scalers_dir = Path(cfg["paths"]["Scalers"]) if "paths" in cfg else None
+            if scalers_dir:
+                cleanup_scalers(scalers_dir)
+        except Exception as e:
+            print(f"⚠️ Could not clean scalers: {e}")
+
+
 def run_experiments(
     algorithms: List[str],
     profiles: List[str],
     lags_values: List[int],
     horizon_values: List[int],
-    inference_steps: int = 60,
+    inference_steps: int = 20,
     loading_strategy: str = "live_mqtt",
     interval_sec: float = 1.0,
     delete_models_after_inference: bool = True,
@@ -516,91 +623,45 @@ def run_experiments(
         algo = algorithm.lower()
         assert algo in TRAINER_MAP, f"Unsupported algorithm: {algorithm}"
 
-        for profile in profiles:
-            assert profile in ("server", "edge"), "profile must be 'server' or 'edge'"
+        for lags in lags_values:
+            for horizon in horizon_values:
+                if limit_runs is not None and runs_done >= limit_runs:
+                    print("Reached run limit – stopping queue.")
+                    return
 
-            for lags in lags_values:
-                for horizon in horizon_values:
-                    if limit_runs is not None and runs_done >= limit_runs:
-                        print("Reached run limit – stopping queue.")
-                        return
+                # --- SERVER train + infer (falls gewünscht)
+                if "server" in profiles:
+                    base_cfg_s, used_var_s = load_profile_config(algo, "server")
+                    folder_flag_s = algorithm_to_folder(algo)
+                    cfg_s = build_training_config(base_cfg_s, "server", lags, horizon, folder_flag_s)
 
-                    # 1) Konfiguration laden & aufbauen
-                    base_cfg, used_var = load_profile_config(algo, profile)
-                    cfg = build_training_config(base_cfg, profile, lags, horizon)
+                    print(f"\n=== Train {algo} | server | lags={lags} | horizon={horizon} | cfg={used_var_s}")
+                    run_id_s, models_dir_s = run_training(algo, cfg_s, folder_flag_s)
+                    print(f"✅ Training complete. run_id={run_id_s}")
 
-                    folder_flag = algorithm_to_folder(cfg.get("model_name", algo))
+                    _run_all_inferences_and_summarize(
+                        algo, cfg_s, run_id_s, models_dir_s,
+                        inference_steps, loading_strategy, interval_sec,
+                        summary_csv, delete_models_after_inference
+                    )
 
-                    print("\n=== Experiment:", f"{algo} | {profile} | lags={lags} | horizon={horizon} | cfg={used_var}")
+                # --- EDGE train + infer (falls gewünscht)
+                if "edge" in profiles:
+                    base_cfg_e, used_var_e = load_profile_config(algo, "edge")
+                    folder_flag_e = algorithm_to_folder(algo)
+                    cfg_e = build_training_config(base_cfg_e, "edge", lags, horizon, folder_flag_e)
 
-                    # 2) Training (Artefakte werden gespeichert)
-                    run_id, models_dir = run_training(algo, cfg, folder_flag)
-                    print(f"✅ Training complete. run_id={run_id}")
+                    print(f"\n=== Train {algo} | edge | lags={lags} | horizon={horizon} | cfg={used_var_e}")
+                    run_id_e, models_dir_e = run_training(algo, cfg_e, folder_flag_e)
+                    print(f"✅ Training complete. run_id={run_id_e}")
 
-                    # 3) Verfügbare Modellvarianten ermitteln
-                    variants = list_model_variants(models_dir, algo)
-                    if not variants:
-                        print("⚠️ No model variants found – skipping inference for this run.")
-                        continue
+                    _run_all_inferences_and_summarize(
+                        algo, cfg_e, run_id_e, models_dir_e,
+                        inference_steps, loading_strategy, interval_sec,
+                        summary_csv, delete_models_after_inference
+                    )
 
-                    # 4) Inferenz für jede Modellvariante durchführen
-                    for variant in variants:
-                        # RF/XGB -> nur die jeweilige eine Datei ist sinnvoll
-                        rc = run_inference_via_subprocess(
-                            algorithm=algo,
-                            run_id=run_id,
-                            model_filename=variant,
-                            inference_steps=inference_steps,
-                            loading_strategy=loading_strategy,
-                            interval_sec=interval_sec,
-                        )
-                        if rc != 0:
-                            print(f"⚠️ Inference subprocess returned code {rc} for {variant} (run_id={run_id})")
-
-                        # 5) Auswertung
-                        err_dir = Path(cfg["paths"]["Error_Metrics"]) if "paths" in cfg else (Path(CONFIG_PATH["paths"]["output"]) / "Error_Metrics")
-                        pred_dir = Path(cfg["paths"].get("Prediction_Data"))
-
-                        step_csv = _discover_predictions_file_from_json(run_id, err_dir) or _fallback_find_step_csv(run_id, pred_dir)
-
-                        avg_inf_ms, avg_total_ms, avg_cpu, avg_ram = (None, None, None, None)
-                        if step_csv and step_csv.exists():
-                            avg_inf_ms, avg_total_ms, avg_cpu, avg_ram = summarize_step_csv(step_csv)
-                        else:
-                            print("⚠️ StepPredictions CSV not found for run – summary metrics will be empty.")
-
-                        # Trainings-Config lesen (Modellgröße)
-                        training_cfg_json = Path(cfg["paths"]["Models"]) / "training_config.json"
-                        model_size_mb = read_model_size_mb(training_cfg_json)
-
-                        res = InferenceResult(
-                            algorithm=algo,
-                            profile=profile,
-                            lags=lags,
-                            horizon=horizon,
-                            model_variant=variant,
-                            avg_inference_time_ms=avg_inf_ms,
-                            avg_total_time_ms=avg_total_ms,
-                            avg_cpu_percent=avg_cpu,
-                            avg_ram_percent=avg_ram,
-                            model_size_mb=model_size_mb,
-                            run_id=run_id,
-                        )
-                        append_summary_row(summary_csv, res)
-                        print(f"📈 Summary row appended for {variant} -> {summary_csv}")
-
-                        # 6) Aufräumen (nur Binärdateien + Scaler)
-                        if delete_models_after_inference:
-                            cleanup_model_binaries(models_dir)
-                            # Scaler nach jedem Durchlauf entfernen (Prediction Data, train_config etc. bleiben unangetastet)
-                            try:
-                                scalers_dir = Path(cfg["paths"]["Scalers"]) if "paths" in cfg else None
-                                if scalers_dir:
-                                    cleanup_scalers(scalers_dir)
-                            except Exception as e:
-                                print(f"⚠️ Could not clean scalers: {e}")
-
-                    runs_done += 1
+                runs_done += 1
 
 
 # ---------------------------
@@ -609,7 +670,7 @@ def run_experiments(
 
 def main():
     p = argparse.ArgumentParser(description="Experiment-Pipeline (Training -> Inferenz) mit Grid über Lags/Horizon")
-    p.add_argument("--algorithms", default="cnn1d,lstm,random_forest,xgboost", help="Kommagetrennte Liste: cnn1d,lstm,random_forest,xgboost")
+    p.add_argument("--algorithms", default="cnn1d,lstm,random_forest,xgboost,light_xgboost", help="Kommagetrennte Liste: cnn1d,lstm,random_forest,xgboost,light_xgboost")
     p.add_argument("--profiles", default="server,edge", help="Kommagetrennte Liste: server,edge")
     p.add_argument("--lags", default="1:20:2", help="Range 'start:stop:step' oder kommagetrennt (z. B. 1,3,5)")
     p.add_argument("--horizon", default="1:20:2", help="Range 'start:stop:step' oder kommagetrennt")

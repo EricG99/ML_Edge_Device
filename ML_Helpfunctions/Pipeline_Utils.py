@@ -337,95 +337,175 @@ def append_prediction_step(
     return os.path.abspath(output_path)
 
 
-def evaluate_all_metrics(y_true, y_pred, y_train=None, horizon=1, alpha=0.8):
+import numpy as np
+from typing import Optional, Dict, Any
+from sklearn.metrics import (
+    mean_squared_error,
+    mean_absolute_error,
+    r2_score,
+    mean_squared_log_error,
+    median_absolute_error,
+)
+
+def evaluate_all_metrics(
+    y_true,
+    y_pred,
+    y_train: Optional[np.ndarray] = None,
+    horizon: Optional[int] = None,
+    alpha: float = 0.8,
+) -> Dict[str, Any]:
     """
-    Berechnet verschiedene Fehlermetriken für ein- oder mehrstufige Vorhersagen.
-    
+    Berechnet diverse Fehlermetriken für 1- oder Multi-Step-Vorhersagen, NaN-sicher.
+
     Args:
-        y_true (np.ndarray): Wahre Werte (N, H)
-        y_pred (np.ndarray): Vorhersagewerte (N, H)
-        y_train (np.ndarray): Trainingsdaten für MASE
-        horizon (int): Forecast-Horizont
-        alpha (float): Gewichtungsfaktor für weighted MAE bei multi-step Vorhersage
-        
+        y_true: Wahrer Wert(e), Shape (N,) oder (N,H)
+        y_pred: Vorhersage(n), Shape (N,) oder (N,H)
+        y_train: Optional Trainings-Zeitreihe für MASE (1D)
+        horizon: Erwarteter Horizont H; wenn None -> aus Daten abgeleitet (min der Spalten)
+        alpha: 0<alpha<=1, Abklingfaktor für weighted MAE (höhere Gewichte für nahe Schritte)
+
     Returns:
-        dict: Alle Metriken als Schlüssel-Wert-Paare
+        dict mit Metriken. Bei H==1: Skalare; bei H>1: Listenlängen H.
+        Keys: mse, rmse, mae, r2, mape, smape, wape, msle, median_ae, mase, weighted_mae
     """
+    eps = 1e-8
 
-    def safe_divide(a, b):
-        return a / np.where(b == 0, np.finfo(float).eps, b)
+    y_true = np.asarray(y_true, dtype=float)
+    y_pred = np.asarray(y_pred, dtype=float)
 
-    def smape(y_t, y_p):
-        return np.mean(safe_divide(np.abs(y_p - y_t), (np.abs(y_t) + np.abs(y_p)) / 2)) * 100
+    # Vereinheitlichen auf 2D (N,H)
+    if y_true.ndim == 1:
+        y_true = y_true[:, None]
+    if y_pred.ndim == 1:
+        y_pred = y_pred[:, None]
 
-    def wape(y_t, y_p):
-        return np.sum(np.abs(y_t - y_p)) / np.sum(np.abs(y_t)) * 100
+    # Auf gleiche N und H bringen
+    N = min(y_true.shape[0], y_pred.shape[0])
+    H_true = y_true.shape[1]
+    H_pred = y_pred.shape[1]
+    H = min(horizon if horizon is not None else max(H_true, H_pred), H_true, H_pred)
 
-    def weighted_mae(y_t, y_p, alpha):
-        weights = np.array([alpha ** i for i in range(horizon)])[::-1]
-        abs_errors = np.abs(y_t - y_p)
-        return np.mean(abs_errors * weights)
+    y_true = y_true[:N, :H]
+    y_pred = y_pred[:N, :H]
 
-    metrics = {}
+    # Hilfsfunktionen (numerisch stabil)
+    def _smape(yt, yp):
+        denom = np.maximum((np.abs(yt) + np.abs(yp)) / 2.0, eps)
+        return float(np.mean(np.abs(yp - yt) / denom) * 100.0)
 
-    if horizon == 1 or len(y_true.shape) == 1:
-        # Falls 1D, umformen
-        y_true = y_true.flatten()
-        y_pred = y_pred.flatten()
+    def _wape(yt, yp):
+        denom = np.maximum(np.sum(np.abs(yt)), eps)
+        return float(np.sum(np.abs(yt - yp)) / denom * 100.0)
 
-        metrics['mse'] = mean_squared_error(y_true, y_pred)
-        metrics['rmse'] = np.sqrt(metrics['mse'])
-        metrics['mae'] = mean_absolute_error(y_true, y_pred)
-        metrics['r2'] = r2_score(y_true, y_pred)
-        metrics['mape'] = np.mean(np.abs(safe_divide(y_true - y_pred, y_true))) * 100
-        metrics['smape'] = smape(y_true, y_pred)
-        metrics['wape'] = wape(y_true, y_pred)
-        metrics['msle'] = mean_squared_log_error(np.maximum(y_true, 0), np.maximum(y_pred, 0))
-        metrics['median_ae'] = median_absolute_error(y_true, y_pred)
+    # Container
+    out = {
+        "mse": [],
+        "rmse": [],
+        "mae": [],
+        "r2": [],
+        "mape": [],
+        "smape": [],
+        "wape": [],
+        "msle": [],
+        "median_ae": [],
+    }
 
-        if y_train is not None and len(y_train) > 1:
-            naive_forecast = np.abs(np.diff(y_train)).mean()
-            metrics['mase'] = metrics['mae'] / naive_forecast if naive_forecast != 0 else np.nan
+    # Schrittweise (pro Horizont-Spalte) – mit NaN/Inf-Filter
+    for h in range(H):
+        yt = y_true[:, h]
+        yp = y_pred[:, h]
+        mask = np.isfinite(yt) & np.isfinite(yp)
+        yt = yt[mask]
+        yp = yp[mask]
+
+        if yt.size == 0:
+            # Keine gültigen Paare
+            out["mse"].append(np.nan)
+            out["rmse"].append(np.nan)
+            out["mae"].append(np.nan)
+            out["r2"].append(np.nan)
+            out["mape"].append(np.nan)
+            out["smape"].append(np.nan)
+            out["wape"].append(np.nan)
+            out["msle"].append(np.nan)
+            out["median_ae"].append(np.nan)
+            continue
+
+        mse_val = mean_squared_error(yt, yp)
+        out["mse"].append(float(mse_val))
+        out["rmse"].append(float(np.sqrt(mse_val)))
+        out["mae"].append(float(mean_absolute_error(yt, yp)))
+
+        # R^2 kann bei konstantem yt fehlschlagen
+        try:
+            out["r2"].append(float(r2_score(yt, yp)))
+        except ValueError:
+            out["r2"].append(np.nan)
+
+        # MAPE stabil (Division durch ~0 vermeiden)
+        denom = np.maximum(np.abs(yt), eps)
+        out["mape"].append(float(np.mean(np.abs((yt - yp) / denom)) * 100.0))
+
+        # SMAPE/WAPE stabil
+        out["smape"].append(_smape(yt, yp))
+        out["wape"].append(_wape(yt, yp))
+
+        # MSLE braucht Nicht-Negativität
+        yt_pos = np.clip(yt, 0.0, None)
+        yp_pos = np.clip(yp, 0.0, None)
+        try:
+            out["msle"].append(float(mean_squared_log_error(yt_pos, yp_pos)))
+        except ValueError:
+            out["msle"].append(np.nan)
+
+        out["median_ae"].append(float(median_absolute_error(yt, yp)))
+
+    # MASE (auf Basis des mittleren 1-Schritt-Naivfehlers im Train)
+    if y_train is not None:
+        yt = np.asarray(y_train, dtype=float).ravel()
+        yt = yt[np.isfinite(yt)]
+        if yt.size > 1:
+            diffs = np.diff(yt)
+            denom = np.mean(np.abs(diffs[np.isfinite(diffs)])) if diffs.size else np.nan
+            if denom is not None and np.isfinite(denom) and denom > eps:
+                if H == 1:
+                    mase = out["mae"][0] / denom
+                else:
+                    mase = float(np.nanmean(out["mae"]) / denom)
+            else:
+                mase = np.nan
         else:
-            metrics['mase'] = np.nan
-
+            mase = np.nan
     else:
-        # Multistep Forecast: Horizon > 1
-        metrics['mse'] = []
-        metrics['rmse'] = []
-        metrics['mae'] = []
-        metrics['r2'] = []
-        metrics['mape'] = []
-        metrics['smape'] = []
-        metrics['wape'] = []
-        metrics['msle'] = []
-        metrics['median_ae'] = []
+        mase = np.nan
 
-        for t in range(horizon):
-            yt = y_true[:, t]
-            yp = y_pred[:, t]
-            metrics['mse'].append(mean_squared_error(yt, yp))
-            metrics['rmse'].append(np.sqrt(metrics['mse'][-1]))
-            metrics['mae'].append(mean_absolute_error(yt, yp))
-            metrics['r2'].append(r2_score(yt, yp))
-            metrics['mape'].append(np.mean(np.abs(safe_divide(yt - yp, yt))) * 100)
-            metrics['smape'].append(smape(yt, yp))
-            metrics['wape'].append(wape(yt, yp))
-            metrics['msle'].append(mean_squared_log_error(np.maximum(yt, 0), np.maximum(yp, 0)))
-            metrics['median_ae'].append(median_absolute_error(yt, yp))
-
-        if y_train is not None and len(y_train) > 1:
-            naive_forecast = np.abs(np.diff(y_train)).mean()
-            mean_mae = np.mean(metrics['mae'])
-            metrics['mase'] = mean_mae / naive_forecast if naive_forecast != 0 else np.nan
+    # Weighted MAE über den Horizont (größeres Gewicht nahe in der Zukunft)
+    if H == 1:
+        weighted_mae = out["mae"][0]
+    else:
+        # Gewichte: alpha^0, alpha^1, ..., alpha^(H-1) (höchstes Gewicht bei h=0)
+        w = np.array([alpha ** i for i in range(H)], dtype=float)
+        # Nur gültige MAE-Werte berücksichtigen
+        mae_arr = np.array(out["mae"], dtype=float)
+        valid = np.isfinite(mae_arr)
+        if valid.any():
+            w_eff = w[valid]
+            # normierte gewichtete Summe
+            weighted_mae = float(np.sum(w_eff * mae_arr[valid]) / np.sum(w_eff))
         else:
-            metrics['mase'] = np.nan
+            weighted_mae = np.nan
 
-        # Gewichtete Fehler
-        metrics['weighted_mae'] = weighted_mae(y_true, y_pred, alpha)
+    # Bei H==1: in Skalare verwandeln (kompatibel zu bisherigem Verhalten)
+    if H == 1:
+        scalar_out = {k: (v[0] if isinstance(v, list) else v) for k, v in out.items()}
+        scalar_out["mase"] = float(mase) if np.isfinite(mase) else np.nan
+        scalar_out["weighted_mae"] = float(weighted_mae) if np.isfinite(weighted_mae) else np.nan
+        return scalar_out
 
-    return metrics
-
+    # Multi-Step: Listen + aggregierte Kennzahlen ergänzen
+    out["mase"] = float(mase) if np.isfinite(mase) else np.nan
+    out["weighted_mae"] = float(weighted_mae) if np.isfinite(weighted_mae) else np.nan
+    return out
 
 def save_prediction_data(
     config: dict,
