@@ -224,7 +224,7 @@ def _safe_float(v) -> Optional[float]:
 
 def load_profile_config(algorithm: str, profile: str) -> Tuple[dict, str]:
     """Versucht, ein Profil-Config-Objekt dynamisch zu laden; fällt andernfalls auf Basisvariable zurück.
-       Für light_xgboost wird bei Bedarf auf die xgboost-Configs zurückgefallen.
+        Für light_xgboost wird bei Bedarf auf die xgboost-Configs zurückgefallen.
     """
     algo = algorithm.lower()
     varname = DEFAULT_PROFILE_VARS.get(algo, {}).get(profile)
@@ -279,8 +279,8 @@ def algorithm_to_folder(name_or_flag: str) -> str:
 
 def build_training_config(base_cfg: dict, profile: str, lags: int, horizon: int, folder_flag: str) -> dict:
     """Mergt allgemeine Pfade/Flags, setzt Lags/Horizon, Profile-Flags etc.
-       Wichtig: setup_experiment mit dem kanonischen Ordner-Flag ausführen,
-       damit die Run-Ordner exakt zum Algorithmus-Ordner passen.
+        Wichtig: setup_experiment mit dem kanonischen Ordner-Flag ausführen,
+        damit die Run-Ordner exakt zum Algorithmus-Ordner passen.
     """
     merged = _deep_merge(base_cfg, {
         "paths": CONFIG_PATH["paths"],
@@ -366,6 +366,7 @@ def run_inference_via_subprocess(
     inference_steps: int,
     loading_strategy: str = "live_mqtt",
     interval_sec: float = 1.0,
+    config_name: str | None = None,
 ) -> int:
     """Ruft pipeline_web_app.py für eine reine Inferenz auf. Gibt den Exitcode zurück."""
     py = sys.executable
@@ -402,6 +403,8 @@ def run_inference_via_subprocess(
         "--set", f"loading_strategy={loading_strategy}",
         "--set", f"inference_interval_sec={interval_sec}",
     ]
+    if config_name:
+        cmd += ["--config-name", config_name]
     print("[SPAWN] ", " ".join(map(str, cmd)))
     print(f"[INFO] Using pipeline_web_app at: {app}")
     import subprocess
@@ -548,6 +551,10 @@ def _run_all_inferences_and_summarize(
         print("⚠️ No model variants found – skipping inference for this run.")
         return
 
+    # Profil (server/edge) ableiten und passenden Config-Variablennamen wählen
+    profile_key = "edge" if (cfg.get("edge_device") or cfg.get("enable_edge")) else "server"
+    config_name = DEFAULT_PROFILE_VARS.get(algo, {}).get(profile_key, algo)
+
     for variant in variants:
         rc = run_inference_via_subprocess(
             algorithm=algo,
@@ -556,6 +563,7 @@ def _run_all_inferences_and_summarize(
             inference_steps=inference_steps,
             loading_strategy=loading_strategy,
             interval_sec=interval_sec,
+            config_name=config_name,
         )
         if rc != 0:
             print(f"⚠️ Inference subprocess returned code {rc} for {variant} (run_id={run_id})")

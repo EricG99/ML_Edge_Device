@@ -26,8 +26,8 @@ _COMMON = {
     "target_feature": "Group4-2_S6_VolumetricFlowRate",
 
     # Scaling-Flags (bei Bedarf von eurer FE/Trainer-Logik genutzt)
-    "scale_other_features": False,
-    "scale_target": False,
+    "scale_other_features": True,
+    "scale_target": True,
     "scaler_type": "robust",  # 'robust' oder 'minmax'
 
     # Sonstige Flags
