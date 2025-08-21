@@ -543,7 +543,19 @@ class BaseInferenceProcessor(ABC):
 
             
     def _post_load_artifacts(self):
-        pass
+        # Trainings-Config in die Laufzeit-Config übernehmen
+        if getattr(self, "training_config", None):
+            self.config["training_config"] = self.training_config
+            self.config["lags"] = int(self.training_config.get("lags", self.config.get("lags", 1)))
+            self.config["horizon"] = int(self.training_config.get("horizon", self.config.get("horizon", 1)))
+
+        # bisherigen Buffer sichern, dann Prozessor mit korrekten lags neu aufsetzen
+        old_buf = getattr(self.data_processor, "_buffer", None)
+        self.data_processor = RealTimeDataProcessor(self.config)
+        if old_buf is not None and not old_buf.empty:
+            # Buffer wieder einhängen (prime)
+            df = old_buf.reset_index().rename(columns={"index": "datetime"})
+            self.data_processor.prime_buffer(df)
 
     @abstractmethod
     def _prepare_input_data(self, payload: dict) -> tuple[np.ndarray | None, any, float | None]:

@@ -495,23 +495,16 @@ def inference_manager(config: dict, inference_class, folder_flag: str, algorithm
 
         try:
             # --- KORRIGIERTE LOGIK START ---
-            # 1. Merke dir wichtige Kommandozeilen-Argumente, die nicht überschrieben werden dürfen.
-            cli_model_filename = cfg.get("model_filename")
-            cli_loading_strategy = cfg.get("loading_strategy")
-
-            # 2. Lade die Konfiguration aus dem Trainingslauf.
+            # 1. Lade die Konfiguration aus dem Trainingslauf. Sie dient als Basis.
             with open(found, "r", encoding="utf-8") as f:
-                loaded = json.load(f)
+                loaded_from_training = json.load(f)
                 
-            # 3. Führe die Konfigurationen zusammen. Die geladene (`loaded`) überschreibt die Defaults (`cfg`).
-            merged = _deep_merge(cfg, loaded)
-
-            # 4. Stelle sicher, dass die Kommandozeilen-Argumente erhalten bleiben (höchste Priorität).
-            if cli_model_filename:
-                merged["model_filename"] = cli_model_filename
-            if cli_loading_strategy:
-                merged["loading_strategy"] = cli_loading_strategy
-                
+            # 2. Führe die Konfigurationen zusammen.
+            #    Die ursprüngliche `cfg`, die die Kommandozeilen-Argumente enthält,
+            #    überschreibt die Werte aus dem gespeicherten Trainingslauf.
+            #    Dadurch haben CLI-Argumente wie `loading_strategy` die höchste Priorität.
+            merged = _deep_merge(loaded_from_training, cfg)
+            
             merged["mode"] = _mode
             # --- KORRIGIERTE LOGIK ENDE ---
 

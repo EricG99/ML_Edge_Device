@@ -195,26 +195,6 @@ def _to_jsonable(obj):
         return repr(obj)
 
 
-import os
-import json
-import pandas as pd
-import numpy as np # Import für _to_jsonable hinzufügen
-
-# Annahme: Eine Hilfsfunktion _to_jsonable existiert bereits in Ihrer Datei.
-def _to_jsonable(obj):
-    if isinstance(obj, dict):
-        return {k: _to_jsonable(v) for k, v in obj.items()}
-    elif isinstance(obj, list):
-        return [_to_jsonable(i) for i in obj]
-    elif isinstance(obj, (np.integer, np.int64)):
-        return int(obj)
-    elif isinstance(obj, (np.floating, np.float64)):
-        return float(obj)
-    elif isinstance(obj, (np.ndarray, pd.Series)):
-        return _to_jsonable(obj.tolist())
-    elif pd.isna(obj):
-        return None
-    return obj
 
 def save_metrics_summary(
     metrics: dict,

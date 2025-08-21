@@ -29,7 +29,7 @@ random_forest = {
     "include_roll_mean": True,
     "include_roll_std": True,
     "scale_other_features": True, # Für RF oft nicht nötig, aber zur Konsistenz
-    "scale_target": False,
+    "scale_target": True,
 }
 
 # Eine robustere Konfiguration für das eigentliche Training auf dem Server.
