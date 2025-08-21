@@ -6,6 +6,10 @@ __pycache__/
 *.dll
 
 # Virtuelle Umgebungen
+.venv/
+
+.venv_backup/
+
 venv/
 venv_backup/
 
