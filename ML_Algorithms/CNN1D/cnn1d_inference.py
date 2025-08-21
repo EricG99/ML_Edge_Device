@@ -43,56 +43,57 @@ class CNN1DInference(BaseInferenceProcessor):
 
     def _post_load_artifacts(self):
         """
-        Nach dem Laden der Artefakte:
-        - FE-relevante Parameter aus 'training_config.json' übernehmen,
-          Runtime-Overrides (loading_strategy, inference_interval_sec, model_filename, MQTT...) erhalten.
-        - RealTimeDataProcessor mit finaler Config neu initialisieren (inkl. Buffer-Warmstart).
-        - Optional TFLite-Interpreter laden, wenn .tflite gewählt ist.
+        Wird nach dem Laden der Artefakte aufgerufen.
+        Strukturierte Reihenfolge:
+        1. Konfiguration synchronisieren.
+        2. Endgültiges Modellobjekt (Keras oder TFLite) bestimmen.
+        3. `self.lags` basierend auf dem finalen Modell synchronisieren.
         """
-        # 1) Runtime-Overrides sichern
-        preserve_keys = (
-            "loading_strategy", "inference_interval_sec",
-            "mqtt_host", "mqtt_port", "mqtt_topic", "mqtt_username", "mqtt_password",
-            "model_filename"
-        )
-        preserved = {k: self.config.get(k) for k in preserve_keys if k in self.config}
-
-        # 2) Nur FE-kritische Keys aus Trainings-Config übernehmen
-        fe_keys = (
-            "lags", "horizon",
-            "rolling_window_size", "rolling_windows",
-            "max_fe_window", "base_features", "derived_features"
-        )
+        # --- SCHRITT 1: Konfiguration mit Trainings-Artefakten synchronisieren ---
         if getattr(self, "training_config", None):
-            for k in fe_keys:
-                if k in self.training_config:
-                    self.config[k] = self.training_config[k]
+            preserve_keys = ("loading_strategy", "inference_interval_sec", "model_filename")
+            preserved = {k: self.config.get(k) for k in preserve_keys if k in self.config}
+            self.config.update(self.training_config)
+            self.config.update(preserved)
+            self.data_processor = RealTimeDataProcessor(self.config)
+            logging.info("RealTimeDataProcessor re-initialized with loaded training config.")
 
-        # 3) Runtime-Overrides wieder auflegen (haben Vorrang)
-        self.config.update({k: v for k, v in preserved.items() if v is not None})
-
-        # 4) RealTimeDataProcessor mit finaler Config neu aufsetzen & Buffer übernehmen
-        old_buf = getattr(getattr(self, "data_processor", None), "_buffer", None)
-        self.data_processor = RealTimeDataProcessor(self.config)
-        if old_buf is not None and not getattr(old_buf, "empty", True):
-            self.data_processor._buffer = old_buf.tail(
-                getattr(self.data_processor, "_max_buffer_size", len(old_buf))
-            )
-        logging.info("Datenquelle nach Merge: %s", self.config.get("loading_strategy"))
-
-        # 5) Nur TFLite laden, wenn wirklich .tflite verlangt ist (sonst Keras behalten)
+        # --- SCHRITT 2: Endgültiges Modellobjekt bestimmen ---
         model_name = str(self.config.get("model_filename", ""))
         if model_name.endswith(".tflite"):
             try:
-                tfl_path = os.path.join(self.config["paths"]["Models"], model_name)
-                interpreter = tf.lite.Interpreter(model_path=tfl_path)
+                model_path = os.path.join(self.config["paths"]["Models"], model_name)
+                interpreter = tf.lite.Interpreter(model_path=model_path)
                 interpreter.allocate_tensors()
-                self.model = interpreter
-                logging.info("TFLite-Interpreter aktiv (%s).", model_name)
+                self.model = interpreter  # Überschreibe Keras-Modell mit TFLite-Interpreter
+                logging.info(f"📦 TFLite-Interpreter ist jetzt das aktive Modell ({model_name}).")
             except Exception as e:
-                logging.warning("TFLite nicht geladen (%s) – fallback auf Keras.", e)
+                logging.warning(f"⚠️ TFLite konnte nicht geladen werden ({model_name}): {e} – Fallback auf Standardmodell.")
         else:
-            logging.info("Keras-Modell aktiv (%s).", model_name or "model.keras")
+            logging.info(f"📦 Keras-Modell ist das aktive Modell ({model_name or 'model.keras'}).")
+
+        # --- SCHRITT 3: `self.lags` robust mit dem FINALEN Modell synchronisieren ---
+        try:
+            # 3a) Aus finaler Konfiguration als Basiswert übernehmen
+            self.lags = int(self.config.get("lags", self.lags))
+
+            # 3b) Gegenprüfung mit aktivem Modell (egal ob Keras oder TFLite)
+            if hasattr(self.model, "input_shape") and self.model.input_shape:  # Keras
+                model_lags = self.model.input_shape[1]
+                if isinstance(model_lags, int) and model_lags > 0 and model_lags != self.lags:
+                    logging.warning(f"Modell-Input verlangt lags={model_lags}; korrigiere self.lags von {self.lags} -> {model_lags}")
+                    self.lags = model_lags
+            
+            elif hasattr(self.model, "get_input_details"):  # TFLite
+                tflite_lags = int(self.model.get_input_details()[0]["shape"][1])
+                if tflite_lags != self.lags:
+                    logging.warning(f"TFLite-Input verlangt lags={tflite_lags}; korrigiere self.lags von {self.lags} -> {tflite_lags}")
+                    self.lags = tflite_lags
+            
+            logging.info(f"Finale Synchronisierung: `self.lags` ist jetzt auf {self.lags} gesetzt.")
+
+        except Exception as e:
+            logging.error(f"Fehler bei der finalen Synchronisierung von self.lags: {e}")
 
     def _prepare_input_data(self, payload: dict) -> tuple[np.ndarray | None, any, float | None]:
         """Bereitet einen Inferenz-Schritt vor und gibt (X_window[1,L,F], timestamp, true_value) zurück."""

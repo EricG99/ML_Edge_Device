@@ -19,7 +19,7 @@ xgb_default = {
     "add_lag_features": True,
     "add_rolling_features": True,
     "scale_other_features": True,   # X-Scaler
-    "scale_target": False,          # y wird bei XGB nicht skaliert
+    "scale_target": True,          # y wird bei XGB nicht skaliert
 
     # Inferenz
     "inference_interval_sec": 1.0,
