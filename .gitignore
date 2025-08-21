@@ -25,4 +25,4 @@ venv_backup/
 .DS_Store
 Thumbs.db
 # Standardmäßig den gesamten Output-Ordner ignorieren
-Output/
+
