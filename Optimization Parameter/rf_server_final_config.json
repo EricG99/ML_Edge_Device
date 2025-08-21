@@ -61,12 +61,12 @@
   },
   "optimize_on": "server",
   "deployment_profile": "server",
-  "n_estimators": 952,
-  "max_depth": 36,
-  "min_samples_split": 9,
+  "n_estimators": 563,
+  "max_depth": null,
+  "min_samples_split": 4,
   "min_samples_leaf": 5,
-  "max_features": 0.3345252403977498,
-  "bootstrap": false,
+  "max_features": 0.43129532446351315,
+  "bootstrap": true,
   "n_jobs": -1,
   "random_state": 42
 }
