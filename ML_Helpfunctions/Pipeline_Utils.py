@@ -1170,23 +1170,23 @@ def load_model_artifacts_for_inference(config: dict, folder_flag: str) -> tuple:
     elif model_path.endswith(".tflite"):
         logging.info("Lade TFLite-Modell mit TensorFlow Lite Interpreter.")
         
-        # --- START DER ÄNDERUNG ---
         try:
-            # Import am Anfang der Datei hinzufügen, falls nicht vorhanden
             import tensorflow as tf
-
-            # Versuche, den Interpreter mit dem Flex Delegate zu laden (für das Edge Device / Linux)
             delegates = [tf.lite.experimental.load_delegate('libtensorflowlite_flex.so')]
+            
             interpreter = tf.lite.Interpreter(
                 model_path=model_path,
-                experimental_delegates=delegates
+                experimental_delegates=delegates,
+                # --- DIESE ZEILE IST NEU ---
+                experimental_disable_delegate_clustering=True
             )
             logging.info("✅ TFLite Flex Delegate erfolgreich geladen.")
         except (ValueError, OSError) as e:
-            # Fallback für Systeme (wie Windows), wo die .so-Datei nicht existiert oder nicht benötigt wird
-            logging.warning(f"Flex Delegate konnte nicht geladen werden: {e}. Versuche es ohne (Standard für PC)...")
+            logging.warning(f"Flex Delegate konnte nicht geladen werden: {e}. Versuche es ohne...")
             interpreter = tf.lite.Interpreter(model_path=model_path)
-        # --- ENDE DER ÄNDERUNG ---
+
+        interpreter.allocate_tensors()
+        model = interpreter
 
         interpreter.allocate_tensors()
         model = interpreter
