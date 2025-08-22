@@ -23,6 +23,7 @@ from sklearn.multioutput import MultiOutputRegressor
 
 import tensorflow as tf
 
+# Der Rest des Codes bleibt gleich
 from sklearn.metrics import (
     mean_squared_error, 
     mean_absolute_error,
@@ -1168,10 +1169,27 @@ def load_model_artifacts_for_inference(config: dict, folder_flag: str) -> tuple:
         model = joblib.load(model_path)
     elif model_path.endswith(".tflite"):
         logging.info("Lade TFLite-Modell mit TensorFlow Lite Interpreter.")
-        interpreter = tf.lite.Interpreter(model_path=model_path)
+        
+        # --- START DER ÄNDERUNG ---
+        try:
+            # Import am Anfang der Datei hinzufügen, falls nicht vorhanden
+            import tensorflow as tf
+
+            # Versuche, den Interpreter mit dem Flex Delegate zu laden (für das Edge Device / Linux)
+            delegates = [tf.lite.experimental.load_delegate('libtensorflowlite_flex.so')]
+            interpreter = tf.lite.Interpreter(
+                model_path=model_path,
+                experimental_delegates=delegates
+            )
+            logging.info("✅ TFLite Flex Delegate erfolgreich geladen.")
+        except (ValueError, OSError) as e:
+            # Fallback für Systeme (wie Windows), wo die .so-Datei nicht existiert oder nicht benötigt wird
+            logging.warning(f"Flex Delegate konnte nicht geladen werden: {e}. Versuche es ohne (Standard für PC)...")
+            interpreter = tf.lite.Interpreter(model_path=model_path)
+        # --- ENDE DER ÄNDERUNG ---
+
         interpreter.allocate_tensors()
         model = interpreter
-    # KORREKTUR: Fall für XGBoost-Modelle im .json-Format hinzugefügt
     elif model_path.endswith(".json"):
         try:
             import xgboost as xgb
