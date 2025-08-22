@@ -1,108 +1,121 @@
-
 # config/config_ml_cnn1d.py
 # -----------------------------------------------------------------------------
-# Konfigurationen für ein 1D-CNN (Zeitsereien-Forecasting) in der bestehenden Pipeline
-# Diese Datei folgt der Struktur von config_ml_lstm.py und ergänzt CNN-spezifische Parameter.
+# 1D-CNN Konfigurationen im gleichen Stil wie die Random-Forest-Config
+# Erwartete Profil-Variablen:
+#   - cnn1d_edge
+#   - cnn1d_server
+# Zusätzlich bleibt 'cnn1d' als Alias für Abwärtskompatibilität erhalten.
 # -----------------------------------------------------------------------------
 
-
-# ==========================
-# Pipeline-Default (wie 'lstm' in LSTM-Config)
-# ==========================
-cnn1d = {
-    # --- Allgemein ---
-    "model_name": "cnn1d_csv_split",
-    "dataset": "mqtt_data_filtered.csv",
+_COMMON = {
     "model_filename": "model.keras",
+    "dataset": "mqtt_data_filtered.csv",
     "loading_strategy": "split",
     "train_fraction": 0.8,
-    "edge_device": True,  # optionaler Export (z. B. TFLite), wenn im Saver implementiert
 
-    # --- CNN1D-Architektur ---
-    "cnn_blocks": 2,
-    "cnn_base_filters": 64,
-    "cnn_kernel_size": 5,
-    "cnn_dropout": 0.1,
-    "cnn_activation": "relu",
-
-    # --- Training ---
-    "epochs": 20,
-    "batch_size": 32,
-    "validation_fraction": 0.2,
-    "early_stopping_patience": 10,
-    "loss": "huber",
-
-    # --- Zeitreihen ---
     "lags": 4,
     "horizon": 4,
-    "rolling_window_size": 2,
 
-    # --- Feature Engineering ---
-    "base_features": ['group4-2_s6_massflowrate'],
-    "add_lag_features": True,
-    "add_rolling_features": True,
+    "base_features": ["Group4-2_S6_VolumetricFlowRate", "Group4-2_S6_MassFlowRate"],
+    "time_features": [],
+    "target_feature": "Group4-2_S6_VolumetricFlowRate",
+
     "scale_other_features": True,
     "scale_target": True,
+    "scaler_type": "robust",
 
-    # --- Inferenz ---
     "inference_interval_sec": 1.0,
+
+    "edge_device": False,
+    "enable_edge": False,
 }
 
-# =================================================================================
-# Vollständige Laufzeit-Konfiguration (Beispiel für CNN1D)
-# =================================================================================
-full_runtime_config = {
-    # --- Basis ---
-    "model_name": "cnn1d_csv_split",
-    "dataset": "mqtt_data_rate_limited.csv",
-    "model_filename": "model_quant_float16.tflite",
-    "loading_strategy": "split",
-    "train_fraction": 0.7,
+# -----------------------
+# EDGE-Profil (beste gefundenen Hyperparameter)
+# -----------------------
+cnn1d_edge = {
+    **_COMMON,
+    "model_name": "cnn1d_edge",
     "edge_device": True,
+    "enable_edge": True,
 
-    # --- CNN1D ---
-    "cnn_blocks": 2,
-    "cnn_base_filters": 64,
-    "cnn_kernel_size": 5,
-    "cnn_dropout": 0.1,
+    # Architektur/Training
+    "cnn_blocks": 1,
+    "cnn_base_filters": 53,
+    "cnn_kernel_size": 4,
+    "cnn_dropout": 0.065602573828099,
     "cnn_activation": "relu",
+    "batch_size": 64,
+    "epochs": 45,
+    "optimizer": "adam",
+    "learning_rate": 0.0037156674895811818,
+    "clipnorm": 1.919118551198806,
 
-    # --- Training ---
-    "epochs": 1,
-    "batch_size": 32,
+    "validation_fraction": 0.2,
+    "early_stopping_patience": 10,
+    "loss": "huber",  # Trainingsverlust (kann von Trainer überschrieben werden)
+
+    "model_params": {
+        "cnn_blocks": 1,
+        "cnn_base_filters": 53,
+        "cnn_kernel_size": 4,
+        "cnn_dropout": 0.065602573828099,
+        "cnn_activation": "relu",
+        "batch_size": 64,
+        "epochs": 45,
+        "optimizer": "adam",
+        "learning_rate": 0.0037156674895811818,
+        "clipnorm": 1.919118551198806,
+        "loss": "huber",
+    },
+
+    "include_roll_mean": True,
+    "include_roll_std": False,
+}
+
+# -----------------------
+# SERVER-Profil (beste gefundenen Hyperparameter)
+# -----------------------
+cnn1d_server = {
+    **_COMMON,
+    "model_name": "cnn1d_server",
+    "edge_device": False,
+    "enable_edge": False,
+
+    "cnn_blocks": 3,
+    "cnn_base_filters": 179,
+    "cnn_kernel_size": 8,
+    "cnn_dropout": 0.3526360292774605,
+    "cnn_activation": "relu",
+    "batch_size": 64,
+    "epochs": 93,
+    "optimizer": "adam",
+    "learning_rate": 0.0011596536884349142,
+    "clipnorm": 0.9715310388202569,
+    "weight_decay": 2.4406586941580645e-05,
+
     "validation_fraction": 0.2,
     "early_stopping_patience": 10,
     "loss": "huber",
 
-    # --- Zeitreihe ---
-    "lags": 1,
-    "horizon": 20,
-    "rolling_window_size": 2,
+    "model_params": {
+        "cnn_blocks": 3,
+        "cnn_base_filters": 179,
+        "cnn_kernel_size": 8,
+        "cnn_dropout": 0.3526360292774605,
+        "cnn_activation": "relu",
+        "batch_size": 64,
+        "epochs": 93,
+        "optimizer": "adam",
+        "learning_rate": 0.0011596536884349142,
+        "clipnorm": 0.9715310388202569,
+        "weight_decay": 2.4406586941580645e-05,
+        "loss": "huber",
+    },
 
-    # --- Features ---
-    "base_features": ['Group4-2_S6_MassFlowRate'],
-    "time_features": [],
-    "add_lag_features": True,
-    "add_rolling_features": True,
-    "scale_other_features": True,
-    "scale_target": True,
-
-    # --- Inferenz- & Retraining-Steuerung ---
-    "inference_interval_sec": 1.0,
-    "inference_steps": 500,
-    "retraining_cycles": 3,
-
-    # --- Artefakt-Lade-Strategie ---
-    "inference_mode": "load_artifacts_path",  # "load_artifacts_fast" oder "load_artifacts_path"
-
-    # --- MQTT (nur falls loading_strategy = "live_mqtt") ---
-    "MQTT_BROKER_IP": "192.168.0.101",
-    "MQTT_PORT": 1883,
-    "MQTT_TOPIC": "sim/data/20240341/S6",
-
-    # --- Pfade (werden in der App evtl. erweitert) ---
-    "paths": {
-        "input": "C:/DEV/RevPi_ML/ML_Edge_Device/Input",
-        "output": "C:/DEV/RevPi_ML/ML_Edge_Device/Output"
-    }
+    "include_roll_mean": True,
+    "include_roll_std": True,
 }
+
+# Alias für Abwärtskompatibilität (bisher hieß das Profil 'cnn1d')
+cnn1d = cnn1d_edge
