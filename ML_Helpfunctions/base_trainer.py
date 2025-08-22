@@ -117,12 +117,24 @@ class BaseTrainer(ABC):
             # Hier wird jetzt der korrekte, bereits erstellte Pfad verwendet.
             logging.info("Saving in 'path' mode with versioned directory...")
             saver = Pipeline_Utils.ModelScalerSaver(self.config, paths)
-            saved_artifacts = rep_gen = None
-            try:
-                rep_gen = Pipeline_Utils.create_representative_dataset_generator(getattr(self, '_rep_source', None), config=self.config)
-            except TypeError:
-                # Fallback für ältere Signaturen (nur eine Positionals)
-                rep_gen = Pipeline_Utils.create_representative_dataset_generator(getattr(self, '_rep_source', None))
+            
+            # --- ANGEPASSTE LOGIK ZUR STEUERUNG DER QUANTISIERUNG START ---
+            rep_gen = None
+            # Prüft, ob die Quantisierung in der Konfiguration aktiviert ist (Standard ist True)
+            if self.config.get('quantization_enabled', True):
+                logging.info("Quantization is enabled. Creating representative dataset for TFLite conversion.")
+                saved_artifacts = None
+                try:
+                    rep_gen = Pipeline_Utils.create_representative_dataset_generator(getattr(self, '_rep_source', None), config=self.config)
+                except TypeError:
+                    # Fallback für ältere Signaturen (nur eine Positionals)
+                    rep_gen = Pipeline_Utils.create_representative_dataset_generator(getattr(self, '_rep_source', None))
+            else:
+                logging.info("Quantization is disabled via config. Skipping representative dataset generation.")
+            # --- ANGEPASSTE LOGIK ZUR STEUERUNG DER QUANTISIERUNG ENDE ---
+
+            # Das (potenziell leere) rep_gen wird an die Speicherfunktion übergeben.
+            # Diese Funktion muss intern damit umgehen können, um die Quantisierung zu überspringen.
             saved_artifacts = saver.save_artifacts(model=self.model, scaler=self.scaler, representative_dataset=rep_gen)
             
             # Speichere den dedizierten y_scaler, falls er existiert
@@ -136,7 +148,8 @@ class BaseTrainer(ABC):
                 features_path = os.path.join(paths.get("Models"), "features.joblib")
                 joblib.dump(self.features, features_path)
                 logging.info(f"Feature list saved to: {features_path}")
-                saved_artifacts["features_path"] = features_path
+                if saved_artifacts is not None:
+                    saved_artifacts["features_path"] = features_path
             except Exception as e:
                 logging.error(f"Failed to save feature list: {e}")
 

@@ -1,5 +1,6 @@
 # pipeline_web_app.py
 
+from html import parser
 import time
 import logging
 import argparse
@@ -51,7 +52,7 @@ def load_config_dynamically(algorithm: str, config_name: str) -> dict:
         module_path = f"config.config_ml_{algorithm}"
         config_module = importlib.import_module(module_path)
         config_dict = getattr(config_module, config_name)
-        logging.info(f"Konfiguration '{config_name}' erfolgreich aus '{module_path}' geladen.")
+        logging.info(f"Konfiguration '{config_name}' erfolgrePich aus '{module_path}' geladen.")
         return deepcopy(config_dict)
     except (ImportError, AttributeError) as e:
         logging.error(f"Fehler beim dynamischen Laden der Konfiguration '{config_name}' aus '{module_path}': {e}", exc_info=True)
@@ -795,7 +796,7 @@ def inference_manager(config: dict, inference_class, folder_flag: str, algorithm
 
 def main():
     parser = argparse.ArgumentParser(description="Vereinheitlichte ML-Pipeline mit Web-UI")
-    parser.add_argument('--algorithm', type=str, required=True, choices=['random_forest', 'lstm', 'cnn1d', 'xgboost'],
+    parser.add_argument('--algorithm', type=str, required=True, choices=['random_forest', 'lstm', 'cnn1d', 'xgboost', 'light_xgboost'],
                         help="Zu verwendender Algorithmus.")
     parser.add_argument('--config-name', type=str, help="Optional: Name der Konfigurationsvariable.")
     parser.add_argument('--retraining', action=argparse.BooleanOptionalAction, default=False,
@@ -818,6 +819,10 @@ def main():
     # NEU: Inline-Overrides (optional, mehrfach nutzbar)
     parser.add_argument("--set", action="append", default=[],
                         help="Konfigurations-Override als key=value (mehrfach möglich).")
+    
+       # --- NEUES ARGUMENT HINZUFÜGEN ---
+    parser.add_argument("--no-quantization", action="store_true",
+                        help="Deaktiviert die TFLite-Quantisierung (erstellt nur das Standard .keras Modell).")
 
     args = parser.parse_args()
 
@@ -828,6 +833,14 @@ def main():
 
     # Konfiguration laden
     config = load_config_dynamically(args.algorithm, args.config_name)
+
+    # --- NEUE FLAG IN CONFIG SETZEN ---
+    if args.no_quantization:
+        config['quantization_enabled'] = False
+        logging.info("Kommandozeilen-Flag --no-quantization erkannt. Quantisierung wird deaktiviert.")
+    else:
+        # Standardmäßig ist die Quantisierung aktiviert
+        config['quantization_enabled'] = True
 
     # Algorithmus-spezifische Klassen wählen
     if args.algorithm == 'random_forest':
@@ -842,6 +855,13 @@ def main():
         trainer_class = XGBoostTrainer
         inference_class = XGBoostInference
         folder_flag = "XGBOOST"
+
+    elif args.algorithm == 'light_xgboost':
+            from ML_Algorithms.XGBOOST.XGBOOST_train import XGBoostTrainer
+            from ML_Algorithms.XGBOOST.XGBOOST_inference import XGBoostInference
+            trainer_class = XGBoostTrainer
+            inference_class = XGBoostInference
+            folder_flag = "Light_XGBOOST"
 
     else:
         from ML_Algorithms.LSTM.LSTM_train import LSTMTrainer

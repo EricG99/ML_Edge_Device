@@ -1087,7 +1087,7 @@ def load_model_artifacts_for_inference(config: dict, folder_flag: str) -> tuple:
 
     Args:
         config (dict): Das Konfigurations-Wörterbuch, das den Modus und die Pfade enthält.
-        folder_flag (str): Der modellspezifische Ordnername (z.B. "LSTM" oder "RandomForest").
+        folder_flag (str): Der modellspezifische Ordnername (z.B. "LSTM" oder "XGBOOST").
 
     Returns:
         tuple: Ein Tupel mit den geladenen Artefakten in der Reihenfolge 
@@ -1100,22 +1100,12 @@ def load_model_artifacts_for_inference(config: dict, folder_flag: str) -> tuple:
         FileNotFoundError: Wenn eine der Artefakt-Dateien nicht gefunden wird.
 
     ---------------------------------------------------------------------------
-    Modi:
+    Modi & unterstützte Modelle:
     ---------------------------------------------------------------------------
-    1. mode: 'load_artifacts_fast' (Statischer Modus)
-       Lädt Artefakte von fest definierten Pfaden. Ideal für schnelles Testen.
-       Benötigte Schlüssel in der config:
-       - "model_path_static": "trained_rf_model.joblib" (oder .keras)
-       - "scaler_path_static": "trained_rf_scaler.joblib"
-       - "features_path_static": "trained_rf_features.joblib"
-
-    2. mode: 'load_artifacts_path' (Dynamischer Modus)
-       Lädt Artefakte aus einem versionierten Ordner, der über eine 'load_id'
-       in der Konfiguration bestimmt wird. Ideal für den produktiven Einsatz.
-       Benötigte Schlüssel in der config:
-       - "artifacts_path": "Output/saved_models" (Basis-Verzeichnis)
-       - "load_id": "run_20250718_123456" (Spezifische Trainingslauf-ID)
-       - "model_filename": "model.keras" (oder .joblib)
+    - .keras / .h5: TensorFlow/Keras Modelle
+    - .joblib: Scikit-learn Modelle (z.B. RandomForest)
+    - .tflite: TensorFlow Lite Modelle
+    - .json: XGBoost Modelle  # KORREKTUR: Unterstützung hinzugefügt
     ---------------------------------------------------------------------------
     """
     mode = config.get("inference_mode", "load_artifacts_fast")
@@ -1181,8 +1171,20 @@ def load_model_artifacts_for_inference(config: dict, folder_flag: str) -> tuple:
         interpreter = tf.lite.Interpreter(model_path=model_path)
         interpreter.allocate_tensors()
         model = interpreter
+    # KORREKTUR: Fall für XGBoost-Modelle im .json-Format hinzugefügt
+    elif model_path.endswith(".json"):
+        try:
+            import xgboost as xgb
+            model = xgb.XGBRegressor()
+            model.load_model(model_path)
+            logging.info("XGBoost-Modell aus .json-Datei geladen.")
+        except ImportError:
+            raise ImportError("Die 'xgboost'-Bibliothek wird benötigt, um .json-Modelle zu laden. Bitte installieren Sie sie via 'pip install xgboost'.")
+        except Exception as e:
+            raise IOError(f"Fehler beim Laden des XGBoost-Modells von {model_path}: {e}")
     else:
-        raise ValueError(f"Unbekannte Modelldatei-Endung. Unterstützt werden .keras, .h5, .joblib, .tflite. Pfad: {model_path}")
+        # KORREKTUR: Fehlermeldung um .json erweitert
+        raise ValueError(f"Unbekannte Modelldatei-Endung. Unterstützt werden .keras, .h5, .joblib, .tflite, .json. Pfad: {model_path}")
 
     # Feature-Scaler und Feature-Liste laden
     scaler = joblib.load(scaler_path)
@@ -1223,9 +1225,9 @@ class ModelScalerSaver:
     def _export_tflite_variants(self, model, representative_dataset=None) -> dict:
         """
         Exportiert mehrere TFLite-Varianten:
-          - FLOAT16 (immer)
-          - INT8 dynamic range (immer)
-          - INT8 full integer (wenn representative_dataset angegeben ist)
+         - FLOAT16 (immer)
+         - INT8 dynamic range (immer)
+         - INT8 full integer (wenn representative_dataset angegeben ist)
         Gibt Pfade zurück (dict).
         """
         import os, logging
@@ -1320,13 +1322,6 @@ class ModelScalerSaver:
     def _save_structure_plot(self, model, output_path: str) -> str:
         """
         Erstellt und speichert die Modell-Architektur als Bild.
-        
-        Args:
-            model (tf.keras.Model): Das trainierte Keras-Modell.
-            output_path (str): Der vollständige Pfad zum Speichern des Bildes.
-            
-        Returns:
-            str: Der Pfad zum gespeicherten Bild oder None bei einem Fehler.
         """
         try:
             # Stellt sicher, dass das Zielverzeichnis existiert
@@ -1350,7 +1345,6 @@ class ModelScalerSaver:
         
         return None
     
-
     def save_artifacts(self, model, scaler, **kwargs) -> dict:
         """
         Hauptmethode zum Speichern. Speichert zuerst das Modell, ermittelt dessen Größe,
@@ -1376,7 +1370,6 @@ class ModelScalerSaver:
         results.update(model_artifacts)
 
         # Schritt 3: Modellgröße ermitteln und zur Konfiguration hinzufügen
-        # (Dies geschieht NACHDEM das Modell gespeichert wurde)
         model_path = results.get("model_path")
         if model_path and os.path.exists(model_path):
             try:
@@ -1437,12 +1430,19 @@ class ModelScalerSaver:
             print(f"❌ Fehler beim Speichern des Keras-Modells: {e}")
             traceback.print_exc()
 
-        # 2) Optional: TFLite-Varianten, wenn Edge-Flag aktiv
+        # --- ANGEPASSTE LOGIK HIER ---
+        # 2) Optional: TFLite-Varianten, wenn Edge-Flag UND Quantisierung aktiv sind
         edge_flag = bool(self.config.get("edge_device", False) or self.config.get("enable_edge", False))
-        if edge_flag:
+        quant_enabled = self.config.get('quantization_enabled', True)
+
+        if edge_flag and quant_enabled:
+            logging.info("TFLite conversion is enabled for edge device run.")
             rep_ds = kwargs.get("representative_dataset") or kwargs.get("train_dataset") or None
             tflite_paths = self._export_tflite_variants(model, representative_dataset=rep_ds)
             results.update(tflite_paths)
+        elif edge_flag and not quant_enabled:
+            logging.info("TFLite conversion is disabled via config, skipping .tflite creation for this edge run.")
+        # --- ENDE DER ANPASSUNG ---
 
         # 3) Optional: Loss-Plot & Struktur
         if history := kwargs.get("history"):
@@ -1461,6 +1461,12 @@ class ModelScalerSaver:
         """
         Konvertiert ein Keras-Modell und wendet standardmäßig eine FLOAT16-Quantisierung an.
         """
+        # --- HIER EBENFALLS PRÜFEN, FALLS DIESE METHODE GENUTZT WIRD ---
+        if not self.config.get('quantization_enabled', True):
+            logging.warning("TFLite conversion is disabled via config. Call to _convert_and_quantize_tflite skipped.")
+            return None
+        # --- ENDE DER PRÜFUNG ---
+            
         try:
             print("--- 🔬 Starte TFLite-Konvertierung mit FLOAT16-Quantisierung ---")
             
@@ -1519,10 +1525,6 @@ class ModelScalerSaver:
         """
         Erstellt und speichert einen Plot des Trainings- & Validierungsverlusts
         sowie der Metriken aus dem Keras-History-Objekt.
-        
-        Args:
-            history (tf.keras.callbacks.History): Das History-Objekt von model.fit().
-            output_path (str): Der vollständige Pfad zum Speichern des Plots.
         """
         if not hasattr(history, 'history') or not history.history:
             print("⚠️ Kein gültiges History-Objekt zum Plotten vorhanden.")
@@ -1643,4 +1645,4 @@ class ModelScalerSaver:
             print(f"❌ Fehler beim Speichern der Edge-Artefakte: {e}")
             print(traceback.format_exc())
             
-        return {} 
+        return {}

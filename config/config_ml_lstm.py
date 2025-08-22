@@ -122,3 +122,7 @@ lstm_server = {
 
 # Alias für Abwärtskompatibilität (bisher hieß das Profil 'lstm')
 lstm = lstm_edge
+
+param_lstm_edge = lstm_edge
+
+param_lstm_test = lstm_edge

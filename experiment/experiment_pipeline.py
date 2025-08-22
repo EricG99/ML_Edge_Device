@@ -127,8 +127,8 @@ TRAINER_MAP = {
 # Default-Config-Variablen pro Profil (werden versucht; sonst Fallback -> Basisvariable == Algorithmus)
 # Für light_xgboost wahlweise eigene Profile oder Fallback auf xgboost_*.
 DEFAULT_PROFILE_VARS: Dict[str, Dict[str, str]] = {
-    "lstm": {"server": "param_lstm_server", "edge": "param_lstm_edge"},
-    "cnn1d": {"server": "param_cnn1d_server", "edge": "param_cnn1d_edge"},
+    "lstm": {"server": "lstm_server", "edge": "lstm_edge"},
+    "cnn1d": {"server": "cnn1d_server", "edge": "cnn1d_edge"},
     "random_forest": {"server": "random_forest_server", "edge": "random_forest_edge"},
     "xgboost": {"server": "xgboost_server", "edge": "xgboost_edge"},
     "light_xgboost": {"server": "light_xgboost_server", "edge": "light_xgboost_edge"},
@@ -279,8 +279,8 @@ def algorithm_to_folder(name_or_flag: str) -> str:
 
 def build_training_config(base_cfg: dict, profile: str, lags: int, horizon: int, folder_flag: str) -> dict:
     """Mergt allgemeine Pfade/Flags, setzt Lags/Horizon, Profile-Flags etc.
-        Wichtig: setup_experiment mit dem kanonischen Ordner-Flag ausführen,
-        damit die Run-Ordner exakt zum Algorithmus-Ordner passen.
+       Wichtig: setup_experiment mit dem kanonischen Ordner-Flag ausführen,
+       damit die Run-Ordner exakt zum Algorithmus-Ordner passen.
     """
     merged = _deep_merge(base_cfg, {
         "paths": CONFIG_PATH["paths"],
@@ -291,6 +291,8 @@ def build_training_config(base_cfg: dict, profile: str, lags: int, horizon: int,
         # Exakt vorgegebene Lags/Horizon übernehmen
         "lags": int(lags),
         "horizon": int(horizon),
+        # --- HIER ANPASSEN: Quantisierung standardmäßig deaktivieren ---
+        "quantization_enabled": False,
     })
 
     # MQTT/Allg. Laufzeitwerte für Einheitlichkeit setzen
