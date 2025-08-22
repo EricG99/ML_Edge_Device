@@ -4,11 +4,9 @@ from pathlib import Path # KORREKTUR: pathlib für robuste Pfade importieren
 
 # --- Konfiguration der Experimente ---
 MODELS_TO_RUN = [
+    "cnn1d",
     "lstm",
     "random_forest",
-    "cnn1d",
-
-
     "xgboost",
     "light_xgboost"
 ]
