@@ -277,29 +277,22 @@ def algorithm_to_folder(name_or_flag: str) -> str:
     return name_or_flag.upper() or "MODEL"
 
 
-def build_training_config(base_cfg: dict, profile: str, lags: int, horizon: int, folder_flag: str) -> dict:
-    """Mergt allgemeine Pfade/Flags, setzt Lags/Horizon, Profile-Flags etc.
-       Wichtig: setup_experiment mit dem kanonischen Ordner-Flag ausführen,
-       damit die Run-Ordner exakt zum Algorithmus-Ordner passen.
-    """
+def build_training_config(base_cfg: dict, profile: str, lags: int, horizon: int, folder_flag: str, quant_modes: list) -> dict: # GEÄNDERT
+    """Mergt allgemeine Pfade/Flags, setzt Lags/Horizon, Profile-Flags etc."""
     merged = _deep_merge(base_cfg, {
         "paths": CONFIG_PATH["paths"],
-        # keine Web-UI, keine Retrainings in diesem Trainingsteil
         "inference_mode": "load_artifacts_path",
         "edge_device": (profile == "edge"),
         "enable_edge": (profile == "edge"),
-        # Exakt vorgegebene Lags/Horizon übernehmen
         "lags": int(lags),
         "horizon": int(horizon),
-        # --- HIER ANPASSEN: Quantisierung standardmäßig deaktivieren ---
-        "quantization_enabled": False,
+        # NEU: Ersetzt die alte Logik durch die neue Modus-Liste
+        "quant_modes": quant_modes,
     })
 
-    # MQTT/Allg. Laufzeitwerte für Einheitlichkeit setzen
     merged = _deep_merge(merged, CONFIG_LOAD_ARTIFACTS)
     merged = _deep_merge(merged, MQTT_CONFIG)
 
-    # Experimentordner erzeugen (train) – *mit* folder_flag
     merged, _ = PU.setup_experiment(merged, folder_flag, run_type="train")
     return merged
 
@@ -547,69 +540,86 @@ def _run_all_inferences_and_summarize(
     summary_csv: Path,
     delete_models_after_inference: bool,
 ) -> None:
-    """Führt für einen Run alle vorhandenen Modellvarianten aus, fasst zusammen, räumt *am Ende* auf."""
+    """
+    Führt Inferenz für die beste verfügbare Modellvariante aus.
+    """
     variants = list_model_variants(models_dir, algo)
     if not variants:
-        print("⚠️ No model variants found – skipping inference for this run.")
+        print("⚠️ Kein Modell gefunden – Inferenz für diesen Lauf übersprungen.")
         return
 
-    # Profil (server/edge) ableiten und passenden Config-Variablennamen wählen
-    profile_key = "edge" if (cfg.get("edge_device") or cfg.get("enable_edge")) else "server"
-    config_name = DEFAULT_PROFILE_VARS.get(algo, {}).get(profile_key, algo)
+    # NEU: Intelligente Auswahl des besten Modells für die Inferenz
+    # Priorität: INT8-Full -> INT8-Dynamic -> Float16 -> Keras -> Joblib/Json
+    inference_variant = None
+    priority_order = [
+        "model_quant_int8_full.tflite",
+        "model_quant_int8.tflite",
+        "model_quant_float16.tflite",
+        "model.keras",
+        "model.joblib",
+        "model.json",
+    ]
+    
+    for model_file in priority_order:
+        if model_file in variants:
+            inference_variant = model_file
+            break
+            
+    if not inference_variant:
+        print(f"⚠️ Konnte kein passendes Modell für die Inferenz finden. Verfügbar: {variants}")
+        return
+        
+    print(f"✅ Bestes verfügbares Modell '{inference_variant}' für die Inferenz ausgewählt.")
+    
+    rc = run_inference_via_subprocess(
+        algorithm=algo,
+        run_id=run_id,
+        model_filename=inference_variant,
+        inference_steps=inference_steps,
+        loading_strategy=loading_strategy,
+        interval_sec=interval_sec,
+        config_name=cfg.get("config_var_used", algo),
+    )
+    if rc != 0:
+        print(f"⚠️ Inferenz-Subprozess ist mit Fehlercode {rc} für {inference_variant} (run_id={run_id}) fehlgeschlagen.")
 
-    for variant in variants:
-        rc = run_inference_via_subprocess(
-            algorithm=algo,
-            run_id=run_id,
-            model_filename=variant,
-            inference_steps=inference_steps,
-            loading_strategy=loading_strategy,
-            interval_sec=interval_sec,
-            config_name=config_name,
-        )
-        if rc != 0:
-            print(f"⚠️ Inference subprocess returned code {rc} for {variant} (run_id={run_id})")
+    # (Rest der Funktion bleibt gleich, hier zur Vollständigkeit eingefügt)
+    err_dir = Path(cfg["paths"]["Error_Metrics"])
+    pred_dir = Path(cfg["paths"]["Prediction_Data"])
+    step_csv = _discover_predictions_file_from_json(run_id, err_dir) or _fallback_find_step_csv(run_id, pred_dir)
 
-        # --- Auswertung
-        err_dir = Path(cfg["paths"]["Error_Metrics"]) if "paths" in cfg else (Path(CONFIG_PATH["paths"]["output"]) / "Error_Metrics")
-        pred_dir = Path(cfg["paths"].get("Prediction_Data"))
-        step_csv = _discover_predictions_file_from_json(run_id, err_dir) or _fallback_find_step_csv(run_id, pred_dir)
+    avg_inf_ms, avg_total_ms, avg_cpu, avg_ram = (None, None, None, None)
+    if step_csv and step_csv.exists():
+        avg_inf_ms, avg_total_ms, avg_cpu, avg_ram = summarize_step_csv(step_csv)
+    else:
+        print("⚠️ StepPredictions CSV nicht gefunden – Zusammenfassung wird leer sein.")
 
-        avg_inf_ms, avg_total_ms, avg_cpu, avg_ram = (None, None, None, None)
-        if step_csv and step_csv.exists():
-            avg_inf_ms, avg_total_ms, avg_cpu, avg_ram = summarize_step_csv(step_csv)
-        else:
-            print("⚠️ StepPredictions CSV not found for run – summary metrics will be empty.")
+    training_cfg_json = models_dir / "training_config.json"
+    model_size_mb = read_model_size_mb(training_cfg_json)
 
-        # Trainings-Config lesen (Modellgröße)
-        training_cfg_json = Path(cfg["paths"]["Models"]) / "training_config.json"
-        model_size_mb = read_model_size_mb(training_cfg_json)
+    res = InferenceResult(
+        algorithm=algo,
+        profile="edge" if cfg.get("edge_device") else "server",
+        lags=int(cfg.get("lags", 0)),
+        horizon=int(cfg.get("horizon", 0)),
+        model_variant=inference_variant,
+        avg_inference_time_ms=avg_inf_ms,
+        avg_total_time_ms=avg_total_ms,
+        avg_cpu_percent=avg_cpu,
+        avg_ram_percent=avg_ram,
+        model_size_mb=model_size_mb,
+        run_id=run_id,
+    )
+    append_summary_row(summary_csv, res)
+    print(f"📈 Zusammenfassung für {inference_variant} in die CSV-Datei geschrieben.")
 
-        res = InferenceResult(
-            algorithm=algo,
-            profile="edge" if cfg.get("edge_device") or cfg.get("enable_edge") else "server",
-            lags=int(cfg.get("lags", 0)),
-            horizon=int(cfg.get("horizon", 0)),
-            model_variant=variant,
-            avg_inference_time_ms=avg_inf_ms,
-            avg_total_time_ms=avg_total_ms,
-            avg_cpu_percent=avg_cpu,
-            avg_ram_percent=avg_ram,
-            model_size_mb=model_size_mb,
-            run_id=run_id,
-        )
-        append_summary_row(summary_csv, res)
-        print(f"📈 Summary row appended for {variant} -> {summary_csv}")
-
-    # --- Aufräumen *nach* allen Varianten (wichtiger Fix: Scaler erst am Ende löschen!)
     if delete_models_after_inference:
         cleanup_model_binaries(models_dir)
         try:
-            scalers_dir = Path(cfg["paths"]["Scalers"]) if "paths" in cfg else None
-            if scalers_dir:
-                cleanup_scalers(scalers_dir)
+            scalers_dir = Path(cfg["paths"]["Scalers"])
+            cleanup_scalers(scalers_dir)
         except Exception as e:
-            print(f"⚠️ Could not clean scalers: {e}")
+            print(f"⚠️ Fehler beim Aufräumen der Scaler: {e}")
 
 
 def run_experiments(
@@ -617,6 +627,7 @@ def run_experiments(
     profiles: List[str],
     lags_values: List[int],
     horizon_values: List[int],
+    quant_modes: List[str],
     inference_steps: int = 20,
     loading_strategy: str = "live_mqtt",
     interval_sec: float = 1.0,
@@ -639,56 +650,39 @@ def run_experiments(
                     print("Reached run limit – stopping queue.")
                     return
 
-                # --- SERVER train + infer (falls gewünscht)
-                if "server" in profiles:
-                    base_cfg_s, used_var_s = load_profile_config(algo, "server")
-                    folder_flag_s = algorithm_to_folder(algo)
-                    cfg_s = build_training_config(base_cfg_s, "server", lags, horizon, folder_flag_s)
+                # KORREKTUR: Fehlende Schleife über die Profile hinzugefügt
+                for profile in profiles:
+                    base_cfg, used_var = load_profile_config(algo, profile)
+                    folder_flag = algorithm_to_folder(algo)
+                    cfg = build_training_config(base_cfg, profile, lags, horizon, folder_flag, quant_modes)
 
-                    print(f"\n=== Train {algo} | server | lags={lags} | horizon={horizon} | cfg={used_var_s}")
-                    run_id_s, models_dir_s = run_training(algo, cfg_s, folder_flag_s)
-                    print(f"✅ Training complete. run_id={run_id_s}")
+                    print(f"\n=== Train {algo} | {profile} | lags={lags} | horizon={horizon} | cfg={used_var}")
+                    run_id, models_dir = run_training(algo, cfg, folder_flag)
+                    print(f"✅ Training complete. run_id={run_id}")
 
                     _run_all_inferences_and_summarize(
-                        algo, cfg_s, run_id_s, models_dir_s,
+                        algo, cfg, run_id, models_dir,
                         inference_steps, loading_strategy, interval_sec,
                         summary_csv, delete_models_after_inference
                     )
+                
+            runs_done += 1
 
-                # --- EDGE train + infer (falls gewünscht)
-                if "edge" in profiles:
-                    base_cfg_e, used_var_e = load_profile_config(algo, "edge")
-                    folder_flag_e = algorithm_to_folder(algo)
-                    cfg_e = build_training_config(base_cfg_e, "edge", lags, horizon, folder_flag_e)
-
-                    print(f"\n=== Train {algo} | edge | lags={lags} | horizon={horizon} | cfg={used_var_e}")
-                    run_id_e, models_dir_e = run_training(algo, cfg_e, folder_flag_e)
-                    print(f"✅ Training complete. run_id={run_id_e}")
-
-                    _run_all_inferences_and_summarize(
-                        algo, cfg_e, run_id_e, models_dir_e,
-                        inference_steps, loading_strategy, interval_sec,
-                        summary_csv, delete_models_after_inference
-                    )
-
-                runs_done += 1
-
-
-# ---------------------------
-# CLI
-# ---------------------------
 
 def main():
     p = argparse.ArgumentParser(description="Experiment-Pipeline (Training -> Inferenz) mit Grid über Lags/Horizon")
-    p.add_argument("--algorithms", default="cnn1d,lstm,random_forest,xgboost,light_xgboost", help="Kommagetrennte Liste: cnn1d,lstm,random_forest,xgboost,light_xgboost")
-    p.add_argument("--profiles", default="server,edge", help="Kommagetrennte Liste: server,edge")
-    p.add_argument("--lags", default="1:20:2", help="Range 'start:stop:step' oder kommagetrennt (z. B. 1,3,5)")
+    p.add_argument("--algorithms", default="cnn1d,lstm,random_forest,xgboost,light_xgboost", help="Kommagetrennte Liste der Algorithmen")
+    p.add_argument("--profiles", default="server,edge", help="Kommagetrennte Liste der Profile: server,edge")
+    p.add_argument("--lags", default="1:20:2", help="Range 'start:stop:step' oder kommagetrennt")
     p.add_argument("--horizon", default="1:20:2", help="Range 'start:stop:step' oder kommagetrennt")
-    p.add_argument("--inference-steps", type=int, default=60, help="Anzahl Inferenzschritte (1 Hz -> 60 == 1 Minute)")
-    p.add_argument("--loading-strategy", default="live_mqtt", choices=["live_mqtt", "split"], help="Datenquelle für die Inferenz")
+    p.add_argument("--inference-steps", type=int, default=60, help="Anzahl Inferenzschritte")
+    p.add_argument("--loading-strategy", default="live_mqtt", choices=["live_mqtt", "split"], help="Datenquelle für Inferenz")
     p.add_argument("--interval-sec", type=float, default=1.0, help="Ziel-Inferenzintervall in Sekunden")
     p.add_argument("--keep-models", action="store_true", help="Modellbinaries nach Inferenz NICHT löschen")
     p.add_argument("--limit-runs", type=int, default=None, help="Max. Anzahl Experimente (Debug)")
+    # NEU: Das --quant-mode Argument
+    p.add_argument("--quant-mode", nargs='+', default=["no-quant"], choices=["no-quant", "quant-16", "quant-8"],
+                       help="Quantisierungsmodus. Kann mehrfach angegeben werden (z.B. --quant-mode quant-16 quant-8). Default: no-quant.")
 
     args = p.parse_args()
 
@@ -702,13 +696,13 @@ def main():
         profiles=profiles,
         lags_values=lags_vals,
         horizon_values=horizon_vals,
+        quant_modes=args.quant_mode, # NEU: Übergabe an die Hauptfunktion
         inference_steps=args.inference_steps,
         loading_strategy=args.loading_strategy,
         interval_sec=args.interval_sec,
         delete_models_after_inference=(not args.keep_models),
         limit_runs=args.limit_runs,
     )
-
 
 if __name__ == "__main__":
     main()

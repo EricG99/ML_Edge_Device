@@ -805,24 +805,16 @@ def main():
                         help="Optionale Run ID zum Laden von Artefakten anstelle von Training.")
     parser.add_argument("--model_filename", type=str,
                         help="Optional: Name der zu ladenden Modelldatei.")
-
-    # NEU: Headless/Server-Steuerung
-    parser.add_argument("--web-only", action="store_true",
-                        help="Nur die Flask-Weboberfläche starten und laufen lassen (simuliert den Zusatzprozess).")
-    parser.add_argument("--no-web", action="store_true",
-                        help="Weboberfläche deaktivieren (Headless/Batch).")
+    parser.add_argument("--web-only", action="store_true", help="Nur die Flask-Weboberfläche starten.")
+    parser.add_argument("--no-web", action="store_true", help="Weboberfläche deaktivieren (Headless/Batch).")
     parser.add_argument("--host", default="0.0.0.0", help="Bind-Adresse für die Web-UI.")
     parser.add_argument("--port", type=int, default=None, help="Port für die Web-UI.")
-    parser.add_argument("--inference-steps", type=int, default=None,
-                        help="Wenn gesetzt: so viele Inferenzschritte laufen und dann sauber beenden.")
-
-    # NEU: Inline-Overrides (optional, mehrfach nutzbar)
-    parser.add_argument("--set", action="append", default=[],
-                        help="Konfigurations-Override als key=value (mehrfach möglich).")
+    parser.add_argument("--inference-steps", type=int, default=None, help="Anzahl Inferenzschritte für Headless-Modus.")
+    parser.add_argument("--set", action="append", default=[], help="Konfigurations-Override als key=value.")
     
-       # --- NEUES ARGUMENT HINZUFÜGEN ---
-    parser.add_argument("--no-quantization", action="store_true",
-                        help="Deaktiviert die TFLite-Quantisierung (erstellt nur das Standard .keras Modell).")
+    # GEÄNDERT: Das alte --no-quantization Flag wird durch das neue, flexiblere --quant-mode ersetzt
+    parser.add_argument("--quant-mode", nargs='+', default=["no-quant"], choices=["no-quant", "quant-16", "quant-8"],
+                        help="Quantisierungsmodus für das initiale Training. Default: no-quant.")
 
     args = parser.parse_args()
 
@@ -831,16 +823,14 @@ def main():
         args.config_name = f"{args.algorithm}"
         logging.info(f"Kein --config-name angegeben. Verwende Default: '{args.config_name}'")
 
-    # Konfiguration laden
     config = load_config_dynamically(args.algorithm, args.config_name)
 
-    # --- NEUE FLAG IN CONFIG SETZEN ---
-    if args.no_quantization:
-        config['quantization_enabled'] = False
-        logging.info("Kommandozeilen-Flag --no-quantization erkannt. Quantisierung wird deaktiviert.")
+    # NEU: Die neuen Quantisierungsmodi in die Konfiguration eintragen
+    config['quant_modes'] = args.quant_mode
+    if 'no-quant' not in args.quant_mode:
+        logging.info(f"Quantisierungsmodi aktiviert: {args.quant_mode}")
     else:
-        # Standardmäßig ist die Quantisierung aktiviert
-        config['quantization_enabled'] = True
+        logging.info("Quantisierung ist deaktiviert.")
 
     # Algorithmus-spezifische Klassen wählen
     if args.algorithm == 'random_forest':
