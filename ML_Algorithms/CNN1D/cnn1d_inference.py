@@ -45,17 +45,40 @@ class CNN1DInference(BaseInferenceProcessor):
         """
         Wird nach dem Laden der Artefakte aufgerufen.
         Strukturierte Reihenfolge:
-        1. Konfiguration synchronisieren.
+        1. Konfiguration synchronisieren (Training -> dann Runtime-Overrides beibehalten).
         2. Endgültiges Modellobjekt (Keras oder TFLite) bestimmen.
-        3. `self.lags` basierend auf dem finalen Modell synchronisieren.
+        3. `self.lags` mit dem finalen Modell synchronisieren (und DataProcessor danach ggf. neu aufsetzen).
         """
         # --- SCHRITT 1: Konfiguration mit Trainings-Artefakten synchronisieren ---
         if getattr(self, "training_config", None):
-            preserve_keys = ("loading_strategy", "inference_interval_sec", "model_filename")
-            preserved = {k: self.config.get(k) for k in preserve_keys if k in self.config}
+            runtime_cfg = dict(self.config)  # enthält CLI-Overrides (z. B. inference_steps=20)
+            # optional: Puffer sichern, wenn schon vorhanden
+            old_buf = None
+            if hasattr(self, "data_processor") and hasattr(self.data_processor, "buffer_df"):
+                old_buf = getattr(self.data_processor, "buffer_df", None)
+
+            # Trainings-Config als Basis…
+            self.config.clear()
             self.config.update(self.training_config)
+
+            # …und explizit die Runtime-Overrides beibehalten (wie bei LSTM)
+            preserved_keys = (
+                "inference_steps",
+                "inference_interval_sec",
+                "loading_strategy",
+                "quantization",
+                "model_filename",
+            )
+            preserved = {k: runtime_cfg[k] for k in preserved_keys if k in runtime_cfg}
             self.config.update(preserved)
+
+            # DataProcessor mit gemergter Config neu initialisieren, Puffer (falls vorhanden) zurücklegen
             self.data_processor = RealTimeDataProcessor(self.config)
+            if old_buf is not None:
+                try:
+                    self.data_processor.buffer_df = old_buf.copy()
+                except Exception:
+                    pass
             logging.info("RealTimeDataProcessor re-initialized with loaded training config.")
 
         # --- SCHRITT 2: Endgültiges Modellobjekt bestimmen ---
@@ -65,7 +88,7 @@ class CNN1DInference(BaseInferenceProcessor):
                 model_path = os.path.join(self.config["paths"]["Models"], model_name)
                 interpreter = tf.lite.Interpreter(model_path=model_path)
                 interpreter.allocate_tensors()
-                self.model = interpreter  # Überschreibe Keras-Modell mit TFLite-Interpreter
+                self.model = interpreter  # TFLite ist aktiv
                 logging.info(f"📦 TFLite-Interpreter ist jetzt das aktive Modell ({model_name}).")
             except Exception as e:
                 logging.warning(f"⚠️ TFLite konnte nicht geladen werden ({model_name}): {e} – Fallback auf Standardmodell.")
@@ -74,71 +97,92 @@ class CNN1DInference(BaseInferenceProcessor):
 
         # --- SCHRITT 3: `self.lags` robust mit dem FINALEN Modell synchronisieren ---
         try:
-            # 3a) Aus finaler Konfiguration als Basiswert übernehmen
+            # Basiswert aus Config
             self.lags = int(self.config.get("lags", self.lags))
+            model_lags = None
 
-            # 3b) Gegenprüfung mit aktivem Modell (egal ob Keras oder TFLite)
-            if hasattr(self.model, "input_shape") and self.model.input_shape:  # Keras
+            # Keras?
+            if hasattr(self.model, "input_shape") and self.model.input_shape:
                 model_lags = self.model.input_shape[1]
-                if isinstance(model_lags, int) and model_lags > 0 and model_lags != self.lags:
-                    logging.warning(f"Modell-Input verlangt lags={model_lags}; korrigiere self.lags von {self.lags} -> {model_lags}")
-                    self.lags = model_lags
-            
-            elif hasattr(self.model, "get_input_details"):  # TFLite
-                tflite_lags = int(self.model.get_input_details()[0]["shape"][1])
-                if tflite_lags != self.lags:
-                    logging.warning(f"TFLite-Input verlangt lags={tflite_lags}; korrigiere self.lags von {self.lags} -> {tflite_lags}")
-                    self.lags = tflite_lags
-            
-            logging.info(f"Finale Synchronisierung: `self.lags` ist jetzt auf {self.lags} gesetzt.")
+            # TFLite?
+            elif hasattr(self.model, "get_input_details"):
+                inp = self.model.get_input_details()[0]
+                if "shape" in inp and len(inp["shape"]) > 1:
+                    model_lags = int(inp["shape"][1])
 
+            # Abgleich
+            if isinstance(model_lags, int) and model_lags > 0 and model_lags != self.lags:
+                logging.warning(f"Modell-Input verlangt lags={model_lags}; korrigiere self.lags von {self.lags} -> {model_lags}")
+                self.lags = model_lags
+                self.config["lags"] = self.lags  # in Config spiegeln
+
+                # DataProcessor nach Lags-Änderung erneut neu aufsetzen und Puffer retten
+                old_buf = None
+                if hasattr(self, "data_processor") and hasattr(self.data_processor, "buffer_df"):
+                    old_buf = getattr(self.data_processor, "buffer_df", None)
+                self.data_processor = RealTimeDataProcessor(self.config)
+                if old_buf is not None:
+                    try:
+                        self.data_processor.buffer_df = old_buf
+                    except Exception:
+                        pass
+
+            logging.info(f"Finale Synchronisierung: `self.lags` ist jetzt auf {self.lags} gesetzt.")
         except Exception as e:
             logging.error(f"Fehler bei der finalen Synchronisierung von self.lags: {e}")
 
-    def _prepare_input_data(self, payload: dict) -> tuple[np.ndarray | None, any, float | None]:
-        """Bereitet einen Inferenz-Schritt vor und gibt (X_window[1,L,F], timestamp, true_value) zurück."""
-        if not payload:
-            return None, None, None
+
+    def _prepare_input_data(self, payload: dict):
+        """
+        Bereitet das Inferenzfenster (Shape: (1, lags, n_features)) für das 1D-CNN auf.
+        Rückgabe:
+        - X_input: np.ndarray mit Shape (1, lags, n_features) oder None, wenn noch nicht bereit
+        - timestamp: Zeitstempel der aktuellen Zeile (falls vorhanden), sonst UTC now
+        - y_true: der echte Wert aus dem Payload (für Logging/Metriken), sonst None/np.nan
+        """
         try:
-            payload_lower = {str(k).lower(): v for k, v in payload.items()}
-        except AttributeError:
-            logging.error("CNN1D: Fehler beim Normalisieren der Payload-Schlüssel.")
+            # Keys vereinheitlichen
+            payload_lower = {str(k).lower(): v for k, v in (payload or {}).items()}
+
+            # 1) Nur den Feature-Puffer holen (KEIN Tuple!)
+            featured_buffer = self.data_processor.update_and_process(payload_lower)
+
+            # 2) Puffer noch nicht ausreichend gefüllt?
+            if featured_buffer is None or len(featured_buffer) < self.lags:
+                need = self.lags
+                have = 0 if featured_buffer is None else len(featured_buffer)
+                logging.info(f"Datenpuffer wird gefüllt... {have}/{need}")
+                return None, None, None
+
+            # 3) Exakte Trainings-Feature-Reihenfolge und Fenster ziehen
+            window_df = featured_buffer[self.feature_list].iloc[-self.lags:]
+
+            # 4) NaN-Check wie bei LSTM
+            if window_df.isnull().values.any():
+                logger.warning("CNN1D: NaNs im Inferenzfenster – Schritt übersprungen.")
+                return None, None, None
+
+            # 5) Skalieren (wie bei LSTM) und für 1D-CNN reshapen
+            window_scaled = self.scaler.transform(window_df.values)
+            X_input = np.expand_dims(window_scaled, axis=0)  # (1, lags, features)
+
+            # 6) Timestamp robust bestimmen
+            timestamp = pd.to_datetime(payload_lower.get('datetime'))
+            if pd.isna(timestamp):
+                timestamp = pd.Timestamp.utcnow()
+
+            # 7) True-Value robust holen (kleinschreibung)
+            key_to_find = (self.target_feature or "").lower()
+            y_true = payload_lower.get(key_to_find)
+            if y_true is None:
+                logger.warning("CNN1D: Zielwert '%s' nicht im Payload gefunden.", key_to_find)
+
+            return X_input, timestamp, y_true
+
+        except Exception as e:
+            logger.error(f"Fehler bei _prepare_input_data: {e}", exc_info=True)
             return None, None, None
-
-        featured_buffer = self.data_processor.update_and_process(payload_lower)
-        if featured_buffer is None or len(featured_buffer) < self.lags:
-            return None, None, None
-
-        # Prüfe, ob alle trainierten Features vorhanden sind
-        missing_features = [col for col in self.feature_list if col not in featured_buffer.columns]
-        if missing_features:
-            logger.warning(
-                f"Warte: {len(missing_features)} Feature-Spalten fehlen noch (z.B. {missing_features[:3]}). "
-                f"Puffer hat {len(featured_buffer)} Zeilen. Inferenz-Schritt wird übersprungen."
-            )
-            return None, None, None
-
-        window_df = featured_buffer[self.feature_list].iloc[-self.lags:]
-
-        if window_df.isnull().values.any():
-            logging.warning("CNN1D: NaNs im Inferenzfenster – Schritt übersprungen.")
-            return None, None, None
-
-        # Skaliert & zu (1, L, F) formen
-        window_scaled = self.scaler.transform(window_df.values)
-        inference_window = np.expand_dims(window_scaled, axis=0)
-
-        # Zeitstempel & wahrer Wert
-        timestamp = pd.to_datetime(payload_lower.get('datetime'))
-        if pd.isna(timestamp):
-            timestamp = pd.Timestamp.utcnow()
-
-        key_to_find = self.target_feature.lower()
-        true_value = payload_lower.get(key_to_find)
-        if true_value is None:
-            logging.warning(f"CNN1D: Zielwert '{key_to_find}' nicht im Payload gefunden.")
-
-        return inference_window, timestamp, true_value
+        
 
     def _inverse_transform_prediction(self, prediction_scaled: np.ndarray) -> np.ndarray:
         """Rücktransformation der Modellvorhersage mit dem gespeicherten y_scaler."""

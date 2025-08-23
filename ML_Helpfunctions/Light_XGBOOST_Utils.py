@@ -40,39 +40,30 @@ def train_light_xgboost_model(config: dict, X_train: np.ndarray, y_train: np.nda
 
 
 def save_sklearn_model(model, config: dict, paths: dict) -> str | None:
-    """Speichert das (sklearn-kompatible) Modell als .joblib."""
+    import os, joblib
+    model_dir = paths.get("Models") or os.path.join(paths.get("output","."), "Models")
+    os.makedirs(model_dir, exist_ok=True)
+    model_filename = config.get("model_filename") or "model.joblib"  # <- wichtig
+    model_path = os.path.join(model_dir, model_filename)
+    joblib.dump(model, model_path, compress=3)
+    print(f"📤 LightGBM-Modell gespeichert unter: {model_path}")
+    return model_path
+
+
+
+# ML_Helpfunctions/Light_XGBOOST_Utils.py
+
+def save_sklearn_model(model, config: dict, paths: dict) -> str | None:
+    import joblib, os, traceback
     try:
         model_dir = paths.get("Models") or os.path.join(paths.get("output", "."), "Models")
         os.makedirs(model_dir, exist_ok=True)
-        model_name = (config.get("model_name") or "light_xgboost_model").replace(" ", "_")
-        dataset_name = (config.get("dataset") or "data").replace(".csv", "").replace(" ", "_")
-        model_filename = f"{model_name}_{dataset_name}_{config.get('run_id','')}_{config.get('time_stamp','')}.joblib"
-        model_path = os.path.join(model_dir, model_filename)
+        # <-- WICHTIG: fixen Namen verwenden
+        fname = config.get("model_filename", "model.joblib")
+        model_path = os.path.join(model_dir, fname)
         joblib.dump(model, model_path, compress=3)
         print(f"[LGBM] Modell gespeichert: {model_path}")
         return model_path
     except Exception as e:
         print(f"[LGBM] Fehler beim Speichern: {e}\n{traceback.format_exc()}")
         return None
-
-
-def save_results_light_xgboost(config, model, scaler, pred_orig, true_orig, dates, metrics, paths, power_time):
-    """Persistierung analog XGB-Utils._save_common_results + Modellpfad."""
-    common = PipelineUtils._save_common_results(
-        config=config,
-        pred_orig=pred_orig,
-        true_orig=true_orig,
-        dates=dates,
-        metrics=metrics,
-        paths=paths,
-        power_time=power_time,
-        scaler=scaler
-    )
-    model_path = save_sklearn_model(model, config, paths)
-    edge_artifacts_path = PipelineUtils.save_edge_artifacts(config, paths)
-    out = dict(common)
-    if model_path:
-        out["model_path"] = model_path
-    if edge_artifacts_path:
-        out["edge_artifacts"] = edge_artifacts_path
-    return out

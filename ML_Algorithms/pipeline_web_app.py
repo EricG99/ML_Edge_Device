@@ -865,11 +865,11 @@ def main():
         folder_flag = "XGBOOST"
 
     elif args.algorithm == 'light_xgboost':
-            from ML_Algorithms.XGBOOST.XGBOOST_train import XGBoostTrainer
-            from ML_Algorithms.XGBOOST.XGBOOST_inference import XGBoostInference
-            trainer_class = XGBoostTrainer
-            inference_class = XGBoostInference
-            folder_flag = "Light_XGBOOST"
+        from ML_Algorithms.Light_XGBOOST.Light_XGBOOST_train import LightXGBoostTrainer
+        from ML_Algorithms.Light_XGBOOST.Light_XGBOOST_inference import LightXGBoostInference
+        trainer_class = LightXGBoostTrainer
+        inference_class = LightXGBoostInference
+        folder_flag = "Light_XGBOOST"
 
     else:
         from ML_Algorithms.LSTM.LSTM_train import LSTMTrainer

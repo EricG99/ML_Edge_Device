@@ -67,6 +67,9 @@ TRAINER_MAP = {
     "cnn1d": ("ML_Algorithms.CNN1D.cnn1d_train", "CNN1DTrainer", "CNN1D"),
     "random_forest": ("ML_Algorithms.Random_Forest.rf_train", "RandomForestTrainer", "Random_Forest"),
     "xgboost": ("ML_Algorithms.XGBOOST.XGBOOST_train", "XGBoostTrainer", "XGBOOST"),
+    # NEU/GEÄNDERT:
+    "light_xgboost": ("ML_Algorithms.Light_XGBOOST.Light_XGBOOST_train",
+                      "LightXGBoostTrainer", "Light_XGBOOST"),
 }
 
 MODEL_FILENAME_DEFAULTS = {
@@ -74,6 +77,7 @@ MODEL_FILENAME_DEFAULTS = {
     "cnn1d": "model.keras",
     "random_forest": "model.joblib",
     "xgboost": "model.json",
+    "light_xgboost": "model.joblib",   # <- statt model.json
 }
 
 # --- Komplexitätsprofile pro Modell (Edge-tauglich gehalten) ---
@@ -221,7 +225,50 @@ COMPLEXITY_PRESETS = {
         },
     },
 }
-
+COMPLEXITY_PRESETS["light_xgboost"] = {
+    "simple": {
+        "n_estimators": 100, "max_depth": 3, "learning_rate": 0.03,
+        "subsample": 0.90, "colsample_bytree": 0.90, "min_child_weight": 1,
+        "gamma": 0.0, "reg_lambda": 0.5, "reg_alpha": 0.0,
+        "tree_method": "hist", "max_bin": 64,
+        "n_jobs": 1, "random_state": 42, "objective": "reg:squarederror",
+        "xgb_params": {
+            "n_estimators": 100, "max_depth": 3, "learning_rate": 0.03,
+            "subsample": 0.90, "colsample_bytree": 0.90, "min_child_weight": 1,
+            "gamma": 0.0, "reg_lambda": 0.5, "reg_alpha": 0.0,
+            "tree_method": "hist", "max_bin": 64,
+            "n_jobs": 1, "random_state": 42, "objective": "reg:squarederror",
+        },
+    },
+    "medium": {
+        "n_estimators": 200, "max_depth": 4, "learning_rate": 0.02,
+        "subsample": 0.85, "colsample_bytree": 0.80, "min_child_weight": 3,
+        "gamma": 0.5, "reg_lambda": 0.8, "reg_alpha": 0.0,
+        "tree_method": "hist", "max_bin": 128,
+        "n_jobs": 1, "random_state": 42, "objective": "reg:squarederror",
+        "xgb_params": {
+            "n_estimators": 200, "max_depth": 4, "learning_rate": 0.02,
+            "subsample": 0.85, "colsample_bytree": 0.80, "min_child_weight": 3,
+            "gamma": 0.5, "reg_lambda": 0.8, "reg_alpha": 0.0,
+            "tree_method": "hist", "max_bin": 128,
+            "n_jobs": 1, "random_state": 42, "objective": "reg:squarederror",
+        },
+    },
+    "high": {
+        "n_estimators": 300, "max_depth": 5, "learning_rate": 0.015,
+        "subsample": 0.80, "colsample_bytree": 0.75, "min_child_weight": 5,
+        "gamma": 1.0, "reg_lambda": 1.0, "reg_alpha": 0.0,
+        "tree_method": "hist", "max_bin": 128,
+        "n_jobs": 1, "random_state": 42, "objective": "reg:squarederror",
+        "xgb_params": {
+            "n_estimators": 300, "max_depth": 5, "learning_rate": 0.015,
+            "subsample": 0.80, "colsample_bytree": 0.75, "min_child_weight": 5,
+            "gamma": 1.0, "reg_lambda": 1.0, "reg_alpha": 0.0,
+            "tree_method": "hist", "max_bin": 128,
+            "n_jobs": 1, "random_state": 42, "objective": "reg:squarederror",
+        },
+    },
+}
 # --- Basis-Defaults, die für alle Modelle gelten ---
 BASE_COMMON = {
     "dataset": "mqtt_data_filtered.csv",
@@ -241,15 +288,13 @@ BASE_COMMON = {
 }
 
 
-# Gültige Config-Variablen in euren config_ml_*.py
 INFERENCE_CONFIG_BY_ALGO = {
-    "lstm": "lstm_edge",                # alias 'lstm' existiert auch
-    "cnn1d": "cnn1d_edge",              # alias 'cnn1d' existiert auch
+    "lstm": "lstm_edge",
+    "cnn1d": "cnn1d_edge",
     "random_forest": "random_forest_edge",
     "xgboost": "xgboost_edge",
-    "light_xgboost": "light_xgboost_edge",
+    "light_xgboost": "light_xgboost_edge",  # <- hinzufügen
 }
-
 
 def _try_import(module: str, attr: str):
     import importlib
@@ -269,9 +314,10 @@ def algorithm_to_folder(flag: str) -> str:
     f = flag.lower()
     if "lstm" in f: return "LSTM"
     if "cnn" in f: return "CNN1D"
+    if "light_xgboost" in f or "light_xgb" in f: return "Light_XGBOOST"  # <- neu
     if "xgb" in f or "xgboost" in f: return "XGBOOST"
     if "rf" in f or "random_forest" in f: return "Random_Forest"
-    return flag.upper()
+    return f.upper()
 
 def build_training_config(algorithm: str, level: str, lags: int, horizon: int) -> dict:
     """Erzeugt eine zusammengeführte Trainings-Config aus Basisteilen + Komplexitätsprofilen."""
@@ -551,7 +597,7 @@ def main():
                     inference_steps=args.inference_steps,
                     loading_strategy=args.loading_strategy,
                     interval_sec=args.interval_sec,
-                    config_name=f"{algo}_edge",
+                    config_name=INFERENCE_CONFIG_BY_ALGO.get(algo, f"{algo}_edge"),
                 )
                 if rc != 0:
                     print(f"❌ Inference subprocess exited with {rc} — Metriken evtl. unvollständig.")

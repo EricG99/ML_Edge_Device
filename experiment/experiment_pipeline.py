@@ -655,6 +655,8 @@ def run_experiments(
                     base_cfg, used_var = load_profile_config(algo, profile)
                     folder_flag = algorithm_to_folder(algo)
                     cfg = build_training_config(base_cfg, profile, lags, horizon, folder_flag, quant_modes)
+                    cfg["config_var_used"] = used_var
+
 
                     print(f"\n=== Train {algo} | {profile} | lags={lags} | horizon={horizon} | cfg={used_var}")
                     run_id, models_dir = run_training(algo, cfg, folder_flag)
