@@ -1083,55 +1083,36 @@ def create_representative_dataset_generator(dataset: tf.data.Dataset):
 def load_model_artifacts_for_inference(config: dict, folder_flag: str) -> tuple:
     """
     Lädt robust die notwendigen Artefakte (Scaler, Features, Modell) für die Inferenz.
-    Die Funktion unterstützt zwei verschiedene Modi, die über die Konfiguration
-    gesteuert werden. Sie erkennt den Modelltyp automatisch anhand der Dateiendung.
-
-    Args:
-        config (dict): Das Konfigurations-Wörterbuch, das den Modus und die Pfade enthält.
-        folder_flag (str): Der modellspezifische Ordnername (z.B. "LSTM" oder "XGBOOST").
-
-    Returns:
-        tuple: Ein Tupel mit den geladenen Artefakten in der Reihenfolge 
-               (scaler, features, model, training_config, y_scaler). 
-               y_scaler kann None sein.
-
-    Raises:
-        ValueError: Wenn ein unbekannter 'inference_mode' angegeben wird oder
-                    notwendige Konfigurationsschlüssel fehlen.
-        FileNotFoundError: Wenn eine der Artefakt-Dateien nicht gefunden wird.
-
-    ---------------------------------------------------------------------------
-    Modi & unterstützte Modelle:
-    ---------------------------------------------------------------------------
-    - .keras / .h5: TensorFlow/Keras Modelle
-    - .joblib: Scikit-learn Modelle (z.B. RandomForest)
-    - .tflite: TensorFlow Lite Modelle
-    - .json: XGBoost Modelle  # KORREKTUR: Unterstützung hinzugefügt
-    ---------------------------------------------------------------------------
+    Unterstützte Modelle: .keras/.h5 (TF/Keras), .joblib (sklearn), .tflite (TFLite), .json (XGBoost).
+    Rückgabe: (scaler, features, model, training_config, y_scaler)
     """
+    import os, json, logging, joblib
+
+    # <<< Wichtig: TensorFlow anfangs importieren (oder sauber abfangen) >>>
+    try:
+        import tensorflow as tf  # benötigt für .keras/.h5/.tflite
+    except Exception:
+        tf = None  # wir prüfen vor jeder Nutzung und geben eine klare Fehlermeldung
+
     mode = config.get("inference_mode", "load_artifacts_fast")
     logging.info(f"Lade Artefakte im Modus: '{mode}'...")
-    
-    # Artefakte initialisieren
+
     scaler = None
     y_scaler = None
     features = None
     model = None
     training_config = None
 
-    # ----- Pfade basierend auf dem Modus bestimmen -----
+    # ----- Pfade bestimmen -----
     if mode == 'load_artifacts_path':
         try:
-            # Der Schlüssel 'artifacts_path' verweist auf das Basis-Output-Verzeichnis
-            base_path = config['paths'].get('output') or config.get('artifacts_path') # Fallback für ältere Configs
+            base_path = config['paths'].get('output') or config.get('artifacts_path')
             load_id = config["load_id"]
-            model_filename = config.get("model_filename", "model.joblib") # Default-Dateiname
-            
+            model_filename = config.get("model_filename", "model.joblib")
         except KeyError as e:
             raise ValueError(f"Für Modus 'load_artifacts_path' fehlt der Schlüssel '{e}' in der Konfiguration.")
 
         run_dir = os.path.join(base_path, folder_flag, load_id)
-
         model_path = os.path.join(run_dir, "Models", model_filename)
         scaler_path = os.path.join(run_dir, "Scalers", "scaler.joblib")
         features_path = os.path.join(run_dir, "Models", "features.joblib")
@@ -1152,44 +1133,32 @@ def load_model_artifacts_for_inference(config: dict, folder_flag: str) -> tuple:
         scaler_path = config.get("scaler_path_static", "trained_rf_scaler.joblib")
         features_path = config.get("features_path_static", "trained_rf_features.joblib")
         logging.info("Lade Artefakte von statischen Pfaden.")
-
     else:
-        raise ValueError(f"Unbekannter 'inference_mode': '{mode}'. Gültige Modi sind 'load_artifacts_fast' und 'load_artifacts_path'.")
+        raise ValueError(f"Unbekannter 'inference_mode': '{mode}'. Gültig: 'load_artifacts_fast', 'load_artifacts_path'.")
 
-    # ----- Existenz der Dateien prüfen -----
+    # ----- Existenz prüfen -----
     for path in [model_path, scaler_path, features_path]:
         if not os.path.exists(path):
             raise FileNotFoundError(f"Benötigte Artefakt-Datei wurde nicht gefunden unter: {path}")
 
-    # ----- Artefakte laden -----
-    # Modell laden (je nach Dateityp)
+    # ----- Modell laden (je nach Endung) -----
     if model_path.endswith((".keras", ".h5")):
+        if tf is None:
+            raise ImportError("TensorFlow wird für das Laden von .keras/.h5 benötigt. Bitte installieren/aktivieren.")
         model = tf.keras.models.load_model(model_path)
+
     elif model_path.endswith(".joblib"):
         model = joblib.load(model_path)
+
     elif model_path.endswith(".tflite"):
-        logging.info("Lade TFLite-Modell mit TensorFlow Lite Interpreter.")
-        
-        try:
-            import tensorflow as tf
-            delegates = [tf.lite.experimental.load_delegate('libtensorflowlite_flex.so')]
-            
-            interpreter = tf.lite.Interpreter(
-                model_path=model_path,
-                experimental_delegates=delegates,
-                # --- DIESE ZEILE IST NEU ---
-                experimental_disable_delegate_clustering=True
-            )
-            logging.info("✅ TFLite Flex Delegate erfolgreich geladen.")
-        except (ValueError, OSError) as e:
-            logging.warning(f"Flex Delegate konnte nicht geladen werden: {e}. Versuche es ohne...")
-            interpreter = tf.lite.Interpreter(model_path=model_path)
-
+        if tf is None:
+            raise ImportError("TensorFlow wird für das Laden von .tflite benötigt. Bitte installieren/aktivieren.")
+        logging.info("Lade TFLite-Modell.")
+        # Windows/CPU: ohne Flex-Delegate laden
+        interpreter = tf.lite.Interpreter(model_path=model_path)
         interpreter.allocate_tensors()
         model = interpreter
 
-        interpreter.allocate_tensors()
-        model = interpreter
     elif model_path.endswith(".json"):
         try:
             import xgboost as xgb
@@ -1197,18 +1166,18 @@ def load_model_artifacts_for_inference(config: dict, folder_flag: str) -> tuple:
             model.load_model(model_path)
             logging.info("XGBoost-Modell aus .json-Datei geladen.")
         except ImportError:
-            raise ImportError("Die 'xgboost'-Bibliothek wird benötigt, um .json-Modelle zu laden. Bitte installieren Sie sie via 'pip install xgboost'.")
+            raise ImportError("Die 'xgboost'-Bibliothek wird benötigt, um .json-Modelle zu laden (pip install xgboost).")
         except Exception as e:
             raise IOError(f"Fehler beim Laden des XGBoost-Modells von {model_path}: {e}")
-    else:
-        # KORREKTUR: Fehlermeldung um .json erweitert
-        raise ValueError(f"Unbekannte Modelldatei-Endung. Unterstützt werden .keras, .h5, .joblib, .tflite, .json. Pfad: {model_path}")
 
-    # Feature-Scaler und Feature-Liste laden
+    else:
+        raise ValueError(f"Unbekannte Modelldatei-Endung. Unterstützt: .keras, .h5, .joblib, .tflite, .json. Pfad: {model_path}")
+
+    # ----- Scaler & Featureliste laden -----
     scaler = joblib.load(scaler_path)
     features = joblib.load(features_path)
 
-    # Optional den y-Scaler laden, falls vorhanden
+    # Optionaler y-Scaler
     y_scaler_path = os.path.join(os.path.dirname(scaler_path), "y_scaler.joblib")
     if os.path.exists(y_scaler_path):
         try:
@@ -1216,11 +1185,11 @@ def load_model_artifacts_for_inference(config: dict, folder_flag: str) -> tuple:
             logging.info("✅ Target scaler (y_scaler) erfolgreich geladen.")
         except Exception as e:
             logging.warning(f"Konnte y_scaler nicht laden von {y_scaler_path}: {e}")
-    
-    logging.info("✅ Alle Artefakte erfolgreich geladen.")
 
-    # Rückgabe in der korrekten Reihenfolge
+    logging.info("✅ Alle Artefakte erfolgreich geladen.")
     return scaler, features, model, training_config, y_scaler
+
+
 
 class ModelScalerSaver:
     """

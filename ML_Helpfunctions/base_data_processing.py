@@ -123,3 +123,29 @@ class RealTimeDataProcessor:
             self._buffer = df.sort_index().tail(self._min_data_points)
             logging.info(f"Puffer wurde mit {len(self._buffer)} Zeilen vorgefüllt ('geprimed').")
  
+
+    def _recompute_thresholds(self):
+        training_cfg = self.config.get('training_config', {})
+        min_for_lags = int(training_cfg.get('lags', self.config.get('lags', 1)))
+
+        rolling_windows = self.config.get('rolling_windows', [])
+        if not isinstance(rolling_windows, list):
+            rolling_windows = [rolling_windows]
+
+        minp = int(self.config.get('rolling_min_periods', 1))
+        # wenn min_periods=1, dann reicht 1 Punkt für Rolling-Features
+        effective_roll_need = 1 if minp == 1 else max(
+            self.config.get('rolling_window_size', 1),
+            max(rolling_windows) if rolling_windows else 1
+        )
+
+        self._min_data_points = max(min_for_lags, effective_roll_need)
+        self._max_buffer_size = self.config.get('max_fe_window', 50) + min_for_lags
+
+    def reconfigure(self, updates: dict, keep_buffer: bool = True):
+        buf = self._buffer.copy() if keep_buffer else None
+        self.config.update(updates or {})
+        self._recompute_thresholds()
+        if keep_buffer and buf is not None:
+            # Puffer behalten und ggf. auf neue Max-Größe kappen
+            self._buffer = buf.tail(self._max_buffer_size)

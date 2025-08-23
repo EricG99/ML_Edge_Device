@@ -4,22 +4,23 @@ from pathlib import Path
 
 # --- Konfiguration der Experimente ---
 MODELS_TO_RUN = [
-    "cnn1d",
+
     "lstm",
     "random_forest",
     "xgboost",
-    "light_xgboost"
+    "light_xgboost",
+    "cnn1d",
 ]
 
 # --- Gemeinsame Parameter für alle Läufe ---
 SCRIPT_DIR = Path(__file__).resolve().parent
 PIPELINE_SCRIPT = SCRIPT_DIR / "experiment_pipeline.py"
 
-LAGS = "1:15:2"
-HORIZON = "1:15:2"
+LAGS = "1:16:3"
+HORIZON = "1:16:3"
 PROFILE = "edge"
 LOADING_STRATEGY = "live_mqtt"
-INFERENCE_STEPS = "50"
+INFERENCE_STEPS = "60"
 
 # NEU: Steuern Sie hier die Quantisierungsmodi für alle Experimente
 # Mögliche Werte: "no-quant", "quant-16", "quant-8"

@@ -549,6 +549,15 @@ def inference_manager(config: dict, inference_class, folder_flag: str, algorithm
         # 1) Falls bereits Artefakte im Speicher (z. B. nach initialem Training)
         if shared_model.get("model") is not None:
             inference_processor.set_artifacts_from_memory(shared_model)
+            dp = getattr(inference_processor, "data_processor", None)
+            if dp is not None and hasattr(dp, "reconfigure"):
+                # Bevorzugt die explizit geladene training_config, sonst die gemergte runtime-config
+                loaded_training_cfg = getattr(inference_processor, "training_config", None) or config
+                try:
+                    dp.reconfigure({"training_config": loaded_training_cfg}, keep_buffer=True)
+                    logging.info("RealTimeDataProcessor re-initialized with loaded training config.")
+                except Exception as e:
+                    logging.warning(f"Reconfigure des DataProcessors fehlgeschlagen: {e}")
             # Warm-Start des DataProcessors
             try:
                 init_df = shared_model.get("initial_training_data")
@@ -565,6 +574,15 @@ def inference_manager(config: dict, inference_class, folder_flag: str, algorithm
             # a) Harte Vorgabe durch load_id (bestehende Logik)
             if config.get('load_id'):
                 inference_processor.load_artifacts()
+                dp = getattr(inference_processor, "data_processor", None)
+                if dp is not None and hasattr(dp, "reconfigure"):
+                    # Bevorzugt die explizit geladene training_config, sonst die gemergte runtime-config
+                    loaded_training_cfg = getattr(inference_processor, "training_config", None) or config
+                    try:
+                        dp.reconfigure({"training_config": loaded_training_cfg}, keep_buffer=True)
+                        logging.info("RealTimeDataProcessor re-initialized with loaded training config.")
+                    except Exception as e:
+                        logging.warning(f"Reconfigure des DataProcessors fehlgeschlagen: {e}")
             else:
                 # b) Inferenz-only: versuche ohne load_id über Pfade/Dateien zu laden
                 #    (BaseInferenceProcessor.load_artifacts nutzt Pipeline_Utils und cfg.paths)
