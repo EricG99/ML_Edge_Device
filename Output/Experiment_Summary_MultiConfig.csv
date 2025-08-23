@@ -1,0 +1,12 @@
+algorithm,level,lags,horizon,model_variant,avg_inference_time_ms,avg_total_time_ms,avg_cpu_percent,avg_ram_percent,model_size_mb,run_id
+random_forest,simple,4,1,model.joblib,,,,,0.3196,2025-08-23_142824_6367_train
+random_forest,medium,4,1,model.joblib,,,,,3.2099,2025-08-23_142835_4554_train
+xgboost,simple,4,1,model.json,,,,,0.2238,2025-08-23_142914_5334_train
+light_xgboost,simple,4,1,model.joblib,,,,,,2025-08-23_143051_3534_train
+light_xgboost,medium,4,1,model.joblib,,,,,,2025-08-23_143100_9876_train
+light_xgboost,high,4,1,model.joblib,,,,,,2025-08-23_143106_5762_train
+light_xgboost,simple,4,1,model.json,,,,,,2025-08-23_152430_1525_train
+light_xgboost,medium,4,1,model.json,,,,,,2025-08-23_152438_9433_train
+xgboost,simple,4,1,model.json,,,,,0.2238,2025-08-23_205225_7619_train
+light_xgboost,simple,4,1,model.json,,,,,0.1129,2025-08-23_205255_7602_train
+light_xgboost,medium,4,1,model.json,,,,,0.3694,2025-08-23_205306_7165_train
