@@ -27,5 +27,5 @@ Thumbs.db
 # Standardmäßig den gesamten Output-Ordner ignorieren
 
 #/Output/
-Output/*
-Output/
+#Output/*
+#Output/
