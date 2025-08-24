@@ -67,8 +67,8 @@ TRAINER_MAP = {
     "cnn1d": ("ML_Algorithms.CNN1D.cnn1d_train", "CNN1DTrainer", "CNN1D"),
     "random_forest": ("ML_Algorithms.Random_Forest.rf_train", "RandomForestTrainer", "Random_Forest"),
     "xgboost": ("ML_Algorithms.XGBOOST.XGBOOST_train", "XGBoostTrainer", "XGBOOST"),
-    "light_xgboost": ("ML_Algorithms.XGBOOST.XGBOOST_train",
-                      "XGBoostTrainer", "Light_XGBOOST"),
+    # Light XGBoost -> nutzt den XGBoost-Trainer (leichtere Hyperparameter via Config), eigener Ordner-Flag
+    "light_xgboost": ("ML_Algorithms.Light_XGBOOST.Light_XGBOOST_train", "LightXGBoostTrainer", "LIGHT_XGBOOST"),
 }
 
 MODEL_FILENAME_DEFAULTS = {
@@ -76,7 +76,7 @@ MODEL_FILENAME_DEFAULTS = {
     "cnn1d": "model.keras",
     "random_forest": "model.joblib",
     "xgboost": "model.json",
-    "light_xgboost": "model.json",   # <- statt model.json
+    "light_xgboost": "model.json", 
 }
 
 # --- Komplexitätsprofile pro Modell (Edge-tauglich gehalten) ---

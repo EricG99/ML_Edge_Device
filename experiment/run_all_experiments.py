@@ -5,9 +5,9 @@ from pathlib import Path
 # --- Konfiguration der Experimente ---
 # Modelle gemäß deinen Logs
 EXPERIMENTS_TO_RUN = [
-    {"model": "lstm",          "profile": "edge"},
-    {"model": "cnn1d",         "profile": "edge"},
-    {"model": "random_forest", "profile": "edge"},
+    # {"model": "lstm",          "profile": "edge"},
+    # {"model": "cnn1d",         "profile": "edge"},
+    # {"model": "random_forest", "profile": "edge"},
     {"model": "light_xgboost", "profile": "edge"},
     {"model": "xgboost",       "profile": "edge"},
 ]
@@ -19,7 +19,7 @@ PIPELINE_SCRIPT = SCRIPT_DIR / "experiment_pipeline.py"
 # Vorgaben laut Wunsch
 LAGS = "1:16:3"
 HORIZON = "1:16:3"
-LOADING_STRATEGY = "live_mqtt"
+LOADING_STRATEGY = "split"
 INFERENCE_STEPS = "60"
 
 # Quantisierung (wie gehabt)

@@ -77,7 +77,7 @@ lstm_edge = {
 
     # FE-Flags analog RF-Style
     "include_roll_mean": True,
-    "include_roll_std": False,
+    "include_roll_std": True,
 }
 
 # -----------------------
