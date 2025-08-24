@@ -31,8 +31,6 @@ from sklearn.metrics import (
     mean_squared_log_error,
     median_absolute_error
 )
-
-
 # -------------------------------------------
 # Hilfsfunktionen: Daten vorbereiten & Skalierung
 # -------------------------------------------

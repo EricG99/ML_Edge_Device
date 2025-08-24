@@ -6,7 +6,7 @@ import os
 import joblib
 from abc import ABC, abstractmethod
 
-from ML_Helpfunctions import Pipeline_Utils
+from ML_Helpfunctions import pipeline_utils
 # NEU: Import für die Typprüfung der Pipeline
 from ML_Helpfunctions.Load_Prepare_Data import DataPipeline3D, DataPipeline2D
 
@@ -116,7 +116,7 @@ class BaseTrainer(ABC):
                 pass
             # Hier wird jetzt der korrekte, bereits erstellte Pfad verwendet.
             logging.info("Saving in 'path' mode with versioned directory...")
-            saver = Pipeline_Utils.ModelScalerSaver(self.config, paths)
+            saver = pipeline_utils.ModelScalerSaver(self.config, paths)
             
             # --- ANGEPASSTE LOGIK ZUR STEUERUNG DER QUANTISIERUNG START ---
             rep_gen = None
@@ -125,10 +125,10 @@ class BaseTrainer(ABC):
                 logging.info("Quantization is enabled. Creating representative dataset for TFLite conversion.")
                 saved_artifacts = None
                 try:
-                    rep_gen = Pipeline_Utils.create_representative_dataset_generator(getattr(self, '_rep_source', None), config=self.config)
+                    rep_gen = pipeline_utils.create_representative_dataset_generator(getattr(self, '_rep_source', None), config=self.config)
                 except TypeError:
                     # Fallback für ältere Signaturen (nur eine Positionals)
-                    rep_gen = Pipeline_Utils.create_representative_dataset_generator(getattr(self, '_rep_source', None))
+                    rep_gen = pipeline_utils.create_representative_dataset_generator(getattr(self, '_rep_source', None))
             else:
                 logging.info("Quantization is disabled via config. Skipping representative dataset generation.")
             # --- ANGEPASSTE LOGIK ZUR STEUERUNG DER QUANTISIERUNG ENDE ---

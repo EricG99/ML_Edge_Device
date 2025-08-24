@@ -30,7 +30,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 
 from ML_Helpfunctions import Load_Prepare_Data as LoadPrepareData
-from ML_Helpfunctions import Pipeline_Utils as PipelineUtils
+from ML_Helpfunctions import pipeline_utils as PipelineUtils
 
 
 def prepare_data_for_lstm(config: dict):

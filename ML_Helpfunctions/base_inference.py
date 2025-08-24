@@ -8,11 +8,9 @@ import numpy as np
 from abc import ABC, abstractmethod
 import os
 
-from ML_Helpfunctions import Pipeline_Utils, Load_Prepare_Data
+from ML_Helpfunctions import pipeline_utils, Load_Prepare_Data
 from ML_Helpfunctions.MQTT_Client import MqttInferenceClient
 
-from ML_Helpfunctions import Pipeline_Utils, Load_Prepare_Data
-from ML_Helpfunctions.MQTT_Client import MqttInferenceClient
 # Hinzugefügter Import für die Typ-Annotation und Initialisierung
 from ML_Helpfunctions.base_data_processing import RealTimeDataProcessor
 
@@ -183,7 +181,7 @@ class BaseInferenceProcessor(ABC):
         breakdown = prediction_entry.get("time_breakdown", None)
 
         # Der Aufruf der Hilfsfunktion schreibt nun in den eindeutigen Pfad
-        final_path = Pipeline_Utils.append_prediction_step(
+        final_path = pipeline_utils.append_prediction_step(
             config=self.config,
             date=date,
             true_value=true_value,
@@ -214,7 +212,7 @@ class BaseInferenceProcessor(ABC):
             (
                 self.scaler, self.feature_list, self.model,
                 self.training_config, self.y_scaler
-            ) = Pipeline_Utils.load_model_artifacts_for_inference(self.config, self.folder_flag)
+            ) = pipeline_utils.load_model_artifacts_for_inference(self.config, self.folder_flag)
             self._post_load_artifacts()
             logging.info("✅ Artefakte erfolgreich geladen.")
         except Exception as e:
@@ -306,7 +304,7 @@ class BaseInferenceProcessor(ABC):
         cpu_percent = None
         ram_mb = None
         try:
-            from ML_Helpfunctions import Pipeline_Utils as PU
+            from ML_Helpfunctions import pipeline_utils as PU
             cpu_percent = float(PU.get_cpu_usage())
             mem = PU.get_memory_usage()  # dict: {"total_gb","used_gb","percent"} oder "N/A"
             ram_mb = float(mem["used_gb"]) * 1024.0 if isinstance(mem, dict) and mem.get("used_gb") != "N/A" else None
@@ -396,7 +394,7 @@ class BaseInferenceProcessor(ABC):
             if df_valid.empty:
                 logging.warning("Keine gültigen Paare aus wahren Werten und Vorhersagen gefunden. Metriken können nicht berechnet werden.")
                 # Speichere trotzdem eine leere Metrik-Datei, um Folgefehler zu vermeiden
-                Pipeline_Utils.save_metrics_summary(
+                pipeline_utils.save_metrics_summary(
                     metrics={"error": "No valid data to calculate metrics"},
                     run_config=self.config,
                     training_config=self.training_config or {},
@@ -434,7 +432,7 @@ class BaseInferenceProcessor(ABC):
             y_true = np.tile(y_true_1d.reshape(-1, 1), reps=(1, y_pred.shape[1]))
 
             logging.info(f"Berechne Metriken für {len(y_true)} konsistente Datenpunkte.")
-            metrics = Pipeline_Utils.evaluate_all_metrics(y_true, y_pred, horizon=horizon)
+            metrics = pipeline_utils.evaluate_all_metrics(y_true, y_pred, horizon=horizon)
 
             # --- KORRIGIERTE VERSION START ---
             extra = {}
@@ -447,7 +445,7 @@ class BaseInferenceProcessor(ABC):
                 extra["model_tag"] = model_tag
             # --- KORRIGIERTE VERSION ENDE ---
 
-            metrics_json_path = Pipeline_Utils.save_metrics_summary(
+            metrics_json_path = pipeline_utils.save_metrics_summary(
                 metrics=metrics,
                 run_config=self.config,
                 training_config=self.training_config or {},

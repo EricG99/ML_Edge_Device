@@ -44,10 +44,10 @@ except ModuleNotFoundError:
     from config_general import CONFIG_PATH, CONFIG_LOAD_ARTIFACTS, MQTT_CONFIG  # type: ignore
 
 try:
-    from ML_Helpfunctions import Pipeline_Utils as PU  # type: ignore
+    from ML_Helpfunctions import pipeline_utils as PU  # type: ignore
 except ModuleNotFoundError:
     import importlib
-    PU = importlib.import_module('Pipeline_Utils')  # letzter Fallback
+    PU = importlib.import_module('pipeline_utils')  # letzter Fallback
 
 # pipeline_web_app dynamisch importieren (damit --config-name funktioniert)
 import importlib.util as _ilu

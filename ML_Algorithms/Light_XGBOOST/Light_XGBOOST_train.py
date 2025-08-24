@@ -6,7 +6,7 @@ if project_root not in sys.path:
 
 from ML_Helpfunctions.base_trainer import BaseTrainer  # type: ignore
 from ML_Helpfunctions.Load_Prepare_Data import DataPipeline2D  # type: ignore
-from ML_Helpfunctions import Light_XGBOOST_Utils as LGBMUtils  # type: ignore
+from ML_Helpfunctions import light_xgboost_utils as LGBMUtils  # type: ignore
 
 FOLDER_FLAG = "Light_XGBOOST"
 
