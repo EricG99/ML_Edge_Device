@@ -1,2 +1,0 @@
-algorithm,profile,lags,horizon,model_variant,avg_inference_time_ms,avg_total_time_ms,avg_cpu_percent,avg_ram_percent,model_size_mb,run_id
-light_xgboost,edge,1,4,model.joblib,4.7950396537057705,16.93198304787131,40.682980509279936,84.03050847457627,0.6841,20250823_200604
