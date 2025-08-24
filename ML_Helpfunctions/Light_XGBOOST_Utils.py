@@ -13,7 +13,7 @@ project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 if project_root not in sys.path:
     sys.path.append(project_root)
 
-from ML_Helpfunctions import Pipeline_Utils as PipelineUtils  # type: ignore
+from ML_Helpfunctions import pipeline_utils as PipelineUtils  # type: ignore
 
 def train_light_xgboost_model(config: dict, X_train: np.ndarray, y_train: np.ndarray):
     """Training eines LightGBM-Regressors. Multi-Output via MultiOutputRegressor."""

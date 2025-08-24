@@ -5,9 +5,9 @@ from pathlib import Path
 # --- Konfiguration der Experimente ---
 # Modelle gemäß deinen Logs
 EXPERIMENTS_TO_RUN = [
-    # {"model": "lstm",          "profile": "edge"},
-    # {"model": "cnn1d",         "profile": "edge"},
-    # {"model": "random_forest", "profile": "edge"},
+    {"model": "lstm",          "profile": "edge"},
+    {"model": "cnn1d",         "profile": "edge"},
+    {"model": "random_forest", "profile": "edge"},
     {"model": "light_xgboost", "profile": "edge"},
     {"model": "xgboost",       "profile": "edge"},
 ]

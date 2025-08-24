@@ -16,7 +16,7 @@ if project_root not in sys.path:
     sys.path.append(project_root)
 
 import ML_Helpfunctions.Load_Prepare_Data as LoadPrepareData
-import ML_Helpfunctions.Pipeline_Utils as PipelineUtils
+import ML_Helpfunctions.pipeline_utils as PipelineUtils
 
 
 def train_random_forest_pipeline(config: dict, mode: str = "server", ssh_config: dict = None) -> dict:

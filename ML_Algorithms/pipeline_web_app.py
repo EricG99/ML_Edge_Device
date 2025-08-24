@@ -26,10 +26,10 @@ try:
     if project_root not in sys.path:
         sys.path.append(project_root)
     from config.config_general import CONFIG_PATH, MQTT_CONFIG, CONFIG_LOAD_ARTIFACTS
-    from ML_Helpfunctions import Pipeline_Utils as PipelineUtils
+    from ML_Helpfunctions import pipeline_utils as PipelineUtils
     from ML_Helpfunctions.MQTT_Client import MqttInferenceClient
     from ML_Helpfunctions import Load_Prepare_Data as LoadPrepareData
-    from ML_Helpfunctions import Feature_Engeneering as fe
+    from ML_Helpfunctions import feature_engineering as fe
 except ImportError as e:
     print(f"Fehler beim Importieren der Basis-Module: {e}")
     sys.exit(1)
@@ -858,22 +858,22 @@ def main():
         inference_class = RFInference
         folder_flag = "Random_Forest"
     elif args.algorithm == 'xgboost':
-        from ML_Algorithms.XGBOOST.XGBOOST_train import XGBoostTrainer
-        from ML_Algorithms.XGBOOST.XGBOOST_inference import XGBoostInference
+        from ML_Algorithms.XGBOOST.xgboost_train import XGBoostTrainer
+        from ML_Algorithms.XGBOOST.xgboost_inference import XGBoostInference
         trainer_class = XGBoostTrainer
         inference_class = XGBoostInference
         folder_flag = "XGBOOST"
 
     elif args.algorithm == 'light_xgboost':
-        from ML_Algorithms.Light_XGBOOST.Light_XGBOOST_train import LightXGBoostTrainer
-        from ML_Algorithms.Light_XGBOOST.Light_XGBOOST_inference import LightXGBoostInference
+        from ML_Algorithms.Light_XGBOOST.light_xgboost_train import LightXGBoostTrainer
+        from ML_Algorithms.Light_XGBOOST.light_xgboost_inference import LightXGBoostInference
         trainer_class = LightXGBoostTrainer
         inference_class = LightXGBoostInference
         folder_flag = "Light_XGBOOST"
 
     else:
-        from ML_Algorithms.LSTM.LSTM_train import LSTMTrainer
-        from ML_Algorithms.LSTM.LSTM_inference import LSTMInference
+        from ML_Algorithms.LSTM.lstm_train import LSTMTrainer
+        from ML_Algorithms.LSTM.lstm_inference import LSTMInference
         trainer_class = LSTMTrainer
         inference_class = LSTMInference
         folder_flag = "LSTM"

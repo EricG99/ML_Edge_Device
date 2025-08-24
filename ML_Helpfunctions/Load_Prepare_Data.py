@@ -11,7 +11,7 @@ project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 if project_root not in sys.path:
     sys.path.append(project_root)
 
-import ML_Helpfunctions.Feature_Engeneering as fe
+import ML_Helpfunctions.feature_engineering as fe
 
 from pathlib import Path
 

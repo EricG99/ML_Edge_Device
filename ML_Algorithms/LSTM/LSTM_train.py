@@ -16,8 +16,8 @@ if project_root not in sys.path:
 # --- Application Imports ---
 # Import der neuen 3D-Datenpipeline und der Hilfsfunktionen
 from ML_Helpfunctions.Load_Prepare_Data import DataPipeline3D, load_test_data_by_fraction
-from ML_Helpfunctions import Pipeline_Utils
-from ML_Helpfunctions import LSTM_Utils
+from ML_Helpfunctions import pipeline_utils
+from ML_Helpfunctions import lstm_utils
 from ML_Helpfunctions.base_trainer import BaseTrainer
 
 
@@ -43,7 +43,7 @@ class LSTMTrainer(BaseTrainer):
         """Trainiert das LSTM Modell."""
         # Hinweis: Das Speichern der Artefakte für Keras-Modelle (history, etc.)
         # könnte hier noch verfeinert werden, indem die `history` zurückgegeben wird.
-        self.model, history, self.train_time = LSTM_Utils.train_model_LSTM(
+        self.model, history, self.train_time = lstm_utils.train_model_LSTM(
             config=self.config,
             X_train=X_train,
             y_train=y_train,
@@ -77,7 +77,7 @@ if __name__ == "__main__":
     logging.info("Setting up experiment directory structure...")
     exp_name = FOLDER_FLAG
 
-    final_config, versioned_paths = Pipeline_Utils.setup_experiment(
+    final_config, versioned_paths = pipeline_utils.setup_experiment(
         training_config, 
         exp_name, 
         run_type='train'

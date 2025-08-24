@@ -15,8 +15,8 @@ if project_root not in sys.path:
 # NEU: Direkter Import der DataPipeline2D-Klasse
 from ML_Helpfunctions.base_trainer import BaseTrainer
 from ML_Helpfunctions.Load_Prepare_Data import DataPipeline2D
-from ML_Helpfunctions import Pipeline_Utils as PipelineUtils
-from ML_Helpfunctions import RF_Utils as RFUtils # RF_Utils is already imported
+from ML_Helpfunctions import pipeline_utils as PipelineUtils
+from ML_Helpfunctions import rf_utils as RFUtils # RF_Utils is already imported
 
 #from config.config_ml_random_forest import random_forest
 from config.config_general import CONFIG_PATH
