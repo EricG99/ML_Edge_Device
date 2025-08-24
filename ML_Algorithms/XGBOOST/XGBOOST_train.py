@@ -19,7 +19,7 @@ class XGBoostTrainer(BaseTrainer):
 
     def _train_model(self, X_train, y_train):
         # Multi-Output wird innerhalb von XGBUtils trainiert (falls Horizon > 1)
-        model, train_time = XGBUtils.train_xgboost_model(self.config, X_train, y_train)
+        model, train_time = XGBoost_Utils.train_xgboost_model(self.config, X_train, y_train)
         self.model = model
         self.train_time = float(train_time)
         logging.info("XGBoost-Training abgeschlossen in %.2f s.", self.train_time)
@@ -28,3 +28,4 @@ class XGBoostTrainer(BaseTrainer):
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     print("XGBoostTrainer: wird von pipeline_web_app.py genutzt.")
+
