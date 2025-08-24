@@ -1,0 +1,112 @@
+{
+  "loading_strategy": "split",
+  "train_fraction": 0.8,
+  "validation_fraction": 0.2,
+  "dataset": "C:\\DEV\\RevPi_ML\\ML_Edge_Device\\Input\\Input_Data\\mqtt_data_filtered.csv",
+  "target_column": "Group4-2_S6_VolumetricFlowRate",
+  "exclude_columns": [
+    "time",
+    "datetime",
+    "recording_timestamp",
+    "duration"
+  ],
+  "lags": 4,
+  "horizon": 4,
+  "base_features": [
+    "Group4-2_S6_VolumetricFlowRate",
+    "Group4-2_S6_MassFlowRate"
+  ],
+  "optimize_on": "server",
+  "model_name": "lstm_server_opt",
+  "deployment_profile": "server",
+  "feature_engineering": {
+    "enable": true,
+    "rolling_windows": [
+      3,
+      5,
+      9,
+      15
+    ],
+    "stats": [
+      "mean",
+      "std"
+    ],
+    "add_diff": false,
+    "add_pct": false,
+    "ewm_alphas": []
+  },
+  "search_space": {
+    "num_layers": {
+      "type": "int",
+      "min": 2,
+      "max": 3
+    },
+    "initial_units": {
+      "type": "int",
+      "min": 56,
+      "max": 128
+    },
+    "dropout": {
+      "type": "float",
+      "min": 0.05,
+      "max": 0.45
+    },
+    "batch_size": {
+      "type": "int_choice",
+      "choices": [
+        32,
+        48,
+        64,
+        96,
+        128
+      ]
+    },
+    "epochs": {
+      "type": "int",
+      "min": 50,
+      "max": 120
+    },
+    "learning_rate": {
+      "type": "log_float",
+      "min": 0.0001,
+      "max": 0.003
+    },
+    "loss": {
+      "type": "choice",
+      "choices": [
+        "mse",
+        "mae",
+        "huber"
+      ]
+    },
+    "optimizer": {
+      "type": "choice",
+      "choices": [
+        "adam",
+        "rmsprop",
+        "nadam",
+        "adamw"
+      ]
+    },
+    "clipnorm": {
+      "type": "float",
+      "min": 0.5,
+      "max": 5.0
+    },
+    "weight_decay": {
+      "type": "log_float",
+      "min": 1e-06,
+      "max": 0.001
+    }
+  },
+  "num_layers": 3,
+  "initial_units": 64,
+  "dropout": 0.1105743725240346,
+  "batch_size": 48,
+  "epochs": 56,
+  "learning_rate": 0.0028121364649983196,
+  "loss": "huber",
+  "optimizer": "nadam",
+  "clipnorm": 3.2684290160962646,
+  "weight_decay": 0.00014691204228131633
+}

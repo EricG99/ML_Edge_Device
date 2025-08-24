@@ -1,0 +1,109 @@
+{
+  "loading_strategy": "split",
+  "train_fraction": 0.8,
+  "validation_fraction": 0.2,
+  "dataset": "C:\\DEV\\RevPi_ML\\ML_Edge_Device\\Input\\Input_Data\\mqtt_data_filtered.csv",
+  "target_column": "Group4-2_S6_VolumetricFlowRate",
+  "exclude_columns": [
+    "time",
+    "datetime",
+    "recording_timestamp",
+    "duration"
+  ],
+  "lags": 4,
+  "horizon": 4,
+  "base_features": [
+    "Group4-2_S6_VolumetricFlowRate",
+    "Group4-2_S6_MassFlowRate"
+  ],
+  "optimize_on": "server",
+  "model_name": "xgboost_server_opt",
+  "deployment_profile": "server",
+  "feature_engineering": {
+    "enable": true,
+    "rolling_windows": [
+      3,
+      5,
+      9,
+      15
+    ],
+    "stats": [
+      "mean",
+      "std"
+    ],
+    "add_diff": false,
+    "add_pct": false,
+    "ewm_alphas": []
+  },
+  "search_space": {
+    "n_estimators": {
+      "type": "int",
+      "min": 400,
+      "max": 1500
+    },
+    "max_depth": {
+      "type": "int",
+      "min": 6,
+      "max": 12
+    },
+    "learning_rate": {
+      "type": "log_float",
+      "min": 0.01,
+      "max": 0.1
+    },
+    "subsample": {
+      "type": "float",
+      "min": 0.6,
+      "max": 1.0
+    },
+    "colsample_bytree": {
+      "type": "float",
+      "min": 0.6,
+      "max": 1.0
+    },
+    "min_child_weight": {
+      "type": "int",
+      "min": 1,
+      "max": 12
+    },
+    "gamma": {
+      "type": "float",
+      "min": 0.0,
+      "max": 8.0
+    },
+    "reg_lambda": {
+      "type": "log_float",
+      "min": 0.001,
+      "max": 100.0
+    },
+    "reg_alpha": {
+      "type": "log_float",
+      "min": 1e-06,
+      "max": 1.0
+    },
+    "tree_method": {
+      "type": "fixed",
+      "value": "hist"
+    },
+    "n_jobs": {
+      "type": "fixed",
+      "value": -1
+    },
+    "random_state": {
+      "type": "fixed",
+      "value": 42
+    }
+  },
+  "n_estimators": 1000,
+  "max_depth": 6,
+  "learning_rate": 0.01844635399790786,
+  "subsample": 0.624169405183495,
+  "colsample_bytree": 0.6417046810585959,
+  "min_child_weight": 11,
+  "gamma": 6.496718989566206,
+  "reg_lambda": 17.81236510383156,
+  "reg_alpha": 0.15389271556233444,
+  "tree_method": "hist",
+  "n_jobs": -1,
+  "random_state": 42
+}
