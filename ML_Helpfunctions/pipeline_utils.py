@@ -16,7 +16,6 @@ import socket
 import psutil
 import time
 
-from sklearn.base import BaseEstimator
 
 import xgboost as xgb
 from sklearn.ensemble import RandomForestRegressor
@@ -643,10 +642,10 @@ def setup_experiment(config: dict, folder_flag: str, run_type: str = None) -> tu
         "Input_Scaler": input_path / "Input_Scaler"
     }
     
-    # # Error_Metrics bleiben im Haupt-Output-Ordner, nicht pro Modell
-    # persistent_subfolders = {
-    #     "Error_Metrics": base_output_path / "Error_Metrics"
-    # }
+    # Error_Metrics bleiben im Haupt-Output-Ordner, nicht pro Modell
+    persistent_subfolders = {
+        "Error_Metrics": base_output_path / "Error_Metrics"
+    }
 
     # Die Unterordner für den Lauf werden relativ zum neuen run_output_path erstellt
     run_subfolders = {
@@ -657,12 +656,11 @@ def setup_experiment(config: dict, folder_flag: str, run_type: str = None) -> tu
         "Model_Structures": run_output_path / "Model_Structures",
         "Model_Summaries": run_output_path / "Model_Summaries",
         "Prediction_Plots": run_output_path / "Prediction_Plots",
-        "Loss_Plots": run_output_path / "Loss_Plots",
-        # NEU: Error_Metrics LAUF-LOKAL
-        "Error_Metrics": run_output_path / "Error_Metrics",
+        "Loss_Plots": run_output_path / "Loss_Plots"
     }
+
     # Alle Pfade zusammenführen und Konfiguration aktualisieren
-    all_paths = {**paths, **input_subfolders, **run_subfolders}
+    all_paths = {**paths, **input_subfolders, **persistent_subfolders, **run_subfolders}
     config["paths"] = all_paths
 
     # Alle benötigten Ordner anlegen
@@ -1353,11 +1351,13 @@ class ModelScalerSaver:
         # Schritt 1: Scaler speichern
         results.update(self._save_scaler(scaler))
 
+        # Schritt 2: Modell-spezifische Artefakte speichern
+        model_artifacts = {}
         if isinstance(model, tf.keras.Model):
             model_artifacts = self._save_keras_artifacts(model, **kwargs)
         elif isinstance(model, xgb.XGBRegressor):
             model_artifacts = self._save_xgboost_model(model)
-        elif isinstance(model, BaseEstimator):  # <-- deckt LGBMRegressor mit ab
+        elif isinstance(model, (RandomForestRegressor, MultiOutputRegressor)):
             model_artifacts = self._save_sklearn_model(model)
         else:
             print(f"⚠️ Warnung: Kein spezifischer Speicherpfad für Modelltyp {type(model).__name__} implementiert.")
