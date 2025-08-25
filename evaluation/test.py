@@ -123,7 +123,7 @@ def visualize_data(df, metrics_to_plot):
 # ==============================================================================
 
 # --- EINSTELLUNGEN ---
-OUTPUT_ROOT_PATH = r'C:\Users\ericg\Documents\Mechatronik M Sc\6. Semster\MA\Dev_Ma\ML_Edge_Device\Output'
+OUTPUT_ROOT_PATH = r'C:\Users\ericg\Documents\Mechatronik M Sc\6. Semster\MA\Dev_Ma\ML_Edge_Device'
 SUMMARY_FILENAME = 'Experiment_Summary.csv'
 TARGET_ALGORITHM = 'lstm' 
 TARGET_PROFILE = 'edge'

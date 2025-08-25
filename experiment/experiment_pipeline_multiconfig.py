@@ -65,9 +65,10 @@ TRAINER_MAP = {
     "lstm": ("ML_Algorithms.LSTM.lstm_train", "LSTMTrainer", "LSTM"),
     "cnn1d": ("ML_Algorithms.CNN1D.cnn1d_train", "CNN1DTrainer", "CNN1D"),
     "random_forest": ("ML_Algorithms.Random_Forest.rf_train", "RandomForestTrainer", "Random_Forest"),
-    "xgboost": ("ML_Algorithms.XGBOOST.xgboost", "XGBoostTrainer", "XGBOOST"),
+    "xgboost": ("ML_Algorithms.XGBOOST.xgboost_train", "XGBoostTrainer", "XGBOOST"),
     # Light XGBoost -> nutzt den XGBoost-Trainer (leichtere Hyperparameter via Config), eigener Ordner-Flag
-    "light_xgboost": ("ML_Algorithms.ight_XGBOOST.light_xgboost_train", "LightXGBoostTrainer", "LIGHT_XGBOOST"),
+    "light_xgboost": ("ML_Algorithms.Light_XGBOOST.light_xgboost_train", "LightXGBoostTrainer", "Light_XGBOOST"),
+    "light_xgboost": ("ML_Algorithms.Light_XGBOOST.light_xgboost_train", "LightXGBoostTrainer", "LIGHT_XGBOOST"),
 }
 
 MODEL_FILENAME_DEFAULTS = {
@@ -75,198 +76,37 @@ MODEL_FILENAME_DEFAULTS = {
     "cnn1d": "model.keras",
     "random_forest": "model.joblib",
     "xgboost": "model.json",
-    "light_xgboost": "model.json", 
+    "light_xgboost": "model.joblib", 
 }
 
-# --- Komplexitätsprofile pro Modell (Edge-tauglich gehalten) ---
-#     Jede Stufe enthält Top-Level-Keys und (wo passend) verschachtelte *params
-#     für maximale Kompatibilität mit existierenden Trainern.
 COMPLEXITY_PRESETS = {
-    "lstm": {
-        "simple": {
-            "num_layers": 1, "initial_units": 32, "dropout": 0.1,
-            "batch_size": 64, "epochs": 20, "learning_rate": 0.003,
-            "optimizer": "adam", "loss": "mse", "clipnorm": 1.0,
-            "model_params": {
-                "num_layers": 1, "initial_units": 32, "dropout": 0.1,
-                "batch_size": 64, "epochs": 20, "learning_rate": 0.003,
-                "optimizer": "adam", "loss": "mse", "clipnorm": 1.0,
-            },
-        },
-        "medium": {
-            "num_layers": 2, "initial_units": 64, "dropout": 0.2,
-            "batch_size": 64, "epochs": 40, "learning_rate": 0.002,
-            "optimizer": "adam", "loss": "mse", "clipnorm": 1.5,
-            "model_params": {
-                "num_layers": 2, "initial_units": 64, "dropout": 0.2,
-                "batch_size": 64, "epochs": 40, "learning_rate": 0.002,
-                "optimizer": "adam", "loss": "mse", "clipnorm": 1.5,
-            },
-        },
-        "high": {
-            "num_layers": 3, "initial_units": 96, "dropout": 0.25,
-            "batch_size": 32, "epochs": 60, "learning_rate": 0.002,
-            "optimizer": "nadam", "loss": "mse", "clipnorm": 2.0,
-            "model_params": {
-                "num_layers": 3, "initial_units": 96, "dropout": 0.25,
-                "batch_size": 32, "epochs": 60, "learning_rate": 0.002,
-                "optimizer": "nadam", "loss": "mse", "clipnorm": 2.0,
-            },
-        },
-    },
-    "cnn1d": {
-        "simple": {
-            "cnn_blocks": 1, "cnn_base_filters": 32, "cnn_kernel_size": 3,
-            "cnn_dropout": 0.05, "cnn_activation": "relu",
-            "batch_size": 64, "epochs": 20, "optimizer": "adam",
-            "learning_rate": 0.003, "clipnorm": 1.0, "loss": "huber",
-            "model_params": {
-                "cnn_blocks": 1, "cnn_base_filters": 32, "cnn_kernel_size": 3,
-                "cnn_dropout": 0.05, "cnn_activation": "relu",
-                "batch_size": 64, "epochs": 20, "optimizer": "adam",
-                "learning_rate": 0.003, "clipnorm": 1.0, "loss": "huber",
-            },
-        },
-        "medium": {
-            "cnn_blocks": 2, "cnn_base_filters": 64, "cnn_kernel_size": 5,
-            "cnn_dropout": 0.15, "cnn_activation": "relu",
-            "batch_size": 64, "epochs": 40, "optimizer": "adam",
-            "learning_rate": 0.002, "clipnorm": 1.5, "loss": "huber",
-            "model_params": {
-                "cnn_blocks": 2, "cnn_base_filters": 64, "cnn_kernel_size": 5,
-                "cnn_dropout": 0.15, "cnn_activation": "relu",
-                "batch_size": 64, "epochs": 40, "optimizer": "adam",
-                "learning_rate": 0.002, "clipnorm": 1.5, "loss": "huber",
-            },
-        },
-        "high": {
-            "cnn_blocks": 3, "cnn_base_filters": 96, "cnn_kernel_size": 7,
-            "cnn_dropout": 0.2, "cnn_activation": "relu",
-            "batch_size": 32, "epochs": 60, "optimizer": "adam",
-            "learning_rate": 0.0015, "clipnorm": 2.0, "loss": "huber",
-            "model_params": {
-                "cnn_blocks": 3, "cnn_base_filters": 96, "cnn_kernel_size": 7,
-                "cnn_dropout": 0.2, "cnn_activation": "relu",
-                "batch_size": 32, "epochs": 60, "optimizer": "adam",
-                "learning_rate": 0.0015, "clipnorm": 2.0, "loss": "huber",
-            },
-        },
-    },
-    "random_forest": {
-        "simple": {
-            "n_estimators": 120, "max_depth": 6, "min_samples_split": 4,
-            "min_samples_leaf": 4, "max_features": 0.8, "bootstrap": True,
-            "n_jobs": 1, "random_state": 42,
-            "model_params": {
-                "n_estimators": 120, "max_depth": 6, "min_samples_split": 4,
-                "min_samples_leaf": 4, "max_features": 0.8, "bootstrap": True,
-                "n_jobs": 1, "random_state": 42,
-            },
-        },
-        "medium": {
-            "n_estimators": 280, "max_depth": 10, "min_samples_split": 4,
-            "min_samples_leaf": 3, "max_features": 0.6, "bootstrap": True,
-            "n_jobs": -1, "random_state": 42,
-            "model_params": {
-                "n_estimators": 280, "max_depth": 10, "min_samples_split": 4,
-                "min_samples_leaf": 3, "max_features": 0.6, "bootstrap": True,
-                "n_jobs": -1, "random_state": 42,
-            },
-        },
-        "high": {
-            "n_estimators": 400, "max_depth": 12, "min_samples_split": 4,
-            "min_samples_leaf": 2, "max_features": 0.5, "bootstrap": True,
-            "n_jobs": -1, "random_state": 42,
-            "model_params": {
-                "n_estimators": 400, "max_depth": 12, "min_samples_split": 4,
-                "min_samples_leaf": 2, "max_features": 0.5, "bootstrap": True,
-                "n_jobs": -1, "random_state": 42,
-            },
-        },
-    },
-    "xgboost": {
-        "simple": {
-            "n_estimators": 200, "max_depth": 3, "learning_rate": 0.02,
-            "subsample": 0.8, "colsample_bytree": 0.8, "min_child_weight": 1,
-            "gamma": 0.0, "reg_lambda": 1.0, "reg_alpha": 0.0, "tree_method": "hist",
-            "n_jobs": -1, "random_state": 42, "objective": "reg:squarederror",
-            "xgb_params": {
-                "n_estimators": 200, "max_depth": 3, "learning_rate": 0.02,
-                "subsample": 0.8, "colsample_bytree": 0.8, "min_child_weight": 1,
-                "gamma": 0.0, "reg_lambda": 1.0, "reg_alpha": 0.0, "tree_method": "hist",
-                "n_jobs": -1, "random_state": 42, "objective": "reg:squarederror",
-            },
-        },
-        "medium": {
-            "n_estimators": 400, "max_depth": 5, "learning_rate": 0.015,
-            "subsample": 0.8, "colsample_bytree": 0.7, "min_child_weight": 5,
-            "gamma": 1.5, "reg_lambda": 1.0, "reg_alpha": 0.0, "tree_method": "hist",
-            "n_jobs": -1, "random_state": 42, "objective": "reg:squarederror",
-            "xgb_params": {
-                "n_estimators": 400, "max_depth": 5, "learning_rate": 0.015,
-                "subsample": 0.8, "colsample_bytree": 0.7, "min_child_weight": 5,
-                "gamma": 1.5, "reg_lambda": 1.0, "reg_alpha": 0.0, "tree_method": "hist",
-                "n_jobs": -1, "random_state": 42, "objective": "reg:squarederror",
-            },
-        },
-        "high": {
-            "n_estimators": 600, "max_depth": 6, "learning_rate": 0.013,
-            "subsample": 0.75, "colsample_bytree": 0.65, "min_child_weight": 8,
-            "gamma": 2.0, "reg_lambda": 1.5, "reg_alpha": 1e-5, "tree_method": "hist",
-            "n_jobs": -1, "random_state": 42, "objective": "reg:squarederror",
-            "xgb_params": {
-                "n_estimators": 600, "max_depth": 6, "learning_rate": 0.013,
-                "subsample": 0.75, "colsample_bytree": 0.65, "min_child_weight": 8,
-                "gamma": 2.0, "reg_lambda": 1.5, "reg_alpha": 1e-5, "tree_method": "hist",
-                "n_jobs": -1, "random_state": 42, "objective": "reg:squarederror",
-            },
-        },
-    },
+  'lstm': {
+    'simple': {'num_layers':1,'initial_units':32,'dropout':0.1,'batch_size':64,'epochs':20,'learning_rate':0.003,'optimizer':'adam','loss':'mse','clipnorm':1.0,'model_params':{'num_layers':1,'initial_units':32,'dropout':0.1,'batch_size':64,'epochs':20,'learning_rate':0.003,'optimizer':'adam','loss':'mse','clipnorm':1.0}},
+    'medium': {'num_layers':2,'initial_units':64,'dropout':0.2,'batch_size':64,'epochs':40,'learning_rate':0.002,'optimizer':'adam','loss':'mse','clipnorm':1.5,'model_params':{'num_layers':2,'initial_units':64,'dropout':0.2,'batch_size':64,'epochs':40,'learning_rate':0.002,'optimizer':'adam','loss':'mse','clipnorm':1.5}},
+    'high':   {'num_layers':3,'initial_units':96,'dropout':0.25,'batch_size':32,'epochs':60,'learning_rate':0.002,'optimizer':'nadam','loss':'mse','clipnorm':2.0,'model_params':{'num_layers':3,'initial_units':96,'dropout':0.25,'batch_size':32,'epochs':60,'learning_rate':0.002,'optimizer':'nadam','loss':'mse','clipnorm':2.0}},
+  },
+  'cnn1d': {
+    'simple': {'cnn_blocks':1,'cnn_base_filters':32,'cnn_kernel_size':3,'cnn_dropout':0.05,'cnn_activation':'relu','batch_size':64,'epochs':20,'optimizer':'adam','learning_rate':0.003,'clipnorm':1.0,'loss':'huber','model_params':{'cnn_blocks':1,'cnn_base_filters':32,'cnn_kernel_size':3,'cnn_dropout':0.05,'cnn_activation':'relu','batch_size':64,'epochs':20,'optimizer':'adam','learning_rate':0.003,'clipnorm':1.0,'loss':'huber'}},
+    'medium': {'cnn_blocks':2,'cnn_base_filters':64,'cnn_kernel_size':5,'cnn_dropout':0.15,'cnn_activation':'relu','batch_size':64,'epochs':40,'optimizer':'adam','learning_rate':0.002,'clipnorm':1.5,'loss':'huber','model_params':{'cnn_blocks':2,'cnn_base_filters':64,'cnn_kernel_size':5,'cnn_dropout':0.15,'cnn_activation':'relu','batch_size':64,'epochs':40,'optimizer':'adam','learning_rate':0.002,'clipnorm':1.5,'loss':'huber'}},
+    'high':   {'cnn_blocks':3,'cnn_base_filters':96,'cnn_kernel_size':7,'cnn_dropout':0.2,'cnn_activation':'relu','batch_size':32,'epochs':60,'optimizer':'adam','learning_rate':0.0015,'clipnorm':2.0,'loss':'huber','model_params':{'cnn_blocks':3,'cnn_base_filters':96,'cnn_kernel_size':7,'cnn_dropout':0.2,'cnn_activation':'relu','batch_size':32,'epochs':60,'optimizer':'adam','learning_rate':0.0015,'clipnorm':2.0,'loss':'huber'}},
+  },
+  'random_forest': {
+    'simple': {'n_estimators':120,'max_depth':6,'min_samples_split':4,'min_samples_leaf':4,'max_features':0.8,'bootstrap':True,'n_jobs':1,'random_state':42,'model_params':{'n_estimators':120,'max_depth':6,'min_samples_split':4,'min_samples_leaf':4,'max_features':0.8,'bootstrap':True,'n_jobs':1,'random_state':42}},
+    'medium': {'n_estimators':280,'max_depth':10,'min_samples_split':4,'min_samples_leaf':3,'max_features':0.6,'bootstrap':True,'n_jobs':-1,'random_state':42,'model_params':{'n_estimators':280,'max_depth':10,'min_samples_split':4,'min_samples_leaf':3,'max_features':0.6,'bootstrap':True,'n_jobs':-1,'random_state':42}},
+    'high':   {'n_estimators':400,'max_depth':12,'min_samples_split':4,'min_samples_leaf':2,'max_features':0.5,'bootstrap':True,'n_jobs':-1,'random_state':42,'model_params':{'n_estimators':400,'max_depth':12,'min_samples_split':4,'min_samples_leaf':2,'max_features':0.5,'bootstrap':True,'n_jobs':-1,'random_state':42}},
+  },
+  'xgboost': {
+    'simple': {'n_estimators':200,'max_depth':3,'learning_rate':0.02,'subsample':0.8,'colsample_bytree':0.8,'min_child_weight':1,'gamma':0.0,'reg_lambda':1.0,'reg_alpha':0.0,'tree_method':'hist','n_jobs':-1,'random_state':42,'objective':'reg:squarederror','xgb_params':{'n_estimators':200,'max_depth':3,'learning_rate':0.02,'subsample':0.8,'colsample_bytree':0.8,'min_child_weight':1,'gamma':0.0,'reg_lambda':1.0,'reg_alpha':0.0,'tree_method':'hist','n_jobs':-1,'random_state':42,'objective':'reg:squarederror'}},
+    'medium': {'n_estimators':400,'max_depth':5,'learning_rate':0.015,'subsample':0.8,'colsample_bytree':0.7,'min_child_weight':5,'gamma':1.5,'reg_lambda':1.0,'reg_alpha':0.0,'tree_method':'hist','n_jobs':-1,'random_state':42,'objective':'reg:squarederror','xgb_params':{'n_estimators':400,'max_depth':5,'learning_rate':0.015,'subsample':0.8,'colsample_bytree':0.7,'min_child_weight':5,'gamma':1.5,'reg_lambda':1.0,'reg_alpha':0.0,'tree_method':'hist','n_jobs':-1,'random_state':42,'objective':'reg:squarederror'}},
+    'high':   {'n_estimators':600,'max_depth':6,'learning_rate':0.013,'subsample':0.75,'colsample_bytree':0.65,'min_child_weight':8,'gamma':2.0,'reg_lambda':1.5,'reg_alpha':1e-5,'tree_method':'hist','n_jobs':-1,'random_state':42,'objective':'reg:squarederror','xgb_params':{'n_estimators':600,'max_depth':6,'learning_rate':0.013,'subsample':0.75,'colsample_bytree':0.65,'min_child_weight':8,'gamma':2.0,'reg_lambda':1.5,'reg_alpha':1e-5,'tree_method':'hist','n_jobs':-1,'random_state':42,'objective':'reg:squarederror'}},
+  },
+  'light_xgboost': {
+    'simple': {'n_estimators':100,'max_depth':3,'num_leaves':16,'learning_rate':0.03,'bagging_fraction':0.90,'bagging_freq':1,'feature_fraction':0.90,'min_child_samples':20,'min_split_gain':0.0,'reg_lambda':0.5,'reg_alpha':0.0,'max_bin':64,'n_jobs':1,'random_state':42,'objective':'regression','lgbm_params':{'n_estimators':100,'max_depth':3,'num_leaves':16,'learning_rate':0.03,'bagging_fraction':0.90,'bagging_freq':1,'feature_fraction':0.90,'min_child_samples':20,'min_split_gain':0.0,'reg_lambda':0.5,'reg_alpha':0.0,'max_bin':64,'n_jobs':1,'random_state':42,'objective':'regression'}},
+    'medium': {'n_estimators':200,'max_depth':4,'num_leaves':32,'learning_rate':0.02,'bagging_fraction':0.85,'bagging_freq':1,'feature_fraction':0.80,'min_child_samples':25,'min_split_gain':0.5,'reg_lambda':0.8,'reg_alpha':0.0,'max_bin':96,'n_jobs':1,'random_state':42,'objective':'regression','lgbm_params':{'n_estimators':200,'max_depth':4,'num_leaves':32,'learning_rate':0.02,'bagging_fraction':0.85,'bagging_freq':1,'feature_fraction':0.80,'min_child_samples':25,'min_split_gain':0.5,'reg_lambda':0.8,'reg_alpha':0.0,'max_bin':96,'n_jobs':1,'random_state':42,'objective':'regression'}},
+    'high':   {'n_estimators':300,'max_depth':5,'num_leaves':64,'learning_rate':0.015,'bagging_fraction':0.80,'bagging_freq':1,'feature_fraction':0.75,'min_child_samples':30,'min_split_gain':1.0,'reg_lambda':1.0,'reg_alpha':0.0,'max_bin':128,'n_jobs':1,'random_state':42,'objective':'regression','lgbm_params':{'n_estimators':300,'max_depth':5,'num_leaves':64,'learning_rate':0.015,'bagging_fraction':0.80,'bagging_freq':1,'feature_fraction':0.75,'min_child_samples':30,'min_split_gain':1.0,'reg_lambda':1.0,'reg_alpha':0.0,'max_bin':128,'n_jobs':1,'random_state':42,'objective':'regression'}},
+  },
 }
-COMPLEXITY_PRESETS["light_xgboost"] = {
-    "simple": {
-        "n_estimators": 100, "max_depth": 3, "learning_rate": 0.03,
-        "subsample": 0.90, "colsample_bytree": 0.90, "min_child_weight": 1,
-        "gamma": 0.0, "reg_lambda": 0.5, "reg_alpha": 0.0,
-        "tree_method": "hist", "max_bin": 64,
-        "n_jobs": 1, "random_state": 42, "objective": "reg:squarederror",
-        "xgb_params": {
-            "n_estimators": 100, "max_depth": 3, "learning_rate": 0.03,
-            "subsample": 0.90, "colsample_bytree": 0.90, "min_child_weight": 1,
-            "gamma": 0.0, "reg_lambda": 0.5, "reg_alpha": 0.0,
-            "tree_method": "hist", "max_bin": 64,
-            "n_jobs": 1, "random_state": 42, "objective": "reg:squarederror",
-        },
-    },
-    "medium": {
-        "n_estimators": 200, "max_depth": 4, "learning_rate": 0.02,
-        "subsample": 0.85, "colsample_bytree": 0.80, "min_child_weight": 3,
-        "gamma": 0.5, "reg_lambda": 0.8, "reg_alpha": 0.0,
-        "tree_method": "hist", "max_bin": 128,
-        "n_jobs": 1, "random_state": 42, "objective": "reg:squarederror",
-        "xgb_params": {
-            "n_estimators": 200, "max_depth": 4, "learning_rate": 0.02,
-            "subsample": 0.85, "colsample_bytree": 0.80, "min_child_weight": 3,
-            "gamma": 0.5, "reg_lambda": 0.8, "reg_alpha": 0.0,
-            "tree_method": "hist", "max_bin": 128,
-            "n_jobs": 1, "random_state": 42, "objective": "reg:squarederror",
-        },
-    },
-    "high": {
-        "n_estimators": 300, "max_depth": 5, "learning_rate": 0.015,
-        "subsample": 0.80, "colsample_bytree": 0.75, "min_child_weight": 5,
-        "gamma": 1.0, "reg_lambda": 1.0, "reg_alpha": 0.0,
-        "tree_method": "hist", "max_bin": 128,
-        "n_jobs": 1, "random_state": 42, "objective": "reg:squarederror",
-        "xgb_params": {
-            "n_estimators": 300, "max_depth": 5, "learning_rate": 0.015,
-            "subsample": 0.80, "colsample_bytree": 0.75, "min_child_weight": 5,
-            "gamma": 1.0, "reg_lambda": 1.0, "reg_alpha": 0.0,
-            "tree_method": "hist", "max_bin": 128,
-            "n_jobs": 1, "random_state": 42, "objective": "reg:squarederror",
-        },
-    },
-}
+
 # --- Basis-Defaults, die für alle Modelle gelten ---
 BASE_COMMON = {
     "dataset": "mqtt_data_filtered.csv",
@@ -291,7 +131,7 @@ INFERENCE_CONFIG_BY_ALGO = {
     "cnn1d": "cnn1d_edge",
     "random_forest": "random_forest_edge",
     "xgboost": "xgboost_edge",
-    "light_xgboost": "light_xgboost_edge",  # <- hinzufügen
+    "light_xgboost": "light_xgboost_edge", 
 }
 
 def _try_import(module: str, attr: str):
