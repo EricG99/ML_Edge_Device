@@ -67,7 +67,7 @@ TRAINER_MAP = {
     "random_forest": ("ML_Algorithms.Random_Forest.rf_train", "RandomForestTrainer", "Random_Forest"),
     "xgboost": ("ML_Algorithms.XGBOOST.xgboost", "XGBoostTrainer", "XGBOOST"),
     # Light XGBoost -> nutzt den XGBoost-Trainer (leichtere Hyperparameter via Config), eigener Ordner-Flag
-    "light_xgboost": ("ML_Algorithms.ight_XGBOOST.light_xgboost_train", "LightXGBoostTrainer", "LIGHT_XGBOOST"),
+    "light_xgboost": ("ML_Algorithms.Light_XGBOOST.light_xgboost_train", "LightXGBoostTrainer", "LIGHT_XGBOOST"),
 }
 
 MODEL_FILENAME_DEFAULTS = {
@@ -75,7 +75,7 @@ MODEL_FILENAME_DEFAULTS = {
     "cnn1d": "model.keras",
     "random_forest": "model.joblib",
     "xgboost": "model.json",
-    "light_xgboost": "model.json", 
+    "light_xgboost": "model.joblib", 
 }
 
 COMPLEXITY_PRESETS = {
@@ -130,7 +130,7 @@ INFERENCE_CONFIG_BY_ALGO = {
     "cnn1d": "cnn1d_edge",
     "random_forest": "random_forest_edge",
     "xgboost": "xgboost_edge",
-    "light_xgboost": "light_xgboost_edge",  # <- hinzufügen
+    "light_xgboost": "light_xgboost_edge", 
 }
 
 def _try_import(module: str, attr: str):

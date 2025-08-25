@@ -1,0 +1,16 @@
+Verzeichnisstruktur für: c:\Users\ericg\Documents\Mechatronik M Sc\6. Semster\MA\Dev_Ma\ML_Edge_Device\evaluation\RANDOM_FOREST_EDGE
+============================================================
+RANDOM_FOREST_EDGE/
+  exports/
+  figs/
+  logs/
+  report_meta.json
+  exports/
+    processed_runs.csv
+  figs/
+    interactive_grid_plot_avg_cpu_percent.html
+    interactive_grid_plot_avg_inference_time_s.html
+    interactive_grid_plot_avg_ram_percent.html
+    interactive_grid_plot_avg_total_time_s.html
+    interactive_grid_plot_model_size_mb.html
+  logs/
