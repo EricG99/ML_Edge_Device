@@ -642,10 +642,7 @@ def setup_experiment(config: dict, folder_flag: str, run_type: str = None) -> tu
         "Input_Scaler": input_path / "Input_Scaler"
     }
     
-    # Error_Metrics bleiben im Haupt-Output-Ordner, nicht pro Modell
-    persistent_subfolders = {
-        "Error_Metrics": base_output_path / "Error_Metrics"
-    }
+
 
     # Die Unterordner für den Lauf werden relativ zum neuen run_output_path erstellt
     run_subfolders = {
@@ -654,13 +651,14 @@ def setup_experiment(config: dict, folder_flag: str, run_type: str = None) -> tu
         "Scalers": run_output_path / "Scalers",
         "Prediction_Data": run_output_path / "Prediction_Data",
         "Model_Structures": run_output_path / "Model_Structures",
+        "Error_Metrics": run_output_path / "Error_Metrics",
         "Model_Summaries": run_output_path / "Model_Summaries",
         "Prediction_Plots": run_output_path / "Prediction_Plots",
         "Loss_Plots": run_output_path / "Loss_Plots"
     }
 
     # Alle Pfade zusammenführen und Konfiguration aktualisieren
-    all_paths = {**paths, **input_subfolders, **persistent_subfolders, **run_subfolders}
+    all_paths = {**paths, **input_subfolders, **run_subfolders}
     config["paths"] = all_paths
 
     # Alle benötigten Ordner anlegen
@@ -1359,6 +1357,8 @@ class ModelScalerSaver:
             model_artifacts = self._save_xgboost_model(model)
         elif isinstance(model, (RandomForestRegressor, MultiOutputRegressor)):
             model_artifacts = self._save_sklearn_model(model)
+        elif type(model).__name__ in ("LGBMRegressor", "LGBMClassifier"):
+            model_artifacts = self._save_lightgbm_model(model)
         else:
             print(f"⚠️ Warnung: Kein spezifischer Speicherpfad für Modelltyp {type(model).__name__} implementiert.")
         
@@ -1514,6 +1514,17 @@ class ModelScalerSaver:
             traceback.print_exc()
             return None
 
+    def _save_lightgbm_model(self, model) -> dict:
+        try:
+            import joblib
+            model_dir = self.paths.get("Models")
+            model_path = os.path.join(model_dir, "model.joblib")
+            joblib.dump(model, model_path, compress=3)
+            print(f"📤 LightGBM-Modell gespeichert unter: {model_path}")
+            return {"model_path": model_path}
+        except Exception as e:
+            print(f"❌ Fehler beim Speichern des LightGBM-Modells: {e}", exc_info=True)
+            return {}
 
     
     def _save_loss_plot(self, history, output_path: str):
