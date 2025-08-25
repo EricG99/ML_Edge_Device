@@ -52,23 +52,24 @@ except ModuleNotFoundError:
     from config_general import CONFIG_PATH, CONFIG_LOAD_ARTIFACTS, MQTT_CONFIG  # type: ignore
 
 # --- Import: Pipeline Utils (für setup_experiment) ---
+# --- Import: Pipeline Utils (für setup_experiment) ---
 try:
-    from ML_Helpfunctions import Pipeline_Utils as PU  # type: ignore
+    from ML_Helpfunctions import pipeline_utils as PU  # type: ignore
 except ModuleNotFoundError:
     try:
-        from ML_Helpfunktions import Pipeline_Utils as PU  # type: ignore
+        from ML_Helpfunktions import pipeline_utils as PU  # type: ignore
     except ModuleNotFoundError:
         import importlib
-        PU = importlib.import_module('Pipeline_Utils')  # letzte Chance (Root)
+        PU = importlib.import_module('pipeline_utils')  # letzte Chance (Root)
 
 # --- Trainer-Zuordnung je Algorithmus ---
 TRAINER_MAP = {
-    "lstm": ("ML_Algorithms.LSTM.LSTM_train", "LSTMTrainer", "LSTM"),
+    "lstm": ("ML_Algorithms.LSTM.lstm_train", "LSTMTrainer", "LSTM"),
     "cnn1d": ("ML_Algorithms.CNN1D.cnn1d_train", "CNN1DTrainer", "CNN1D"),
     "random_forest": ("ML_Algorithms.Random_Forest.rf_train", "RandomForestTrainer", "Random_Forest"),
-    "xgboost": ("ML_Algorithms.XGBOOST.XGBOOST_train", "XGBoostTrainer", "XGBOOST"),
+    "xgboost": ("ML_Algorithms.XGBOOST.xgboost", "XGBoostTrainer", "XGBOOST"),
     # Light XGBoost -> nutzt den XGBoost-Trainer (leichtere Hyperparameter via Config), eigener Ordner-Flag
-    "light_xgboost": ("ML_Algorithms.Light_XGBOOST.Light_XGBOOST_train", "LightXGBoostTrainer", "LIGHT_XGBOOST"),
+    "light_xgboost": ("ML_Algorithms.ight_XGBOOST.light_xgboost_train", "LightXGBoostTrainer", "LIGHT_XGBOOST"),
 }
 
 MODEL_FILENAME_DEFAULTS = {

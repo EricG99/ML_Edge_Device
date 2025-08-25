@@ -18,8 +18,8 @@ class XGBoostTrainer(BaseTrainer):
         return DataPipeline2D(self.config)
 
     def _train_model(self, X_train, y_train):
-        # Multi-Output wird innerhalb von XGBUtils trainiert (falls Horizon > 1)
-        model, train_time = XGBoost_Utils.train_xgboost_model(self.config, X_train, y_train)
+        # Multi-Output wird innerhalb von xgboost_utils trainiert (falls Horizon > 1)
+        model, train_time = XGBUtils.train_xgboost_model(self.config, X_train, y_train)
         self.model = model
         self.train_time = float(train_time)
         logging.info("XGBoost-Training abgeschlossen in %.2f s.", self.train_time)

@@ -866,12 +866,12 @@ def main():
 
     elif args.algorithm == 'light_xgboost':
         from ML_Algorithms.Light_XGBOOST.light_xgboost_train import LightXGBoostTrainer
-        from ML_Algorithms.Light_XGBOOST.light_xgboost_inference import LightXGBoostInference
+        from ML_Algorithms.Light_XGBOOST.Light_xgboost_inference import LightXGBoostInference 
         trainer_class = LightXGBoostTrainer
         inference_class = LightXGBoostInference
         folder_flag = "Light_XGBOOST"
 
-    else:
+    elif args.algorithm == 'lstm':
         from ML_Algorithms.LSTM.lstm_train import LSTMTrainer
         from ML_Algorithms.LSTM.lstm_inference import LSTMInference
         trainer_class = LSTMTrainer
