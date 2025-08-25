@@ -1,5 +1,7 @@
 # ML_Algorithms/Light_XGBOOST/Light_XGBOOST_inference.py
 import os, sys, logging, numpy as np
+import pandas as pd
+
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
 if project_root not in sys.path:
     sys.path.append(project_root)
@@ -111,7 +113,12 @@ class LightXGBoostInference(BaseInferenceProcessor):
             logging.warning("Light_XGBoostInference: NaNs im finalen Inferenz-Vektor entdeckt. Überspringe Schritt.")
             return None, None, None
 
-        X_live_scaled = self.scaler.transform(last_vector_full.values) if self.scaler else last_vector_full.values
+        # Skalieren – und danach wieder DataFrame mit identischen Spalten bauen
+        if self.scaler is not None:
+            X_live_scaled = self.scaler.transform(last_vector_full.values)
+            X_live_scaled = pd.DataFrame(X_live_scaled, columns=self.feature_list, index=last_vector_full.index)
+        else:
+            X_live_scaled = last_vector_full.copy()  # bereits korrekt benannt
 
         timestamp = last_vector_full.index[-1]
         key_to_find = self.target_feature.lower()

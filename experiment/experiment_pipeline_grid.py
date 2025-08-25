@@ -69,11 +69,11 @@ except (ImportError, ModuleNotFoundError) as e:
 
 # ---- Trainer Class Mapping ----
 TRAINER_MAP = {
-    "lstm": ("ML_Algorithms.LSTM.LSTM_train", "LSTMTrainer", "LSTM"),
+    "lstm": ("ML_Algorithms.LSTM.lstm_train", "LSTMTrainer", "LSTM"),
     "cnn1d": ("ML_Algorithms.CNN1D.cnn1d_train", "CNN1DTrainer", "CNN1D"),
     "random_forest": ("ML_Algorithms.Random_Forest.rf_train", "RandomForestTrainer", "Random_Forest"),
-    "xgboost": ("ML_Algorithms.XGBOOST.XGBOOST_train", "XGBoostTrainer", "XGBOOST"),
-    "light_xgboost": ("ML_Algorithms.XGBOOST.XGBOOST_train", "XGBoostTrainer", "LIGHT_XGBOOST"),
+    "xgboost": ("ML_Algorithms.XGBOOST.xgboost_train", "XGBoostTrainer", "XGBOOST"),
+    "light_xgboost": ("ML_Algorithms.Light_XGBOOST.light_xgboost_train", "XGBoostTrainer", "LIGHT_XGBOOST"),
 }
 
 # ---- Model & Profile Configuration Mapping ----
