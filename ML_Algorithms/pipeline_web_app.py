@@ -865,7 +865,7 @@ def main():
         folder_flag = "XGBOOST"
 
     elif args.algorithm == 'light_xgboost':
-        from ML_Algorithms.Light_XGBOOST.light_xgboost_train import LightXGBoostTrainer
+        from ML_Algorithms.Light_XGBOOST.Light_xgboost_train import LightXGBoostTrainer
         from ML_Algorithms.Light_XGBOOST.Light_xgboost_inference import LightXGBoostInference 
         trainer_class = LightXGBoostTrainer
         inference_class = LightXGBoostInference
