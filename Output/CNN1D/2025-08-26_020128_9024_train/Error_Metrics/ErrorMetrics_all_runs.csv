@@ -1,2 +1,0 @@
-run_id,model_name,dataset,time_stamp,model_variant,json_path,predictions_file_path
-2025-08-26_020128_9024_train,cnn1d_edge,mqtt_data_filtered.csv,2025-08-26_020128,tflite_model_quant_float16,/home/pi/ML_Edge_Device/Output/CNN1D/2025-08-26_020128_9024_train/Error_Metrics/ErrorMetrics_2025-08-26_020128_9024_train_cnn1d_edge_mqtt_data_filtered__tflite_model_quant_float16.json,/home/pi/ML_Edge_Device/Output/CNN1D/2025-08-26_020128_9024_train/Prediction_Data/StepPredictions_2025-08-26_020128_9024_train_CNN1D_mqtt_data_filtered__tflite_model_quant_float16.csv

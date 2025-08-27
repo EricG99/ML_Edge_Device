@@ -1,2 +1,0 @@
-run_id,model_name,dataset,time_stamp,model_variant,json_path,predictions_file_path
-2025-08-26_004655_5601_train,lstm_edge,mqtt_data_filtered.csv,2025-08-26_004655,tflite_model_quant_float16,/home/pi/ML_Edge_Device/Output/LSTM/2025-08-26_004655_5601_train/Error_Metrics/ErrorMetrics_2025-08-26_004655_5601_train_lstm_edge_mqtt_data_filtered__tflite_model_quant_float16.json,/home/pi/ML_Edge_Device/Output/LSTM/2025-08-26_004655_5601_train/Prediction_Data/StepPredictions_2025-08-26_004655_5601_train_LSTM_mqtt_data_filtered__tflite_model_quant_float16.csv
