@@ -17,10 +17,10 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 PIPELINE_SCRIPT = SCRIPT_DIR / "experiment_pipeline.py"
 
 # Vorgaben laut Wunsch
-LAGS = "10:16:3"
-HORIZON = "14:16:3"
-LOADING_STRATEGY = "split" #live_mqtt
-INFERENCE_STEPS = "20"
+LAGS = "1:16:3"
+HORIZON = "1:16:3"
+LOADING_STRATEGY = "live_mqtt" #live_mqtt
+INFERENCE_STEPS = "60"
 
 # Quantisierung (wie gehabt)
 # Mögliche Werte: "no-quant", "quant-16", "quant-8"
