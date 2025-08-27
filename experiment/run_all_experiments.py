@@ -5,9 +5,9 @@ from pathlib import Path
 # --- Konfiguration der Experimente ---
 # Modelle gemäß deinen Logs
 EXPERIMENTS_TO_RUN = [
-    {"model": "light_xgboost", "profile": "edge"},
-    # {"model": "lstm",          "profile": "edge"},
-    # {"model": "cnn1d",         "profile": "edge"},
+    #{"model": "light_xgboost", "profile": "edge"},
+    {"model": "lstm",          "profile": "edge"},
+    {"model": "cnn1d",         "profile": "edge"},
     # {"model": "random_forest", "profile": "edge"},
     # {"model": "xgboost",       "profile": "edge"},
 ]
@@ -24,7 +24,7 @@ INFERENCE_STEPS = "60"
 
 # Quantisierung (wie gehabt)
 # Mögliche Werte: "no-quant", "quant-16", "quant-8"
-QUANT_MODES = ["no-quant"]
+QUANT_MODES = ["quant-8"]
 
 def run_single_experiment(model_name: str, profile: str):
     config_name = f"{model_name.upper()} mit Profil '{profile}'"
