@@ -1,0 +1,2 @@
+run_id,model_name,dataset,time_stamp,model_variant,json_path,predictions_file_path
+2025-08-27_211014_9399_train,Light_XGBoost_Edge,mqtt_data_filtered.csv,2025-08-27_211014,sklearn,/home/pi/ML_Edge_Device/Output/Light_XGBOOST/2025-08-27_211014_9399_train/Error_Metrics/ErrorMetrics_2025-08-27_211014_9399_train_Light_XGBoost_Edge_mqtt_data_filtered__sklearn.json,/home/pi/ML_Edge_Device/Output/Light_XGBOOST/2025-08-27_211014_9399_train/Prediction_Data/StepPredictions_2025-08-27_211014_9399_train_Light_XGBOOST_mqtt_data_filtered__sklearn.csv
