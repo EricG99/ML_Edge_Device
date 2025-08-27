@@ -121,7 +121,7 @@ TRAINER_MAP = {
     "random_forest": ("ML_Algorithms.Random_Forest.rf_train", "RandomForestTrainer", "Random_Forest"),
     "xgboost": ("ML_Algorithms.XGBOOST.xgboost_train", "XGBoostTrainer", "XGBOOST"),
     # Light XGBoost -> nutzt den XGBoost-Trainer (leichtere Hyperparameter via Config), eigener Ordner-Flag
-    "light_xgboost": ("ML_Algorithms.Light_XGBOOST.Light_xgboost_train", "LightXGBoostTrainer", "LIGHT_XGBOOST"),
+    "light_xgboost": ("ML_Algorithms.Light_XGBOOST.Light_xgboost_train", "LightXGBoostTrainer", "Light_XGBOOST"),
 }
 
 # Default-Config-Variablen pro Profil (werden versucht; sonst Fallback -> Basisvariable == Algorithmus)

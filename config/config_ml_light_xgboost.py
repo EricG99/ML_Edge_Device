@@ -38,9 +38,6 @@ _COMMON = {
     "lgbm_additional_estimators": 200,
     "lgbm_early_stopping_rounds": 0,
 
-    # Metadaten
-    "run_id": _now,
-    "time_stamp": _now,
 }
 
 light_xgboost_edge = {

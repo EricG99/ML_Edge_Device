@@ -1,11 +1,18 @@
 # ML_Algorithms/Light_XGBOOST/Light_XGBOOST_inference.py
-import os, sys, logging, numpy as np
+import os, sys, logging, numpy as np, pandas as pd
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
 if project_root not in sys.path:
     sys.path.append(project_root)
 
 from ML_Helpfunctions.base_inference import BaseInferenceProcessor  # type: ignore
 from ML_Helpfunctions.base_data_processing import RealTimeDataProcessor  # type: ignore
+
+logger = logging.getLogger("LightGBMInference")
+if not logger.handlers:
+    h = logging.StreamHandler(sys.stdout)
+    h.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(name)s - %(message)s'))
+    logger.addHandler(h)
+logger.setLevel(os.environ.get("LOGLEVEL", "INFO").upper())
 
 FOLDER_FLAG = "Light_XGBOOST"
 
@@ -16,8 +23,37 @@ class LightXGBoostInference(BaseInferenceProcessor):
         self.target_feature = config['base_features'][0]
         self.data_processor = RealTimeDataProcessor(config)
 
+    def _post_load_artifacts(self):
+        """
+        Wird nach dem initialen Laden der Artefakte aufgerufen.
+        Mergt die Trainings-Konfiguration mit der Laufzeit-Konfiguration.
+        """
+        # 1. Wichtige Laufzeit-Parameter sichern
+        preserve_keys = ("loading_strategy", "inference_interval_sec", "model_filename")
+        preserved_config = {k: self.config.get(k) for k in preserve_keys if k in self.config}
+
+        # 2. FE-kritische Keys aus der geladenen training_config übernehmen
+        if getattr(self, "training_config", None):
+            self.config.update(self.training_config)
+
+        # 3. Gesicherte Laufzeit-Parameter wieder anwenden (sie haben Vorrang)
+        self.config.update(preserved_config)
+        logger.info("Konfiguration nach dem Laden der Artefakte erfolgreich gemergt.")
+
+        # 4. DataProcessor mit der finalen Konfiguration neu aufsetzen und Buffer erhalten
+        old_buf = getattr(getattr(self, "data_processor", None), "_buffer", None)
+        self.data_processor = RealTimeDataProcessor(self.config)
+        if old_buf is not None and not old_buf.empty:
+            max_len = getattr(self.data_processor, "_max_buffer_size", len(old_buf))
+            self.data_processor._buffer = old_buf.tail(max_len)
+            logger.info("DataProcessor wurde mit %d Zeilen aus dem alten Puffer warm-gestartet.", len(self.data_processor._buffer))
+
+    # ANGEPASST: Vereinheitlichte Logik für den "Hot-Swap" von Modellen.
     def _on_artifacts_swapped(self):
-        # Warm-Start: Puffer übernehmen, Pending neu seed-en (analog XGBoost)
+        """
+        Wird nach einem Hot-Swap (set_artifacts_from_memory) aufgerufen.
+        Stellt sicher, dass der data_processor synchronisiert ist und der Puffer erhalten bleibt.
+        """
         old_buf = None
         try:
             if getattr(self, "data_processor", None) is not None and hasattr(self.data_processor, "_buffer"):
@@ -30,57 +66,9 @@ class LightXGBoostInference(BaseInferenceProcessor):
             if old_buf is not None and not old_buf.empty:
                 max_len = getattr(self.data_processor, "_max_buffer_size", len(old_buf))
                 self.data_processor._buffer = old_buf.tail(max_len)
-                logging.info("Light_XGBoostInference: Warm-Start mit %d Zeilen.", len(self.data_processor._buffer))
+                logger.info("Hot-Swap: DataProcessor warm-started mit %d Zeilen.", len(self.data_processor._buffer))
         except Exception as e:
-            logging.warning("Light_XGBoostInference: Konnte alten Puffer nicht übernehmen: %s", e)
-
-        try:
-            if getattr(self, "_last_input_data", None) is None:
-                return
-            pred_scaled, t_inf_ms = self._run_inference_unified(self._last_input_data)
-            pred_unscaled = self._inverse_transform_prediction(pred_scaled).reshape(-1)
-
-            H = int(self.config.get("horizon", 1))
-            if pred_unscaled.size < H:
-                import numpy as _np
-                pad = _np.full(H - pred_unscaled.size, _np.nan, dtype=float)
-                pred_unscaled = _np.concatenate([pred_unscaled, pad], axis=0)
-            elif pred_unscaled.size > H:
-                pred_unscaled = pred_unscaled[:H]
-
-            import pandas as pd
-            dfb = getattr(self.data_processor, "_buffer", None)
-            if dfb is not None and len(dfb) > 0:
-                if isinstance(dfb.index, pd.DatetimeIndex):
-                    last_ts = dfb.index[-1]
-                elif "datetime" in dfb.columns:
-                    last_ts = pd.to_datetime(dfb["datetime"].iloc[-1])
-                else:
-                    last_ts = pd.Timestamp.utcnow()
-            else:
-                last_ts = pd.Timestamp.utcnow()
-            dt_next = last_ts + pd.Timedelta(seconds=float(self.config.get("inference_interval_sec", 1.0)))
-
-            try:
-                from ML_Helpfunctions.Pipeline_Utils import PipelineUtils  # type: ignore
-                cpu = float(PipelineUtils.get_cpu_usage())
-                ram = float(PipelineUtils.get_memory_usage())
-            except Exception:
-                cpu, ram = None, None
-
-            self._pending_entry = {
-                "datetime": dt_next,
-                "prediction": float(pred_unscaled[0]) if np.isfinite(pred_unscaled[0]) else None,
-                "true_value": None,
-                "rolling_forecast": pred_unscaled.tolist(),
-                "cpu_percent": cpu,
-                "ram_mb": ram,
-                "model_inference_time_ms": float(t_inf_ms),
-                "total_processing_time_ms": 0.0,
-            }
-            logging.info("Light_XGBoostInference: Pending nach Hot-Swap gesetzt.")
-        except Exception as e:
-            logging.warning("Light_XGBoostInference: Reseed Pending fehlgeschlagen (%s).", e)
+            logger.warning("Hot-Swap: Alter Puffer konnte nicht übernommen werden: %s", e)
 
     def _run_inference_unified(self, input_data):
         import time
