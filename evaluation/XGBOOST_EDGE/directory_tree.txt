@@ -4,6 +4,7 @@ XGBOOST_EDGE/
   exports/
   figs/
   logs/
+  directory_tree.txt
   report_meta.json
   exports/
     processed_runs.csv
