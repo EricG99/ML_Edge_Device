@@ -579,11 +579,8 @@ def _run_all_inferences_and_summarize(
     # Gewünschte Modi (Reihenfolge beibehalten, Duplikate entfernen)
     modes_config = cfg.get("quant_modes")
     if modes_config is None:
-        # optionaler globaler Fallback (falls du QUANT_MODES nutzt), sonst no-quant
-        try:
-            modes = list(dict.fromkeys(QUANT_MODES))  # noqa: F821  # falls global definiert
-        except Exception:
-            modes = ["no-quant"]
+        # Fallback: kein quant_modes in Config -> verwende 'no-quant'
+        modes = ["no-quant"]
     else:
         modes = list(dict.fromkeys([str(m) for m in modes_config]))
 
