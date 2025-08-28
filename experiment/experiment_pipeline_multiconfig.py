@@ -55,7 +55,7 @@ TRAINER_MAP = {
     "cnn1d": ("ML_Algorithms.CNN1D.cnn1d_train", "CNN1DTrainer", "CNN1D"),
     "random_forest": ("ML_Algorithms.Random_Forest.rf_train", "RandomForestTrainer", "Random_Forest"),
     "xgboost": ("ML_Algorithms.XGBOOST.xgboost_train", "XGBoostTrainer", "XGBOOST"),
-    "light_xgboost": ("ML_Algorithms.Light_XGBOOST.Light_xgboost_train", "LightXGBoostTrainer", "Light_XGBOOST"),
+    "light_xgboost": ("ML_Algorithms.Light_XGBOOST.light_xgboost_train", "LightXGBoostTrainer", "Light_XGBOOST"),
 }
 
 # --- NEUE HYPERPARAMETER (aus CSV integriert am 28.08.2025) ---
@@ -101,8 +101,8 @@ BASE_COMMON = {
     "enable_edge": True,
     "validation_fraction": 0.2,
     "early_stopping_patience": 10,
-    "rolling_window_size": 10, # Fest auf 10 gesetzt
-    "lags": 20, # Fest auf 20 gesetzt
+    "rolling_window_size": 2, # Fest auf 10 gesetzt
+    "lags": 2, # Fest auf 20 gesetzt
 }
 
 # Modell-Dateien, die als "groß" gelten und nach der Inferenz entfernt werden dürfen
@@ -192,6 +192,8 @@ def build_training_config(algorithm: str, level: str, horizon: int, folder_flag:
         "inference_mode": "load_artifacts_path",
         "horizon": int(horizon),
         "quant_modes": quant_modes,
+        # FIX: model_name-Schlüssel hinzugefügt, um den KeyError zu beheben
+        "model_name": f"{algo}_{level}"
     }
     merged = _deep_merge(merged, runtime_cfg)
     merged = _deep_merge(merged, CONFIG_LOAD_ARTIFACTS)
