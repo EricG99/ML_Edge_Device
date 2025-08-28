@@ -179,6 +179,22 @@ class InferenceResult:
 # Utils
 # ---------------------------
 
+def _file_candidates_for_mode(algo: str, mode: str) -> list[str]:
+    mode = (mode or "no-quant").lower()
+    a = algo.lower()
+    if mode == "quant-16":
+        return ["model_quant_float16.tflite"]
+    if mode == "quant-8":
+        return ["model_quant_int8_full.tflite", "model_quant_int8.tflite"]  # erst Full, dann Dynamic
+    # no-quant fallback je nach Algo
+    if a in ("lstm", "cnn1d"):
+        return ["model.keras"]
+    if a in ("random_forest", "light_xgboost"):
+        return ["model.joblib"]
+    if a in ("xgboost",):
+        return ["model.json", "model.joblib"]
+    return []
+
 def _try_import(module: str, attr: str):
     import importlib
     m = importlib.import_module(module)
@@ -550,80 +566,109 @@ def _run_all_inferences_and_summarize(
     delete_models_after_inference: bool,
 ) -> None:
     """
-    Führt Inferenz für die beste verfügbare Modellvariante aus.
+    Führt für jeden gewünschten Quantisierungsmodus (cfg['quant_modes']) eine Inferenz aus
+    und schreibt jeweils eine Zeile in die Experiment_Summary.csv.
+    Fallback: Wenn kein gewünschter Modus verfügbar ist, wird die beste verfügbare Datei gewählt.
     """
-    variants = list_model_variants(models_dir, algo)
-    if not variants:
+    variants = list_model_variants(models_dir, algo)  # -> Iterable[str] der vorhandenen Dateien
+    variants_present = set(variants or [])
+    if not variants_present:
         print("⚠️ Kein Modell gefunden – Inferenz für diesen Lauf übersprungen.")
         return
 
-    # NEU: Intelligente Auswahl des besten Modells für die Inferenz
-    # Priorität: INT8-Full -> INT8-Dynamic -> Float16 -> Keras -> Joblib/Json
-    inference_variant = None
-    priority_order = [
-        "model_quant_int8_full.tflite",
-        "model_quant_int8.tflite",
-        "model_quant_float16.tflite",
-        "model.keras",
-        "model.joblib",
-        "model.json",
-    ]
-    
-    for model_file in priority_order:
-        if model_file in variants:
-            inference_variant = model_file
-            break
-            
-    if not inference_variant:
-        print(f"⚠️ Konnte kein passendes Modell für die Inferenz finden. Verfügbar: {variants}")
-        return
-        
-    print(f"✅ Bestes verfügbares Modell '{inference_variant}' für die Inferenz ausgewählt.")
-    
-    rc = run_inference_via_subprocess(
-        algorithm=algo,
-        run_id=run_id,
-        model_filename=inference_variant,
-        inference_steps=inference_steps,
-        loading_strategy=loading_strategy,
-        interval_sec=interval_sec,
-        config_name=cfg.get("config_var_used", algo),
-    )
-    if rc != 0:
-        print(f"⚠️ Inferenz-Subprozess ist mit Fehlercode {rc} für {inference_variant} (run_id={run_id}) fehlgeschlagen.")
-
-    # (Rest der Funktion bleibt gleich, hier zur Vollständigkeit eingefügt)
-    err_dir = Path(cfg["paths"]["Error_Metrics"])
-    pred_dir = Path(cfg["paths"]["Prediction_Data"])
-    step_csv = _discover_predictions_file_from_json(run_id, err_dir) or _fallback_find_step_csv(run_id, pred_dir)
-
-    avg_inf_ms, avg_total_ms, avg_cpu, avg_ram = (None, None, None, None)
-    if step_csv and step_csv.exists():
-        avg_inf_ms, avg_total_ms, avg_cpu, avg_ram = summarize_step_csv(step_csv)
+    # Gewünschte Modi (Reihenfolge beibehalten, Duplikate entfernen)
+    modes_config = cfg.get("quant_modes")
+    if modes_config is None:
+        # optionaler globaler Fallback (falls du QUANT_MODES nutzt), sonst no-quant
+        try:
+            modes = list(dict.fromkeys(QUANT_MODES))  # noqa: F821  # falls global definiert
+        except Exception:
+            modes = ["no-quant"]
     else:
-        print("⚠️ StepPredictions CSV nicht gefunden – Zusammenfassung wird leer sein.")
+        modes = list(dict.fromkeys([str(m) for m in modes_config]))
 
-    training_cfg_json = models_dir / "training_config.json"
-    model_size_mb = read_model_size_mb(training_cfg_json)
-    qmode = _map_variant_to_quant_mode(inference_variant)
+    # Baue Inferenz-Warteschlange: (quant_mode, model_file)
+    queue: list[tuple[str, str]] = []
+    for qmode in modes:
+        candidates = _file_candidates_for_mode(algo, qmode)
+        chosen = next((f for f in candidates if f in variants_present), None)
+        if chosen:
+            queue.append((qmode, chosen))
+        else:
+            print(f"ℹ️ Überspringe Modus '{qmode}': keine passende Datei im Models-Ordner gefunden "
+                  f"(gesucht: {candidates}, vorhanden: {sorted(variants_present)})")
 
-    res = InferenceResult(
-        algorithm=algo,
-        profile="edge" if cfg.get("edge_device") else "server",
-        lags=int(cfg.get("lags", 0)),
-        horizon=int(cfg.get("horizon", 0)),
-        model_variant=inference_variant,
-        avg_inference_time_ms=avg_inf_ms,
-        avg_total_time_ms=avg_total_ms,
-        avg_cpu_percent=avg_cpu,
-        avg_ram_percent=avg_ram,
-        model_size_mb=model_size_mb,
-        quant_mode=qmode, 
-        run_id=run_id,
-    )
-    append_summary_row(summary_csv, res)
-    print(f"📈 Zusammenfassung für {inference_variant} in die CSV-Datei geschrieben.")
+    # Wenn aus den gewünschten Modi nichts vorhanden ist, nimm die beste verfügbare Datei
+    if not queue:
+        priority_order = [
+            "model_quant_int8_full.tflite",
+            "model_quant_int8.tflite",
+            "model_quant_float16.tflite",
+            "model.keras",
+            "model.joblib",
+            "model.json",
+        ]
+        fallback = next((f for f in priority_order if f in variants_present), None)
+        if not fallback:
+            print(f"⚠️ Konnte kein passendes Modell für die Inferenz finden. Verfügbar: {sorted(variants_present)}")
+            return
+        queue = [(_map_variant_to_quant_mode(fallback), fallback)]
+        print(f"ℹ️ Fallback aktiv: Verwende '{fallback}' ({queue[0][0]}).")
 
+    # Für jedes (quant_mode, datei) jetzt eine Inferenz ausführen + zusammenfassen
+    for qmode, inference_variant in queue:
+        print(f"✅ Starte Inferenz für Modus '{qmode}' mit Datei '{inference_variant}'.")
+
+        rc = run_inference_via_subprocess(
+            algorithm=algo,
+            run_id=run_id,
+            model_filename=inference_variant,
+            inference_steps=inference_steps,
+            loading_strategy=loading_strategy,
+            interval_sec=interval_sec,
+            config_name=cfg.get("config_var_used", algo),
+        )
+        if rc != 0:
+            print(f"⚠️ Inferenz-Subprozess ist mit Fehlercode {rc} für {inference_variant} (run_id={run_id}) fehlgeschlagen.")
+            continue
+
+        # Pfade & Step-CSV bestimmen
+        err_dir = Path(cfg["paths"]["Error_Metrics"])
+        pred_dir = Path(cfg["paths"]["Prediction_Data"])
+        step_csv = _discover_predictions_file_from_json(run_id, err_dir) or _fallback_find_step_csv(run_id, pred_dir)
+
+        avg_inf_ms = avg_total_ms = avg_cpu = avg_ram = None
+        if step_csv and step_csv.exists():
+            avg_inf_ms, avg_total_ms, avg_cpu, avg_ram = summarize_step_csv(step_csv)
+        else:
+            print("⚠️ StepPredictions CSV nicht gefunden – Zusammenfassung wird leer sein.")
+
+        # Modellgröße laden (bleibt pro Run konstant; Quelle: training_config.json)
+        training_cfg_json = models_dir / "training_config.json"
+        model_size_mb = read_model_size_mb(training_cfg_json)
+
+        # quant_mode sicher bestimmen: entweder aus gewünschtem Modus oder aus Dateiname abgeleitet
+        effective_qmode = qmode if qmode != "auto" else _map_variant_to_quant_mode(inference_variant)
+
+        # Ergebniszeile schreiben
+        res = InferenceResult(
+            algorithm=algo,
+            profile="edge" if cfg.get("edge_device") else "server",
+            lags=int(cfg.get("lags", 0)),
+            horizon=int(cfg.get("horizon", 0)),
+            model_variant=inference_variant,
+            avg_inference_time_ms=avg_inf_ms,
+            avg_total_time_ms=avg_total_ms,
+            avg_cpu_percent=avg_cpu,
+            avg_ram_percent=avg_ram,
+            model_size_mb=model_size_mb,
+            run_id=run_id,
+            quant_mode=effective_qmode,
+        )
+        append_summary_row(summary_csv, res)
+        print(f"📈 Zusammenfassung für {effective_qmode} ({inference_variant}) in die CSV-Datei geschrieben.")
+
+    # Modelle erst NACH allen Inferenzläufen löschen
     if delete_models_after_inference:
         cleanup_model_binaries(models_dir)
         try:
