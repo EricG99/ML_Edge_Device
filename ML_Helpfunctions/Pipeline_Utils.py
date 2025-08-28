@@ -1211,16 +1211,23 @@ class ModelScalerSaver:
     def _export_tflite_variants(self, model, representative_dataset=None) -> dict:
         """
         Exportiert TFLite-Varianten basierend auf den 'quant_modes' in der Konfiguration.
-        Behebt Konvertierungsprobleme für LSTM/GRU-Modelle.
+        'no-quant' blockiert NICHT länger andere Modi.
         """
         import os, logging
         import tensorflow as tf
 
         results = {}
-        quant_modes = self.config.get('quant_modes', [])
-        
-        # Wenn 'no-quant' angegeben ist oder die Liste leer ist, nichts tun
-        if 'no-quant' in quant_modes or not quant_modes:
+
+        q_modes_raw = self.config.get('quant_modes', [])
+        q_modes = set(str(m).lower() for m in (q_modes_raw or []))
+
+        if not q_modes:
+            return results
+
+        # Effektive Modi: alles außer 'no-quant'
+        effective = q_modes - {'no-quant'}
+        # Nur wenn wirklich NUR 'no-quant' da ist -> keine Quantisierung
+        if not effective:
             return results
 
         models_dir = self.paths.get("Models")
@@ -1228,48 +1235,45 @@ class ModelScalerSaver:
 
         is_recurrent_model = any(isinstance(l, (tf.keras.layers.LSTM, tf.keras.layers.GRU)) for l in model.layers)
 
-        # --- Float16-Quantisierung ---
-        if 'quant-16' in quant_modes:
+        # --- FLOAT16 ---
+        if 'quant-16' in effective:
             try:
                 conv = tf.lite.TFLiteConverter.from_keras_model(model)
                 conv.optimizations = [tf.lite.Optimize.DEFAULT]
                 conv.target_spec.supported_types = [tf.float16]
-                
                 if is_recurrent_model:
-                    logging.info("LSTM/GRU-Modell erkannt. Aktiviere Select TF Ops für Float16-Konvertierung.")
+                    logging.info("LSTM/GRU erkannt – SELECT_TF_OPS für Float16.")
                     conv.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS, tf.lite.OpsSet.SELECT_TF_OPS]
                     conv._experimental_lower_tensor_list_ops = False
-                
                 tflite_model = conv.convert()
-                tflite_path = os.path.join(models_dir, "model_quant_float16.tflite")
-                with open(tflite_path, "wb") as f:
+                path = os.path.join(models_dir, "model_quant_float16.tflite")
+                with open(path, "wb") as f:
                     f.write(tflite_model)
-                results["tflite_float16"] = tflite_path
-                logging.info(f"✅ TFLite FLOAT16 Modell erfolgreich gespeichert: {tflite_path}")
+                results["tflite_float16"] = path
+                logging.info(f"✅ TFLite FLOAT16 gespeichert: {path}")
             except Exception as e:
-                logging.error(f"❌ Float16 TFLite-Konvertierung fehlgeschlagen: {e}", exc_info=True)
+                logging.error(f"❌ Float16-Konvertierung fehlgeschlagen: {e}", exc_info=True)
 
-        # --- INT8-Quantisierung (dynamisch und voll) ---
-        if 'quant-8' in quant_modes:
-            # Dynamische INT8-Quantisierung
+        # --- INT8 (dynamic + optional full) ---
+        if 'quant-8' in effective:
+            # dynamic INT8
             try:
                 conv = tf.lite.TFLiteConverter.from_keras_model(model)
                 conv.optimizations = [tf.lite.Optimize.DEFAULT]
                 if is_recurrent_model:
-                    logging.info("LSTM/GRU-Modell erkannt. Aktiviere Select TF Ops für INT8-Dynamic-Konvertierung.")
+                    logging.info("LSTM/GRU erkannt – SELECT_TF_OPS für INT8 (dynamic).")
                     conv.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS, tf.lite.OpsSet.SELECT_TF_OPS]
                     conv._experimental_lower_tensor_list_ops = False
-                
                 tflite_model_dynamic = conv.convert()
-                path_dynamic = os.path.join(models_dir, "model_quant_int8.tflite")
-                with open(path_dynamic, "wb") as f:
+                path_dyn = os.path.join(models_dir, "model_quant_int8.tflite")
+                with open(path_dyn, "wb") as f:
                     f.write(tflite_model_dynamic)
-                results["tflite_int8_dynamic"] = path_dynamic
-                logging.info(f"✅ TFLite INT8 (dynamic) Modell erfolgreich gespeichert: {path_dynamic}")
+                results["tflite_int8_dynamic"] = path_dyn
+                logging.info(f"✅ TFLite INT8 (dynamic) gespeichert: {path_dyn}")
             except Exception as e:
-                logging.error(f"❌ INT8 (dynamic) TFLite-Konvertierung fehlgeschlagen: {e}", exc_info=True)
+                logging.error(f"❌ INT8 (dynamic) fehlgeschlagen: {e}", exc_info=True)
 
-            # Full-Integer INT8-Quantisierung (nur wenn Kalibrierungsdaten vorhanden sind)
+            # full-INT8 nur mit representative dataset
             if representative_dataset is not None:
                 try:
                     conv = tf.lite.TFLiteConverter.from_keras_model(model)
@@ -1277,25 +1281,24 @@ class ModelScalerSaver:
                     conv.representative_dataset = representative_dataset
                     conv.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS_INT8]
                     if is_recurrent_model:
-                        logging.info("LSTM/GRU-Modell erkannt. Aktiviere zusätzlich Select TF Ops für INT8-Full-Konvertierung.")
+                        logging.info("LSTM/GRU erkannt – zusätzlich SELECT_TF_OPS für INT8 (full).")
                         conv.target_spec.supported_ops.append(tf.lite.OpsSet.SELECT_TF_OPS)
                         conv._experimental_lower_tensor_list_ops = False
-                    
                     conv.inference_input_type = tf.int8
                     conv.inference_output_type = tf.int8
-                    
                     tflite_model_full = conv.convert()
                     path_full = os.path.join(models_dir, "model_quant_int8_full.tflite")
                     with open(path_full, "wb") as f:
                         f.write(tflite_model_full)
                     results["tflite_int8_full"] = path_full
-                    logging.info(f"✅ TFLite INT8 (full-integer) Modell erfolgreich gespeichert: {path_full}")
+                    logging.info(f"✅ TFLite INT8 (full) gespeichert: {path_full}")
                 except Exception as e:
-                    logging.error(f"❌ INT8 (full-integer) TFLite-Konvertierung fehlgeschlagen: {e}", exc_info=True)
+                    logging.error(f"❌ INT8 (full) fehlgeschlagen: {e}", exc_info=True)
             else:
-                logging.info("Kein representative_dataset übergeben – INT8 full wird übersprungen.")
+                logging.info("Kein representative_dataset → INT8 (full) wird übersprungen.")
 
         return results
+
 
 
     def _save_config_as_json(self, output_path: str):
@@ -1320,13 +1323,13 @@ class ModelScalerSaver:
             # Stellt sicher, dass das Zielverzeichnis existiert
             os.makedirs(os.path.dirname(output_path), exist_ok=True)
             
-            tf.keras.utils.plot_model(
-                model,
-                to_file=output_path,
-                show_shapes=True,
-                show_layer_activations=True
-            )
-            print(f"📊 Modellstruktur gespeichert unter: {output_path}")
+            # tf.keras.utils.plot_model(
+            #     model,
+            #     to_file=output_path,
+            #     show_shapes=True,
+            #     show_layer_activations=True
+            # )
+            #print(f"📊 Modellstruktur gespeichert unter: {output_path}")
             return output_path
         except ImportError:
              print("⚠️ Fehler beim Speichern der Modellstruktur: pydot und graphviz müssen installiert sein.")
