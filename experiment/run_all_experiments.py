@@ -20,7 +20,7 @@ PIPELINE_SCRIPT = SCRIPT_DIR / "experiment_pipeline.py"
 LAGS = "1:1:3"
 HORIZON = "1:1:3"
 LOADING_STRATEGY = "split" #live_mqtt
-INFERENCE_STEPS = "60"
+INFERENCE_STEPS = "20"
 
 # Quantisierung (wie gehabt)
 # Mögliche Werte: "no-quant", "quant-16", "quant-8"

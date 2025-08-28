@@ -106,3 +106,5 @@ random_forest_server = {
     "include_roll_mean": True,
     "include_roll_std": True,
 }
+
+random_forest = random_forest_edge

@@ -90,7 +90,7 @@ COMPLEXITY_PRESETS = {
 # --- Basis-Defaults, die für alle Modelle gelten ---
 BASE_COMMON = {
     "dataset": "mqtt_data_filtered.csv",
-    "train_fraction": 0.8,
+    "train_fraction": 0.85,
     "base_features": ["Group4-2_S6_VolumetricFlowRate", "Group4-2_S6_MassFlowRate"],
     "time_features": [],
     "target_feature": "Group4-2_S6_VolumetricFlowRate",
@@ -101,8 +101,8 @@ BASE_COMMON = {
     "enable_edge": True,
     "validation_fraction": 0.2,
     "early_stopping_patience": 10,
-    "rolling_window_size": 2, # Fest auf 10 gesetzt
-    "lags": 2, # Fest auf 20 gesetzt
+    "rolling_window_size": 10, # Fest auf 10 gesetzt
+    "lags": 20, # Fest auf 20 gesetzt
 }
 
 # Modell-Dateien, die als "groß" gelten und nach der Inferenz entfernt werden dürfen
@@ -112,7 +112,7 @@ MODEL_BLOBS_WHITELIST = {
     "sklearn": ["model.joblib"],
     "xgb": ["model.json"],
 }
-SUMMARY_CSV_NAME = "Experiment_Summary.csv"
+SUMMARY_CSV_NAME = "Experiment_Summary_Serevr_multiconfig.csv"
 SCALER_FILE_NAMES = ["scaler.joblib", "y_scaler.joblib"]
 
 # ---------------------------
@@ -225,7 +225,7 @@ def run_training(algorithm: str, config: dict, folder_flag: str) -> Tuple[str, P
             with open(training_cfg_json, "w", encoding="utf-8") as f:
                 json.dump(js, f, indent=2, ensure_ascii=False)
     except Exception as e:
-        print(f"⚠️ Konnte training_time_s nicht schreiben: {e}")
+        print(f"?? Konnte training_time_s nicht schreiben: {e}")
 
     run_id = str(config.get("run_id"))
     models_dir = Path(config["paths"]["Models"])
@@ -252,7 +252,7 @@ def run_inference_via_subprocess(
     try:
         app_path = _import_pipeline_web_app_path()
     except FileNotFoundError as e:
-        print(f"❌ {e}")
+        print(f"? {e}")
         return 2
 
     cmd = [
@@ -367,9 +367,9 @@ def cleanup_model_binaries_and_scalers(models_dir: Path, scalers_dir: Path) -> N
     for fp in sorted(to_delete):
         try:
             fp.unlink()
-            print(f"🧹 Gelöscht: {fp}")
+            print(f"?? Gelöscht: {fp}")
         except Exception as e:
-            print(f"⚠️ Fehler beim Löschen von {fp}: {e}")
+            print(f"?? Fehler beim Löschen von {fp}: {e}")
 
 
 # ---------------------------
@@ -391,7 +391,7 @@ def _run_all_inferences_and_summarize(
     """Führt für jeden gewünschten/verfügbaren Quantisierungsmodus eine Inferenz aus."""
     variants_present = set(list_model_variants(models_dir))
     if not variants_present:
-        print("⚠️ Kein Modell gefunden – Inferenz für diesen Lauf übersprungen.")
+        print("?? Kein Modell gefunden – Inferenz für diesen Lauf übersprungen.")
         return
 
     modes_to_run = cfg.get("quant_modes", ["no-quant"])
@@ -402,20 +402,20 @@ def _run_all_inferences_and_summarize(
         if chosen and (qmode, chosen) not in queue:
             queue.append((qmode, chosen))
         else:
-            print(f"ℹ️ Überspringe Modus '{qmode}': keine passende Datei gefunden (gesucht: {candidates})")
+            print(f"?? Überspringe Modus '{qmode}': keine passende Datei gefunden (gesucht: {candidates})")
     
     if not queue: # Fallback, falls kein Modus passt
         best_available = next((f for f in ["model.keras", "model.joblib", "model.json"] if f in variants_present), None)
         if best_available: queue.append(("no-quant", best_available))
 
     for qmode, model_file in queue:
-        print(f"\n✅ Starte Inferenz für Modus '{qmode}' mit Datei '{model_file}'.")
+        print(f"\n? Starte Inferenz für Modus '{qmode}' mit Datei '{model_file}'.")
         rc = run_inference_via_subprocess(
             algorithm=algo, run_id=run_id, model_filename=model_file,
             inference_steps=inference_steps, loading_strategy=loading_strategy, interval_sec=interval_sec
         )
         if rc != 0:
-            print(f"⚠️ Inferenz-Subprozess mit Fehlercode {rc} für {model_file} fehlgeschlagen.")
+            print(f"?? Inferenz-Subprozess mit Fehlercode {rc} für {model_file} fehlgeschlagen.")
             continue
 
         err_dir = Path(cfg["paths"]["Error_Metrics"])
@@ -433,7 +433,7 @@ def _run_all_inferences_and_summarize(
             model_size_mb=read_model_size_mb(models_dir / "training_config.json"), run_id=run_id,
         )
         append_summary_row(summary_csv, res)
-        print(f"📈 Zusammenfassung für {res.quant_mode} ({model_file}) in CSV geschrieben.")
+        print(f"?? Zusammenfassung für {res.quant_mode} ({model_file}) in CSV geschrieben.")
 
     if delete_models:
         cleanup_model_binaries_and_scalers(models_dir, Path(cfg["paths"]["Scalers"]))
@@ -453,7 +453,7 @@ def run_experiments(
     for algorithm in algorithms:
         algo = algorithm.lower()
         if algo not in TRAINER_MAP:
-            print(f"⚠️ Unbekannter Algorithmus '{algorithm}' wird übersprungen.")
+            print(f"?? Unbekannter Algorithmus '{algorithm}' wird übersprungen.")
             continue
 
         quant_modes_for_algo = ["no-quant", "quant-16", "quant-8"] if algo in ["cnn1d", "lstm"] else ["no-quant"]
@@ -471,7 +471,7 @@ def run_experiments(
 
                 print(f"\n=== LAUF {runs_done + 1} | Train: {algo} | Level: {level} | Horizon: {horizon} ===")
                 run_id, models_dir = run_training(algo, cfg, folder_flag)
-                print(f"✅ Training abgeschlossen. run_id={run_id}")
+                print(f"? Training abgeschlossen. run_id={run_id}")
 
                 _run_all_inferences_and_summarize(
                     algo, cfg, run_id, models_dir,
