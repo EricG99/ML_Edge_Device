@@ -24,7 +24,7 @@ INFERENCE_STEPS = "60"
 
 # Quantisierung (wie gehabt)
 # Mögliche Werte: "no-quant", "quant-16", "quant-8"
-QUANT_MODES = ["quant-16", "quant-8"]
+QUANT_MODES = ["no-quant", "quant-16", "quant-8"]
 
 def run_single_experiment(model_name: str, profile: str):
     config_name = f"{model_name.upper()} mit Profil '{profile}'"
