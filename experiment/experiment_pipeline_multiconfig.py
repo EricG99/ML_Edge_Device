@@ -1,33 +1,26 @@
-
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
+from __future__ import annotations
 """
-Experiment-Pipeline (Multi-Config, inline)
-------------------------------------------
-* Läuft für N Horizons pro Modell je drei Komplexitätsstufen (simple, medium, high).
-* Konfigurationen stehen **in diesem Skript** (keine externen Config-Module nötig).
-* Ablauf ansonsten angelehnt an die bestehende experiment_pipeline:
-  - programmatisches Training
-  - anschließende Inferenz via pipeline_web_app.py (Subprozess) mit --load_id
-  - kompakte Metrik-Zusammenfassung (Durchschnittswerte)
+Experiment Pipeline
+-------------------
 
-Unterstützte Modelle:
-  - lstm
-  - cnn1d
-  - random_forest
-  - xgboost
+Zweck
+  * Führt automatisiert Trainings- und Inferenzläufe über Modelle, Komplexitätsstufen (simple/medium/high),
+    einen Horizon-Grid und (falls zutreffend) quantisierte Modellvarianten aus.
+  * Nutzt fest integrierte Hyperparameter-Sets je nach Komplexitätsstufe.
+  * Startet das initiale Training programmatisch, sammelt die erzeugte run_id
+    und ruft anschließend die bestehende Web/Headless-Pipeline (`pipeline_web_app.py`) für die
+    Inferenz mit `--load_id` auf.
+  * Aggregiert Metriken (Ø Inferenzzeit, Ø Total Time, Ø CPU %, Ø RAM %) je Kombination und
+    speichert eine kompakte Übersichtstabelle.
+  * Löscht nach jeder Inferenz die verwendeten Modellbinaries, um Speicherplatz zu sparen.
 
-Beispiel:
-  python experiment_pipeline_multiconfig.py \
-    --algorithms lstm,cnn1d,random_forest,xgboost \
-    --horizons 1,4,8 \
-    --lags 4 \
-    --inference-steps 60 \
-    --loading-strategy split
+Wichtige Hinweise
+  * Lags sind fest auf 20 gesetzt, rolling_window_size auf 10.
+  * Für `cnn1d` und `lstm` werden automatisch Inferenzen für `no-quant`, `quant-16` und `quant-8` durchgeführt.
+    Für die anderen Modelle nur `no-quant`.
+  * Inferenzmodus ist standardmäßig `split`.
 
-Hinweis:
-  * Die Komplexität der "high"-Varianten wurde bewusst moderat gehalten, damit
-    Training auf einem Edge-Device weiterhin realistisch bleibt.
 """
 import argparse
 import json
@@ -39,78 +32,64 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 
-# --- Projektpfad robust ergänzen ---
-PROJECT_ROOT = Path(__file__).resolve().parent.parent  # erwartet Skript im Projekt-/Subordner
+# ---- Projektpfad sicherstellen ----
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
 
-# --- Import: allgemeine Pfade / MQTT / Artifacts ---
+# ---- Imports aus bestehendem Projekt ----
 try:
     from config.config_general import CONFIG_PATH, CONFIG_LOAD_ARTIFACTS, MQTT_CONFIG  # type: ignore
 except ModuleNotFoundError:
-    # Fallback, falls Skript direkt im Root liegt und 'config' nicht als Paket installiert ist
     from config_general import CONFIG_PATH, CONFIG_LOAD_ARTIFACTS, MQTT_CONFIG  # type: ignore
 
 try:
     from ML_Helpfunctions import pipeline_utils as PU  # type: ignore
 except ModuleNotFoundError:
-    try:
-        from ML_Helpfunktions import pipeline_utils as PU  # type: ignore
-    except ModuleNotFoundError:
-        import importlib
-        PU = importlib.import_module('pipeline_utils')  # letzte Chance (Root)
+    import importlib
+    PU = importlib.import_module('pipeline_utils')
 
-# --- Trainer-Zuordnung je Algorithmus ---
+# ---- Trainer-Klassen je Algorithmus ----
 TRAINER_MAP = {
     "lstm": ("ML_Algorithms.LSTM.lstm_train", "LSTMTrainer", "LSTM"),
     "cnn1d": ("ML_Algorithms.CNN1D.cnn1d_train", "CNN1DTrainer", "CNN1D"),
     "random_forest": ("ML_Algorithms.Random_Forest.rf_train", "RandomForestTrainer", "Random_Forest"),
     "xgboost": ("ML_Algorithms.XGBOOST.xgboost_train", "XGBoostTrainer", "XGBOOST"),
-    # Light XGBoost -> nutzt den XGBoost-Trainer (leichtere Hyperparameter via Config), eigener Ordner-Flag
     "light_xgboost": ("ML_Algorithms.Light_XGBOOST.Light_xgboost_train", "LightXGBoostTrainer", "Light_XGBOOST"),
-    "light_xgboost": ("ML_Algorithms.Light_XGBOOST.Light_xgboost_train", "LightXGBoostTrainer", "LIGHT_XGBOOST"),
 }
 
-MODEL_FILENAME_DEFAULTS = {
-    "lstm": "model.keras",
-    "cnn1d": "model.keras",
-    "random_forest": "model.joblib",
-    "xgboost": "model.json",
-    "light_xgboost": "model.joblib", 
-}
-
+# --- NEUE HYPERPARAMETER (aus CSV integriert am 28.08.2025) ---
 COMPLEXITY_PRESETS = {
   'lstm': {
-    'simple': {'num_layers':1,'initial_units':32,'dropout':0.1,'batch_size':64,'epochs':20,'learning_rate':0.003,'optimizer':'adam','loss':'mse','clipnorm':1.0,'model_params':{'num_layers':1,'initial_units':32,'dropout':0.1,'batch_size':64,'epochs':20,'learning_rate':0.003,'optimizer':'adam','loss':'mse','clipnorm':1.0}},
-    'medium': {'num_layers':2,'initial_units':64,'dropout':0.2,'batch_size':64,'epochs':40,'learning_rate':0.002,'optimizer':'adam','loss':'mse','clipnorm':1.5,'model_params':{'num_layers':2,'initial_units':64,'dropout':0.2,'batch_size':64,'epochs':40,'learning_rate':0.002,'optimizer':'adam','loss':'mse','clipnorm':1.5}},
-    'high':   {'num_layers':3,'initial_units':96,'dropout':0.25,'batch_size':32,'epochs':60,'learning_rate':0.002,'optimizer':'nadam','loss':'mse','clipnorm':2.0,'model_params':{'num_layers':3,'initial_units':96,'dropout':0.25,'batch_size':32,'epochs':60,'learning_rate':0.002,'optimizer':'nadam','loss':'mse','clipnorm':2.0}},
+    'simple': {'dropout': 0.3502, 'batch_size': 64, 'epochs': 100, 'learning_rate': 0.0001587, 'optimizer': 'nadam', 'loss': 'huber', 'clipnorm': 0.7164, 'model_params': {'dropout': 0.3502, 'batch_size': 64, 'epochs': 100, 'learning_rate': 0.0001587, 'optimizer': 'nadam', 'loss': 'huber', 'clipnorm': 0.7164, 'num_layers':1, 'initial_units':32}},
+    'medium': {'dropout': 0.4091, 'batch_size': 32, 'epochs': 40, 'learning_rate': 0.000803, 'optimizer': 'adam', 'loss': 'huber', 'clipnorm': 2.5225, 'model_params': {'dropout': 0.4091, 'batch_size': 32, 'epochs': 40, 'learning_rate': 0.000803, 'optimizer': 'adam', 'loss': 'huber', 'clipnorm': 2.5225, 'num_layers':2, 'initial_units':64}},
+    'high':   {'dropout': 0.3120, 'batch_size': 32, 'epochs': 40, 'learning_rate': 0.003931, 'optimizer': 'rmsprop', 'loss': 'mse', 'clipnorm': 4.9347, 'model_params': {'dropout': 0.3120, 'batch_size': 32, 'epochs': 40, 'learning_rate': 0.003931, 'optimizer': 'rmsprop', 'loss': 'mse', 'clipnorm': 4.9347, 'num_layers':3, 'initial_units':96}},
   },
   'cnn1d': {
-    'simple': {'cnn_blocks':1,'cnn_base_filters':32,'cnn_kernel_size':3,'cnn_dropout':0.05,'cnn_activation':'relu','batch_size':64,'epochs':20,'optimizer':'adam','learning_rate':0.003,'clipnorm':1.0,'loss':'huber','model_params':{'cnn_blocks':1,'cnn_base_filters':32,'cnn_kernel_size':3,'cnn_dropout':0.05,'cnn_activation':'relu','batch_size':64,'epochs':20,'optimizer':'adam','learning_rate':0.003,'clipnorm':1.0,'loss':'huber'}},
-    'medium': {'cnn_blocks':2,'cnn_base_filters':64,'cnn_kernel_size':5,'cnn_dropout':0.15,'cnn_activation':'relu','batch_size':64,'epochs':40,'optimizer':'adam','learning_rate':0.002,'clipnorm':1.5,'loss':'huber','model_params':{'cnn_blocks':2,'cnn_base_filters':64,'cnn_kernel_size':5,'cnn_dropout':0.15,'cnn_activation':'relu','batch_size':64,'epochs':40,'optimizer':'adam','learning_rate':0.002,'clipnorm':1.5,'loss':'huber'}},
-    'high':   {'cnn_blocks':3,'cnn_base_filters':96,'cnn_kernel_size':7,'cnn_dropout':0.2,'cnn_activation':'relu','batch_size':32,'epochs':60,'optimizer':'adam','learning_rate':0.0015,'clipnorm':2.0,'loss':'huber','model_params':{'cnn_blocks':3,'cnn_base_filters':96,'cnn_kernel_size':7,'cnn_dropout':0.2,'cnn_activation':'relu','batch_size':32,'epochs':60,'optimizer':'adam','learning_rate':0.0015,'clipnorm':2.0,'loss':'huber'}},
+    'simple': {'batch_size': 128, 'epochs': 40, 'learning_rate': 0.001296, 'optimizer': 'rmsprop', 'loss': 'mse', 'clipnorm': 1.0063, 'cnn_dropout': 0.2048, 'cnn_activation': 'gelu', 'model_params': {'batch_size': 128, 'epochs': 40, 'learning_rate': 0.001296, 'optimizer': 'rmsprop', 'loss': 'mse', 'clipnorm': 1.0063, 'cnn_dropout': 0.2048, 'cnn_activation': 'gelu', 'cnn_blocks':1, 'cnn_base_filters':32, 'cnn_kernel_size':3}},
+    'medium': {'batch_size': 128, 'epochs': 90, 'learning_rate': 0.000210, 'optimizer': 'rmsprop', 'loss': 'mse', 'clipnorm': 1.7381, 'cnn_dropout': 0.1939, 'cnn_activation': 'tanh', 'model_params': {'batch_size': 128, 'epochs': 90, 'learning_rate': 0.000210, 'optimizer': 'rmsprop', 'loss': 'mse', 'clipnorm': 1.7381, 'cnn_dropout': 0.1939, 'cnn_activation': 'tanh', 'cnn_blocks':2, 'cnn_base_filters':64, 'cnn_kernel_size':5}},
+    'high':   {'batch_size': 32, 'epochs': 90, 'learning_rate': 0.000346, 'optimizer': 'nadam', 'loss': 'huber', 'clipnorm': 2.6112, 'cnn_dropout': 0.00473, 'cnn_activation': 'relu', 'model_params': {'batch_size': 32, 'epochs': 90, 'learning_rate': 0.000346, 'optimizer': 'nadam', 'loss': 'huber', 'clipnorm': 2.6112, 'cnn_dropout': 0.00473, 'cnn_activation': 'relu', 'cnn_blocks':3, 'cnn_base_filters':96, 'cnn_kernel_size':7}},
   },
   'random_forest': {
-    'simple': {'n_estimators':120,'max_depth':6,'min_samples_split':4,'min_samples_leaf':4,'max_features':0.8,'bootstrap':True,'n_jobs':1,'random_state':42,'model_params':{'n_estimators':120,'max_depth':6,'min_samples_split':4,'min_samples_leaf':4,'max_features':0.8,'bootstrap':True,'n_jobs':1,'random_state':42}},
-    'medium': {'n_estimators':280,'max_depth':10,'min_samples_split':4,'min_samples_leaf':3,'max_features':0.6,'bootstrap':True,'n_jobs':-1,'random_state':42,'model_params':{'n_estimators':280,'max_depth':10,'min_samples_split':4,'min_samples_leaf':3,'max_features':0.6,'bootstrap':True,'n_jobs':-1,'random_state':42}},
-    'high':   {'n_estimators':400,'max_depth':12,'min_samples_split':4,'min_samples_leaf':2,'max_features':0.5,'bootstrap':True,'n_jobs':-1,'random_state':42,'model_params':{'n_estimators':400,'max_depth':12,'min_samples_split':4,'min_samples_leaf':2,'max_features':0.5,'bootstrap':True,'n_jobs':-1,'random_state':42}},
+    'simple': {'min_samples_split': 16, 'min_samples_leaf': 1, 'max_features': 0.6052, 'bootstrap': False, 'n_jobs':-1, 'random_state':42, 'model_params': {'min_samples_split': 16, 'min_samples_leaf': 1, 'max_features': 0.6052, 'bootstrap': False, 'n_estimators': 120, 'max_depth': 6}},
+    'medium': {'min_samples_split': 2, 'min_samples_leaf': 6, 'max_features': 0.5581, 'bootstrap': False, 'n_jobs':-1, 'random_state':42, 'model_params': {'min_samples_split': 2, 'min_samples_leaf': 6, 'max_features': 0.5581, 'bootstrap': False, 'n_estimators': 280, 'max_depth': 10}},
+    'high':   {'min_samples_split': 12, 'min_samples_leaf': 7, 'max_features': 0.8435, 'bootstrap': False, 'n_jobs':-1, 'random_state':42, 'model_params': {'min_samples_split': 12, 'min_samples_leaf': 7, 'max_features': 0.8435, 'bootstrap': False, 'n_estimators': 400, 'max_depth': 12}},
   },
   'xgboost': {
-    'simple': {'n_estimators':200,'max_depth':3,'learning_rate':0.02,'subsample':0.8,'colsample_bytree':0.8,'min_child_weight':1,'gamma':0.0,'reg_lambda':1.0,'reg_alpha':0.0,'tree_method':'hist','n_jobs':-1,'random_state':42,'objective':'reg:squarederror','xgb_params':{'n_estimators':200,'max_depth':3,'learning_rate':0.02,'subsample':0.8,'colsample_bytree':0.8,'min_child_weight':1,'gamma':0.0,'reg_lambda':1.0,'reg_alpha':0.0,'tree_method':'hist','n_jobs':-1,'random_state':42,'objective':'reg:squarederror'}},
-    'medium': {'n_estimators':400,'max_depth':5,'learning_rate':0.015,'subsample':0.8,'colsample_bytree':0.7,'min_child_weight':5,'gamma':1.5,'reg_lambda':1.0,'reg_alpha':0.0,'tree_method':'hist','n_jobs':-1,'random_state':42,'objective':'reg:squarederror','xgb_params':{'n_estimators':400,'max_depth':5,'learning_rate':0.015,'subsample':0.8,'colsample_bytree':0.7,'min_child_weight':5,'gamma':1.5,'reg_lambda':1.0,'reg_alpha':0.0,'tree_method':'hist','n_jobs':-1,'random_state':42,'objective':'reg:squarederror'}},
-    'high':   {'n_estimators':600,'max_depth':6,'learning_rate':0.013,'subsample':0.75,'colsample_bytree':0.65,'min_child_weight':8,'gamma':2.0,'reg_lambda':1.5,'reg_alpha':1e-5,'tree_method':'hist','n_jobs':-1,'random_state':42,'objective':'reg:squarederror','xgb_params':{'n_estimators':600,'max_depth':6,'learning_rate':0.013,'subsample':0.75,'colsample_bytree':0.65,'min_child_weight':8,'gamma':2.0,'reg_lambda':1.5,'reg_alpha':1e-5,'tree_method':'hist','n_jobs':-1,'random_state':42,'objective':'reg:squarederror'}},
+    'simple': {'learning_rate': 0.005, 'subsample': 0.8129, 'colsample_bytree': 0.4073, 'min_child_weight': 15, 'gamma': 4.3521, 'reg_lambda': 0.0156, 'reg_alpha': 0.0014, 'tree_method':'hist', 'n_jobs':-1, 'random_state':42, 'objective':'reg:squarederror', 'xgb_params': {'learning_rate': 0.005, 'subsample': 0.8129, 'colsample_bytree': 0.4073, 'min_child_weight': 15, 'gamma': 4.3521, 'reg_lambda': 0.0156, 'reg_alpha': 0.0014, 'n_estimators': 200, 'max_depth': 3}},
+    'medium': {'learning_rate': 0.0145, 'subsample': 0.8846, 'colsample_bytree': 0.9263, 'min_child_weight': 4, 'gamma': 2.4491, 'reg_lambda': 0.0549, 'reg_alpha': 1.798e-6, 'tree_method':'hist', 'n_jobs':-1, 'random_state':42, 'objective':'reg:squarederror', 'xgb_params': {'learning_rate': 0.0145, 'subsample': 0.8846, 'colsample_bytree': 0.9263, 'min_child_weight': 4, 'gamma': 2.4491, 'reg_lambda': 0.0549, 'reg_alpha': 1.798e-6, 'n_estimators': 400, 'max_depth': 5}},
+    'high':   {'learning_rate': 0.0332, 'subsample': 0.9226, 'colsample_bytree': 0.4054, 'min_child_weight': 6, 'gamma': 4.1146, 'reg_lambda': 0.4810, 'reg_alpha': 0.0076, 'tree_method':'hist', 'n_jobs':-1, 'random_state':42, 'objective':'reg:squarederror', 'xgb_params': {'learning_rate': 0.0332, 'subsample': 0.9226, 'colsample_bytree': 0.4054, 'min_child_weight': 6, 'gamma': 4.1146, 'reg_lambda': 0.4810, 'reg_alpha': 0.0076, 'n_estimators': 600, 'max_depth': 6}},
   },
   'light_xgboost': {
-    'simple': {'n_estimators':100,'max_depth':3,'num_leaves':16,'learning_rate':0.03,'bagging_fraction':0.90,'bagging_freq':1,'feature_fraction':0.90,'min_child_samples':20,'min_split_gain':0.0,'reg_lambda':0.5,'reg_alpha':0.0,'max_bin':64,'n_jobs':1,'random_state':42,'objective':'regression','lgbm_params':{'n_estimators':100,'max_depth':3,'num_leaves':16,'learning_rate':0.03,'bagging_fraction':0.90,'bagging_freq':1,'feature_fraction':0.90,'min_child_samples':20,'min_split_gain':0.0,'reg_lambda':0.5,'reg_alpha':0.0,'max_bin':64,'n_jobs':1,'random_state':42,'objective':'regression'}},
-    'medium': {'n_estimators':200,'max_depth':4,'num_leaves':32,'learning_rate':0.02,'bagging_fraction':0.85,'bagging_freq':1,'feature_fraction':0.80,'min_child_samples':25,'min_split_gain':0.5,'reg_lambda':0.8,'reg_alpha':0.0,'max_bin':96,'n_jobs':1,'random_state':42,'objective':'regression','lgbm_params':{'n_estimators':200,'max_depth':4,'num_leaves':32,'learning_rate':0.02,'bagging_fraction':0.85,'bagging_freq':1,'feature_fraction':0.80,'min_child_samples':25,'min_split_gain':0.5,'reg_lambda':0.8,'reg_alpha':0.0,'max_bin':96,'n_jobs':1,'random_state':42,'objective':'regression'}},
-    'high':   {'n_estimators':300,'max_depth':5,'num_leaves':64,'learning_rate':0.015,'bagging_fraction':0.80,'bagging_freq':1,'feature_fraction':0.75,'min_child_samples':30,'min_split_gain':1.0,'reg_lambda':1.0,'reg_alpha':0.0,'max_bin':128,'n_jobs':1,'random_state':42,'objective':'regression','lgbm_params':{'n_estimators':300,'max_depth':5,'num_leaves':64,'learning_rate':0.015,'bagging_fraction':0.80,'bagging_freq':1,'feature_fraction':0.75,'min_child_samples':30,'min_split_gain':1.0,'reg_lambda':1.0,'reg_alpha':0.0,'max_bin':128,'n_jobs':1,'random_state':42,'objective':'regression'}},
+    'simple': {'learning_rate': 0.0094, 'bagging_fraction': 0.9910, 'feature_fraction': 0.6422, 'min_child_samples': 2, 'reg_lambda': 0.0110, 'reg_alpha': 3.081e-6, 'max_bin': 256, 'n_jobs':-1, 'random_state':42, 'objective':'regression', 'lgbm_params': {'learning_rate': 0.0094, 'bagging_fraction': 0.9910, 'feature_fraction': 0.6422, 'min_child_samples': 2, 'reg_lambda': 0.0110, 'reg_alpha': 3.081e-6, 'max_bin': 256, 'n_estimators': 100, 'num_leaves': 198}},
+    'medium': {'learning_rate': 0.0060, 'bagging_fraction': 0.8470, 'feature_fraction': 0.4016, 'min_child_samples': 13, 'reg_lambda': 0.0039, 'reg_alpha': 1.996e-5, 'max_bin': 224, 'n_jobs':-1, 'random_state':42, 'objective':'regression', 'lgbm_params': {'learning_rate': 0.0060, 'bagging_fraction': 0.8470, 'feature_fraction': 0.4016, 'min_child_samples': 13, 'reg_lambda': 0.0039, 'reg_alpha': 1.996e-5, 'max_bin': 224, 'n_estimators': 200, 'num_leaves': 108}},
+    'high':   {'learning_rate': 0.0233, 'bagging_fraction': 0.7452, 'feature_fraction': 0.8878, 'min_child_samples': 11, 'reg_lambda': 0.0028, 'reg_alpha': 0.0026, 'max_bin': 160, 'n_jobs':-1, 'random_state':42, 'objective':'regression', 'lgbm_params': {'learning_rate': 0.0233, 'bagging_fraction': 0.7452, 'feature_fraction': 0.8878, 'min_child_samples': 11, 'reg_lambda': 0.0028, 'reg_alpha': 0.0026, 'max_bin': 160, 'n_estimators': 300, 'num_leaves': 126}},
   },
 }
 
 # --- Basis-Defaults, die für alle Modelle gelten ---
 BASE_COMMON = {
     "dataset": "mqtt_data_filtered.csv",
-    "loading_strategy": "split",
     "train_fraction": 0.8,
     "base_features": ["Group4-2_S6_VolumetricFlowRate", "Group4-2_S6_MassFlowRate"],
     "time_features": [],
@@ -118,22 +97,46 @@ BASE_COMMON = {
     "scale_other_features": True,
     "scale_target": True,
     "scaler_type": "robust",
-    "inference_interval_sec": 1.0,
-    "edge_device": True,    # Fokus: Edge-trainierbar
+    "edge_device": True,
     "enable_edge": True,
     "validation_fraction": 0.2,
     "early_stopping_patience": 10,
+    "rolling_window_size": 10, # Fest auf 10 gesetzt
+    "lags": 20, # Fest auf 20 gesetzt
 }
 
-
-INFERENCE_CONFIG_BY_ALGO = {
-    "lstm": "lstm_edge",
-    "cnn1d": "cnn1d_edge",
-    "random_forest": "random_forest_edge",
-    "xgboost": "xgboost_edge",
-    "light_xgboost": "light_xgboost_edge", 
+# Modell-Dateien, die als "groß" gelten und nach der Inferenz entfernt werden dürfen
+MODEL_BLOBS_WHITELIST = {
+    "keras": ["model.keras"],
+    "tflite": ["model_quant_float16.tflite", "model_quant_int8.tflite", "model_quant_int8_full.tflite"],
+    "sklearn": ["model.joblib"],
+    "xgb": ["model.json"],
 }
+SUMMARY_CSV_NAME = "Experiment_Summary.csv"
+SCALER_FILE_NAMES = ["scaler.joblib", "y_scaler.joblib"]
 
+# ---------------------------
+# Hilfs-Datenstrukturen
+# ---------------------------
+@dataclass
+class InferenceResult:
+    algorithm: str
+    level: str
+    lags: int
+    horizon: int
+    model_variant: str
+    avg_inference_time_ms: Optional[float]
+    avg_total_time_ms: Optional[float]
+    avg_cpu_percent: Optional[float]
+    avg_ram_percent: Optional[float]
+    model_size_mb: Optional[float]
+    quant_mode: Optional[str]
+    run_id: str
+
+
+# ---------------------------
+# Utils
+# ---------------------------
 def _try_import(module: str, attr: str):
     import importlib
     m = importlib.import_module(module)
@@ -148,40 +151,61 @@ def _deep_merge(a: dict, b: dict) -> dict:
             out[k] = v
     return out
 
-def algorithm_to_folder(flag: str) -> str:
-    f = flag.lower()
-    if "lstm" in f: return "LSTM"
-    if "cnn" in f: return "CNN1D"
-    if "light_xgboost" in f or "light_xgb" in f: return "Light_XGBOOST"  # <- neu
-    if "xgb" in f or "xgboost" in f: return "XGBOOST"
-    if "rf" in f or "random_forest" in f: return "Random_Forest"
-    return f.upper()
+def _range_from_str(spec: str) -> List[int]:
+    spec = spec.strip()
+    if ":" in spec:
+        parts = [int(x) for x in spec.split(":")]
+        start, stop, step = (parts[0], parts[1], 1) if len(parts) == 2 else parts
+        return list(range(start, stop + (1 if step > 0 else -1), step))
+    return [int(x) for x in spec.split(",") if x]
 
-def build_training_config(algorithm: str, level: str, lags: int, horizon: int) -> dict:
-    """Erzeugt eine zusammengeführte Trainings-Config aus Basisteilen + Komplexitätsprofilen."""
+def _safe_float(v) -> Optional[float]:
+    try:
+        return float(v) if v is not None else None
+    except (ValueError, TypeError):
+        return None
+
+def algorithm_to_folder(name_or_flag: str) -> str:
+    n = (name_or_flag or "").lower()
+    if "light_xgboost" in n: return "Light_XGBOOST"
+    if "lstm" in n: return "LSTM"
+    if "cnn" in n: return "CNN1D"
+    if "xgb" in n: return "XGBOOST"
+    if "random_forest" in n: return "Random_Forest"
+    return name_or_flag.upper() or "MODEL"
+
+
+# ---------------------------
+# Konfigurationsaufbau
+# ---------------------------
+def build_training_config(algorithm: str, level: str, horizon: int, folder_flag: str, quant_modes: list) -> dict:
+    """Mergt allgemeine Pfade/Flags, setzt Horizon, Komplexitäts-Level etc."""
     algo = algorithm.lower()
-    if algo not in COMPLEXITY_PRESETS:
-        raise ValueError(f"Unsupported algorithm '{algorithm}'")
-    preset = COMPLEXITY_PRESETS[algo][level]
-    model_filename = MODEL_FILENAME_DEFAULTS[algo]
+    if algo not in COMPLEXITY_PRESETS or level not in COMPLEXITY_PRESETS[algo]:
+        raise ValueError(f"Keine Presets für Algorithmus '{algo}' mit Level '{level}' gefunden.")
 
-    cfg = _deep_merge(BASE_COMMON, {
-        "lags": int(lags),
-        "horizon": int(horizon),
-        "model_name": f"{algo}_{level}",
-        "model_filename": model_filename,
+    preset_cfg = COMPLEXITY_PRESETS[algo][level]
+    merged = _deep_merge(BASE_COMMON, preset_cfg)
+
+    runtime_cfg = {
+        "paths": CONFIG_PATH["paths"],
         "inference_mode": "load_artifacts_path",
-    })
-    cfg = _deep_merge(cfg, preset)
-    cfg = _deep_merge(cfg, {"paths": CONFIG_PATH["paths"]})
-    cfg = _deep_merge(cfg, CONFIG_LOAD_ARTIFACTS)
-    cfg = _deep_merge(cfg, MQTT_CONFIG)
-    return cfg
+        "horizon": int(horizon),
+        "quant_modes": quant_modes,
+    }
+    merged = _deep_merge(merged, runtime_cfg)
+    merged = _deep_merge(merged, CONFIG_LOAD_ARTIFACTS)
+    merged = _deep_merge(merged, MQTT_CONFIG)
+
+    merged, _ = PU.setup_experiment(merged, folder_flag, run_type="train")
+    return merged
+
 
 # ---------------------------
 # Training (programmatisch)
 # ---------------------------
 def run_training(algorithm: str, config: dict, folder_flag: str) -> Tuple[str, Path]:
+    """Startet das programmatische Training und gibt (run_id, models_dir) zurück."""
     module, clsname, default_flag = TRAINER_MAP[algorithm]
     Trainer = _try_import(module, clsname)
     use_flag = folder_flag or default_flag
@@ -190,7 +214,6 @@ def run_training(algorithm: str, config: dict, folder_flag: str) -> Tuple[str, P
     trainer.run(save_artifacts=True)
     dur_s = time.perf_counter() - t0
 
-    # Trainingszeit in training_config.json ergänzen (falls vorhanden)
     try:
         training_cfg_json = Path(config["paths"]["Models"]) / "training_config.json"
         if training_cfg_json.exists():
@@ -200,74 +223,38 @@ def run_training(algorithm: str, config: dict, folder_flag: str) -> Tuple[str, P
             with open(training_cfg_json, "w", encoding="utf-8") as f:
                 json.dump(js, f, indent=2, ensure_ascii=False)
     except Exception as e:
-        print(f"⚠️ Could not write training_time_s: {e}")
+        print(f"⚠️ Konnte training_time_s nicht schreiben: {e}")
 
     run_id = str(config.get("run_id"))
-    models_dir = Path(config["paths"]["Models"])  # durch setup_experiment gesetzt
+    models_dir = Path(config["paths"]["Models"])
     return run_id, models_dir
+
 
 # ---------------------------
 # Inferenz
 # ---------------------------
-def _import_pipeline_web_app():
+def _import_pipeline_web_app_path() -> Path:
+    """Findet den Pfad zu pipeline_web_app.py robust."""
     import importlib.util as _ilu
-    candidates = [
-        ('pipeline_web_app', PROJECT_ROOT / 'pipeline_web_app.py'),
-        ('ML_Algorithms.pipeline_web_app', PROJECT_ROOT / 'ML_Algorithms' / 'pipeline_web_app.py'),
-    ]
-    ml_path = PROJECT_ROOT / 'ML_Algorithms'
-    if ml_path.exists() and str(ml_path) not in sys.path:
-        sys.path.append(str(ml_path))
-    for modname, fpath in candidates:
-        try:
-            return __import__(modname, fromlist=['*'])
-        except ModuleNotFoundError:
-            if fpath.exists():
-                spec = _ilu.spec_from_file_location(modname, fpath)
-                if spec and spec.loader:
-                    m = _ilu.module_from_spec(spec)
-                    spec.loader.exec_module(m)
-                    sys.modules[modname] = m
-                    return m
-    raise ModuleNotFoundError("pipeline_web_app not found in expected locations.")
+    candidates = [PROJECT_ROOT / 'pipeline_web_app.py', PROJECT_ROOT / 'ML_Algorithms' / 'pipeline_web_app.py']
+    for path in candidates:
+        if path.exists():
+            return path
+    raise FileNotFoundError(f"pipeline_web_app.py nicht in erwarteten Pfaden gefunden: {candidates}")
 
 def run_inference_via_subprocess(
-    algorithm: str,
-    run_id: str,
-    model_filename: str,
-    inference_steps: int,
-    loading_strategy: str = "live_mqtt",
-    interval_sec: float = 1.0,
-    config_name: Optional[str] = None,
+    algorithm: str, run_id: str, model_filename: str, inference_steps: int,
+    loading_strategy: str, interval_sec: float
 ) -> int:
-    """Ruft pipeline_web_app.py im reinen Inferenzmodus auf. Gibt den Exitcode zurück."""
-    py = sys.executable
-    # Resolve pipeline_web_app path robust
-    app_path_candidates: List[Path] = []
+    """Ruft pipeline_web_app.py für eine reine Inferenz auf."""
     try:
-        from types import ModuleType
-        _pwa = _import_pipeline_web_app()
-        if isinstance(_pwa, ModuleType):
-            app_path_candidates.append(Path(getattr(_pwa, '__file__', '')))
-    except Exception:
-        pass
-    app_path_candidates += [
-        PROJECT_ROOT / 'pipeline_web_app.py',
-        PROJECT_ROOT / 'ML_Algorithms' / 'pipeline_web_app.py',
-    ]
-    app: Optional[Path] = None
-    for cand in app_path_candidates:
-        if cand and isinstance(cand, Path) and cand.exists():
-            app = cand
-            break
-    if app is None:
-        print("❌ Could not locate pipeline_web_app.py in expected locations:")
-        for cand in app_path_candidates:
-            print(" -", cand)
+        app_path = _import_pipeline_web_app_path()
+    except FileNotFoundError as e:
+        print(f"❌ {e}")
         return 2
 
     cmd = [
-        str(py), str(app),
+        sys.executable, str(app_path),
         "--algorithm", algorithm,
         "--load_id", run_id,
         "--model_filename", model_filename,
@@ -276,32 +263,35 @@ def run_inference_via_subprocess(
         "--set", f"loading_strategy={loading_strategy}",
         "--set", f"inference_interval_sec={interval_sec}",
     ]
-    if config_name:
-        cmd += ["--config-name", config_name]
-
-    print("[SPAWN] ", " ".join(map(str, cmd)))
-    print(f"[INFO] Using pipeline_web_app at: {app}")
+    print("[SPAWN] ", " ".join(cmd))
     import subprocess
     proc = subprocess.run(cmd)
     return proc.returncode
 
+
 # ---------------------------
-# Auswertung
+# Auswertung & Speicherung
 # ---------------------------
+def list_model_variants(models_dir: Path) -> List[str]:
+    """Findet vorhandene Modellvarianten in einem Models-Ordner."""
+    found = set()
+    for category in MODEL_BLOBS_WHITELIST.values():
+        for filename in category:
+            if (models_dir / filename).exists():
+                found.add(filename)
+    return sorted(list(found))
+
 def _discover_predictions_file_from_json(run_id: str, error_metrics_dir: Path) -> Optional[Path]:
-    """Falls ErrorMetrics_all_runs.csv vorhanden ist, extrahiere predictions_file_path aus der Run-JSON."""
+    """Liest ErrorMetrics_all_runs.csv und extrahiert den Pfad zur Step-Prediction-Datei."""
     agg_csv = error_metrics_dir / "ErrorMetrics_all_runs.csv"
-    if not agg_csv.exists():
-        return None
+    if not agg_csv.exists(): return None
     try:
         import pandas as pd
         df = pd.read_csv(agg_csv)
         row = df[df["run_id"] == run_id].tail(1)
-        if row.empty:
-            return None
-        json_path = Path(row.iloc[0]["json_path"]).resolve()
-        if not json_path.exists():
-            return None
+        if row.empty: return None
+        json_path = Path(row.iloc[0]["json_path"])
+        if not json_path.exists(): return None
         with open(json_path, "r", encoding="utf-8") as f:
             js = json.load(f)
         p = js.get("extra_info", {}).get("predictions_file_path")
@@ -310,8 +300,7 @@ def _discover_predictions_file_from_json(run_id: str, error_metrics_dir: Path) -
         return None
 
 def _fallback_find_step_csv(run_id: str, prediction_data_dir: Path) -> Optional[Path]:
-    pattern = f"StepPredictions_{run_id}_*.csv"
-    hits = list(prediction_data_dir.glob(pattern))
+    hits = sorted(list(prediction_data_dir.glob(f"StepPredictions_{run_id}_*.csv")))
     return hits[-1] if hits else None
 
 def summarize_step_csv(step_csv: Path) -> Tuple[Optional[float], Optional[float], Optional[float], Optional[float]]:
@@ -319,150 +308,200 @@ def summarize_step_csv(step_csv: Path) -> Tuple[Optional[float], Optional[float]
     try:
         import pandas as pd
         df = pd.read_csv(step_csv)
-        inf_ms = float(df["inference_time_s"].mean() * 1000.0) if "inference_time_s" in df else None
-        tot_ms = float(df["total_time_s"].mean() * 1000.0) if "total_time_s" in df else None
-        cpu = float(df["cpu_percent"].mean()) if "cpu_percent" in df else None
-        ram = float(df["ram_percent"].mean()) if "ram_percent" in df else None
+        inf_ms = _safe_float(df["inference_time_s"].mean() * 1000.0) if "inference_time_s" in df else None
+        tot_ms = _safe_float(df["total_time_s"].mean() * 1000.0) if "total_time_s" in df else None
+        cpu = _safe_float(df["cpu_percent"].mean()) if "cpu_percent" in df else None
+        ram = _safe_float(df["ram_percent"].mean()) if "ram_percent" in df else None
         return inf_ms, tot_ms, cpu, ram
     except Exception:
         return None, None, None, None
 
-@dataclass
-class InferenceResult:
-    algorithm: str
-    level: str
-    lags: int
-    horizon: int
-    model_variant: str
-    avg_inference_time_ms: Optional[float]
-    avg_total_time_ms: Optional[float]
-    avg_cpu_percent: Optional[float]
-    avg_ram_percent: Optional[float]
-    model_size_mb: Optional[float]
-    run_id: str
-
 def read_model_size_mb(training_config_json: Path) -> Optional[float]:
-    if not training_config_json.exists():
-        return None
+    if not training_config_json.exists(): return None
     try:
         with open(training_config_json, "r", encoding="utf-8") as f:
-            js = json.load(f)
-        v = js.get("model_size_MB")
-        return float(v) if v is not None else None
+            return _safe_float(json.load(f).get("model_size_MB"))
     except Exception:
         return None
 
+def _map_variant_to_quant_mode(model_file: str) -> str:
+    if "int8_full" in model_file: return "quant-8-full"
+    if "int8" in model_file: return "quant-8"
+    if "float16" in model_file: return "quant-16"
+    return "no-quant"
+
 def append_summary_row(summary_csv: Path, row: InferenceResult) -> None:
     header = [
-        "algorithm", "level", "lags", "horizon", "model_variant",
+        "algorithm", "level", "lags", "horizon", "model_variant", "quant_mode",
         "avg_inference_time_ms", "avg_total_time_ms", "avg_cpu_percent", "avg_ram_percent",
         "model_size_mb", "run_id",
     ]
     exists = summary_csv.exists()
-    with open(summary_csv, "a", newline="", encoding="utf-8") as f:
-        w = csv.writer(f)
-        if not exists:
-            w.writerow(header)
-        w.writerow([
-            row.algorithm, row.level, row.lags, row.horizon, row.model_variant,
+    with open(summary_csv, "a", newline="", encoding="utf-8") as fh:
+        writer = csv.writer(fh)
+        if not exists: writer.writerow(header)
+        writer.writerow([
+            row.algorithm, row.level, row.lags, row.horizon, row.model_variant, row.quant_mode,
             row.avg_inference_time_ms, row.avg_total_time_ms, row.avg_cpu_percent, row.avg_ram_percent,
-            row.model_size_mb, row.run_id
+            row.model_size_mb, row.run_id,
         ])
 
+
 # ---------------------------
-# Main
+# Aufräumen
 # ---------------------------
-def _range_from_str(spec: str) -> List[int]:
-    spec = spec.strip()
-    if ":" in spec:
-        parts = [int(x) for x in spec.split(":")]
-        if len(parts) == 2:
-            start, stop = parts
-            step = 1
+def cleanup_model_binaries_and_scalers(models_dir: Path, scalers_dir: Path) -> None:
+    """Löscht große Modellbinaries und Scaler-Dateien."""
+    to_delete = []
+    for category in MODEL_BLOBS_WHITELIST.values():
+        for filename in category:
+            fp = models_dir / filename
+            if fp.exists(): to_delete.append(fp)
+
+    for fname in SCALER_FILE_NAMES:
+        fp = scalers_dir / fname
+        if fp.exists(): to_delete.append(fp)
+
+    for fp in sorted(to_delete):
+        try:
+            fp.unlink()
+            print(f"🧹 Gelöscht: {fp}")
+        except Exception as e:
+            print(f"⚠️ Fehler beim Löschen von {fp}: {e}")
+
+
+# ---------------------------
+# Orchestrierung
+# ---------------------------
+def _file_candidates_for_mode(algo: str, mode: str) -> list[str]:
+    mode = (mode or "no-quant").lower()
+    if mode == "quant-16": return ["model_quant_float16.tflite"]
+    if mode == "quant-8": return ["model_quant_int8_full.tflite", "model_quant_int8.tflite"]
+    if algo in ("lstm", "cnn1d"): return ["model.keras"]
+    if algo == "random_forest": return ["model.joblib"]
+    if algo in ("xgboost", "light_xgboost"): return ["model.json", "model.joblib"]
+    return []
+
+def _run_all_inferences_and_summarize(
+    algo: str, cfg: dict, run_id: str, models_dir: Path, inference_steps: int,
+    loading_strategy: str, interval_sec: float, summary_csv: Path, delete_models: bool
+) -> None:
+    """Führt für jeden gewünschten/verfügbaren Quantisierungsmodus eine Inferenz aus."""
+    variants_present = set(list_model_variants(models_dir))
+    if not variants_present:
+        print("⚠️ Kein Modell gefunden – Inferenz für diesen Lauf übersprungen.")
+        return
+
+    modes_to_run = cfg.get("quant_modes", ["no-quant"])
+    queue: list[tuple[str, str]] = []
+    for qmode in modes_to_run:
+        candidates = _file_candidates_for_mode(algo, qmode)
+        chosen = next((f for f in candidates if f in variants_present), None)
+        if chosen and (qmode, chosen) not in queue:
+            queue.append((qmode, chosen))
         else:
-            start, stop, step = parts
-        return list(range(start, stop + (1 if step > 0 else -1), step))
-    return [int(x) for x in spec.split(",") if x]
+            print(f"ℹ️ Überspringe Modus '{qmode}': keine passende Datei gefunden (gesucht: {candidates})")
+    
+    if not queue: # Fallback, falls kein Modus passt
+        best_available = next((f for f in ["model.keras", "model.joblib", "model.json"] if f in variants_present), None)
+        if best_available: queue.append(("no-quant", best_available))
 
-def main():
-    ap = argparse.ArgumentParser(description="Multi-Config Experiment Pipeline (inline configs)")
-    ap.add_argument("--algorithms", type=str, default="lstm,cnn1d,random_forest,xgboost",
-                    help="Kommagetrennte Liste: lstm,cnn1d,random_forest,xgboost")
-    ap.add_argument("--horizons", type=str, default="1,4,8",
-                    help="Kommagetrennt oder Range 'start:stop:step'")
-    ap.add_argument("--lags", type=int, default=4, help="Anzahl Lags (gemeinsam für alle Läufe)")
-    ap.add_argument("--inference-steps", type=int, default=60, help="Schritte pro Inferenzlauf")
-    ap.add_argument("--loading-strategy", type=str, default="split", help="split | separate_csv | live_mqtt")
-    ap.add_argument("--interval-sec", type=float, default=1.0, help="Inferenz-Intervall in Sekunden")
-    ap.add_argument("--summary", type=str, default="Experiment_Summary_MultiConfig.csv", help="Ziel-CSV")
-    args = ap.parse_args()
-
-    algorithms = [a.strip().lower() for a in args.algorithms.split(",") if a.strip()]
-    horizons = _range_from_str(args.horizons)
-    lags = int(args.lags)
-    summary_csv = Path(CONFIG_PATH["paths"]["output"]) / args.summary
-
-    print("=== EXPERIMENT START ===")
-    print("Algos     :", algorithms)
-    print("Horizons  :", horizons)
-    print("Lags      :", lags)
-    print("Summary   :", summary_csv)
-
-    for algo in algorithms:
-        if algo not in TRAINER_MAP:
-            print(f"⚠️  Überspringe unbekanntes Modell: {algo}")
+    for qmode, model_file in queue:
+        print(f"\n✅ Starte Inferenz für Modus '{qmode}' mit Datei '{model_file}'.")
+        rc = run_inference_via_subprocess(
+            algorithm=algo, run_id=run_id, model_filename=model_file,
+            inference_steps=inference_steps, loading_strategy=loading_strategy, interval_sec=interval_sec
+        )
+        if rc != 0:
+            print(f"⚠️ Inferenz-Subprozess mit Fehlercode {rc} für {model_file} fehlgeschlagen.")
             continue
 
-        for H in horizons:
-            for level in ("simple", "medium", "high"):
-                print(f"\n--- Train {algo} | level={level} | lags={lags} | horizon={H} ---")
+        err_dir = Path(cfg["paths"]["Error_Metrics"])
+        pred_dir = Path(cfg["paths"]["Prediction_Data"])
+        step_csv = _discover_predictions_file_from_json(run_id, err_dir) or _fallback_find_step_csv(run_id, pred_dir)
 
-                # Config bauen und Experiment-Ordner aufsetzen
-                cfg = build_training_config(algo, level, lags, H)
-                folder_flag = algorithm_to_folder(algo)   # -> "LSTM", "CNN1D", "Random_Forest", "XGBOOST"
-                cfg, _ = PU.setup_experiment(cfg, folder_flag, run_type="train")
+        avg_inf_ms, avg_total_ms, avg_cpu, avg_ram = summarize_step_csv(step_csv) if step_csv else (None,)*4
 
-                # Train
-                run_id, models_dir = run_training(algo, cfg, folder_flag=folder_flag)
-                print(f"[OK] Training done. run_id={run_id} @ {models_dir}")
+        res = InferenceResult(
+            algorithm=algo, level=cfg.get("level_used", "unknown"),
+            lags=int(cfg.get("lags", 0)), horizon=int(cfg.get("horizon", 0)),
+            model_variant=model_file, quant_mode=_map_variant_to_quant_mode(model_file),
+            avg_inference_time_ms=avg_inf_ms, avg_total_time_ms=avg_total_ms,
+            avg_cpu_percent=avg_cpu, avg_ram_percent=avg_ram,
+            model_size_mb=read_model_size_mb(models_dir / "training_config.json"), run_id=run_id,
+        )
+        append_summary_row(summary_csv, res)
+        print(f"📈 Zusammenfassung für {res.quant_mode} ({model_file}) in CSV geschrieben.")
 
-                # Inferenz
-                model_filename = cfg.get("model_filename", MODEL_FILENAME_DEFAULTS.get(algo, "model.bin"))
-                rc = run_inference_via_subprocess(
-                    algorithm=algo,
-                    run_id=run_id,
-                    model_filename=model_filename,
-                    inference_steps=args.inference_steps,
-                    loading_strategy=args.loading_strategy,
-                    interval_sec=args.interval_sec,
-                    config_name=INFERENCE_CONFIG_BY_ALGO.get(algo, f"{algo}_edge"),
+    if delete_models:
+        cleanup_model_binaries_and_scalers(models_dir, Path(cfg["paths"]["Scalers"]))
+
+
+def run_experiments(
+    algorithms: List[str], horizon_values: List[int], inference_steps: int,
+    loading_strategy: str, interval_sec: float, delete_models: bool, limit_runs: Optional[int]
+) -> None:
+    out_dir = Path(CONFIG_PATH["paths"]["output"])
+    out_dir.mkdir(parents=True, exist_ok=True)
+    summary_csv = out_dir / SUMMARY_CSV_NAME
+
+    runs_done = 0
+    levels = ["simple", "medium", "high"]
+
+    for algorithm in algorithms:
+        algo = algorithm.lower()
+        if algo not in TRAINER_MAP:
+            print(f"⚠️ Unbekannter Algorithmus '{algorithm}' wird übersprungen.")
+            continue
+
+        quant_modes_for_algo = ["no-quant", "quant-16", "quant-8"] if algo in ["cnn1d", "lstm"] else ["no-quant"]
+        print(f"\n--- Algorithmus: {algo} (Quantisierungsmodi: {quant_modes_for_algo}) ---")
+
+        for horizon in horizon_values:
+            for level in levels:
+                if limit_runs is not None and runs_done >= limit_runs:
+                    print("Maximalzahl an Läufen erreicht – Experiment wird beendet.")
+                    return
+
+                folder_flag = algorithm_to_folder(algo)
+                cfg = build_training_config(algo, level, horizon, folder_flag, quant_modes_for_algo)
+                cfg["level_used"] = level
+
+                print(f"\n=== LAUF {runs_done + 1} | Train: {algo} | Level: {level} | Horizon: {horizon} ===")
+                run_id, models_dir = run_training(algo, cfg, folder_flag)
+                print(f"✅ Training abgeschlossen. run_id={run_id}")
+
+                _run_all_inferences_and_summarize(
+                    algo, cfg, run_id, models_dir,
+                    inference_steps, loading_strategy, interval_sec,
+                    summary_csv, delete_models
                 )
-                if rc != 0:
-                    print(f"❌ Inference subprocess exited with {rc} — Metriken evtl. unvollständig.")
+                runs_done += 1
 
-                # Metrik-Zusammenfassung (StepPredictions)
-                error_metrics_dir = Path(CONFIG_PATH["paths"]["output"]) / "Error_Metrics"
-                prediction_data_dir = Path(CONFIG_PATH["paths"]["output"]) / "Prediction_Data"
-                step_csv = _discover_predictions_file_from_json(run_id, error_metrics_dir)
-                if step_csv is None:
-                    step_csv = _fallback_find_step_csv(run_id, prediction_data_dir)
-                inf_ms, tot_ms, cpu, ram = summarize_step_csv(step_csv) if step_csv else (None, None, None, None)
 
-                # Modellgröße aus training_config.json lesen (falls vorhanden)
-                model_size_mb = read_model_size_mb(models_dir / "training_config.json")
+def main():
+    p = argparse.ArgumentParser(description="Experiment-Pipeline über Modelle, Komplexitätsstufen und Horizons")
+    p.add_argument("--algorithms", default="cnn1d,lstm,random_forest,xgboost,light_xgboost", help="Kommagetrennte Liste der Algorithmen")
+    p.add_argument("--horizon", default="1:16:2", help="Range 'start:stop:step' oder kommagetrennt für den Horizont")
+    p.add_argument("--inference-steps", type=int, default=60, help="Anzahl Inferenzschritte")
+    p.add_argument("--loading-strategy", default="split", choices=["split", "live_mqtt"], help="Datenquelle für Inferenz")
+    p.add_argument("--interval-sec", type=float, default=0.0, help="Ziel-Inferenzintervall in Sekunden")
+    p.add_argument("--keep-models", action="store_true", help="Modellbinaries nach Inferenz NICHT löschen")
+    p.add_argument("--limit-runs", type=int, help="Max. Anzahl an Experimenten (Kombinationen aus Algo/Level/Horizon)")
+    args = p.parse_args()
 
-                result = InferenceResult(
-                    algorithm=algo, level=level, lags=lags, horizon=H,
-                    model_variant=model_filename,
-                    avg_inference_time_ms=inf_ms, avg_total_time_ms=tot_ms,
-                    avg_cpu_percent=cpu, avg_ram_percent=ram,
-                    model_size_mb=model_size_mb,
-                    run_id=run_id,
-                )
-                append_summary_row(summary_csv, result)
-                print(f"[OK] Summary updated -> {summary_csv}")
+    algorithms = [a.strip() for a in args.algorithms.split(",") if a.strip()]
+    horizon_vals = _range_from_str(args.horizon)
 
-    print("\n=== EXPERIMENT DONE ===")
+    run_experiments(
+        algorithms=algorithms,
+        horizon_values=horizon_vals,
+        inference_steps=args.inference_steps,
+        loading_strategy=args.loading_strategy,
+        interval_sec=args.interval_sec,
+        delete_models=(not args.keep_models),
+        limit_runs=args.limit_runs,
+    )
 
 if __name__ == "__main__":
     main()
