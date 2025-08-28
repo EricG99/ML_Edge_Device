@@ -171,6 +171,7 @@ class InferenceResult:
     avg_cpu_percent: Optional[float]
     avg_ram_percent: Optional[float]
     model_size_mb: Optional[float]
+    quant_mode: Optional[str]
     run_id: str
 
 
@@ -466,10 +467,18 @@ def read_model_size_mb(training_config_json: Path) -> Optional[float]:
     except Exception:
         return None
 
+def _map_variant_to_quant_mode(model_file: str) -> str:
+    if model_file == "model_quant_int8_full.tflite":
+        return "quant-8-full"
+    if model_file == "model_quant_int8.tflite":
+        return "quant-8"
+    if model_file == "model_quant_float16.tflite":
+        return "quant-16"
+    return "no-quant"
 
 def append_summary_row(summary_csv: Path, row: InferenceResult) -> None:
     header = [
-        "algorithm", "profile", "lags", "horizon", "model_variant",
+        "algorithm", "profile", "lags", "horizon", "model_variant", "quant_mode",
         "avg_inference_time_ms", "avg_total_time_ms", "avg_cpu_percent", "avg_ram_percent",
         "model_size_mb", "run_id",
     ]
@@ -479,7 +488,7 @@ def append_summary_row(summary_csv: Path, row: InferenceResult) -> None:
         if not exists:
             writer.writerow(header)
         writer.writerow([
-            row.algorithm, row.profile, row.lags, row.horizon, row.model_variant,
+            row.algorithm, row.profile, row.lags, row.horizon, row.model_variant, row.quant_mode,
             row.avg_inference_time_ms, row.avg_total_time_ms, row.avg_cpu_percent, row.avg_ram_percent,
             row.model_size_mb, row.run_id,
         ])
@@ -596,6 +605,7 @@ def _run_all_inferences_and_summarize(
 
     training_cfg_json = models_dir / "training_config.json"
     model_size_mb = read_model_size_mb(training_cfg_json)
+    qmode = _map_variant_to_quant_mode(inference_variant)
 
     res = InferenceResult(
         algorithm=algo,
@@ -608,6 +618,7 @@ def _run_all_inferences_and_summarize(
         avg_cpu_percent=avg_cpu,
         avg_ram_percent=avg_ram,
         model_size_mb=model_size_mb,
+        quant_mode=qmode, 
         run_id=run_id,
     )
     append_summary_row(summary_csv, res)
