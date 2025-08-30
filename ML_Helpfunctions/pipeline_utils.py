@@ -1064,28 +1064,47 @@ def create_representative_dataset_generator(dataset, config):
     Erstellt einen korrekten Generator für die TFLite INT8-Quantisierung.
     """
     def generator():
-        if dataset is None or len(dataset) == 0:
-            return
-        
-        # Konvertiere das NumPy-Array in ein tf.data.Dataset
-        tf_dataset = tf.data.Dataset.from_tensor_slices(dataset.astype(np.float32))
-        
-        # Nimm eine Teilmenge der Daten (z.B. 100 Samples) für die Kalibrierung
-        for data_sample in tf_dataset.batch(1).take(100):
-            yield [data_sample] # WICHTIG: Muss eine Liste/ein Tuple sein
-            
+        for data_sample in dataset.take(100):  
+            if isinstance(data_sample, tuple):
+                input_data = data_sample[0]
+            else:
+                input_data = data_sample
+            yield [tf.cast(input_data, tf.float32)]
+
     return generator
 
 
+def load_model_artifacts_for_inference(config: dict, folder_flag: str) -> tuple:
+    """
+    Lädt robust die notwendigen Artefakte (Scaler, Features, Modell) für die Inferenz.
+    Unterstützte Modelle: .keras/.h5 (TF/Keras), .joblib (sklearn), .tflite (TFLite), .json (XGBoost).
+    Rückgabe: (scaler, features, model, training_config, y_scaler)
+    """
+    import os, json, logging, joblib
 
-def load_model_artifacts_for_inference(config: dict, folder_flag: str):
-    """
-    Lädt alle notwendigen Artefakte für die Inferenz.
-    Diese Version prüft die Konfiguration und die Dateiendung, um die korrekte Ladefunktion zu verwenden.
-    """
-    run_id = config.get("load_id") or config.get("run_id")
-    if not run_id:
-        raise ValueError("Keine 'run_id' oder 'load_id' in der Konfiguration zum Laden von Artefakten gefunden.")
+    # <<< Wichtig: TensorFlow anfangs importieren (oder sauber abfangen) >>>
+    try:
+        import tensorflow as tf  # benötigt für .keras/.h5/.tflite
+    except Exception:
+        tf = None  # wir prüfen vor jeder Nutzung und geben eine klare Fehlermeldung
+
+    mode = config.get("inference_mode", "load_artifacts_fast")
+    logging.info(f"Lade Artefakte im Modus: '{mode}'...")
+
+    scaler = None
+    y_scaler = None
+    features = None
+    model = None
+    training_config = None
+
+    # ----- Pfade bestimmen -----
+    if mode == 'load_artifacts_path':
+        try:
+            base_path = config['paths'].get('output') or config.get('artifacts_path')
+            load_id = config["load_id"]
+            model_filename = config.get("model_filename", "model.joblib")
+        except KeyError as e:
+            raise ValueError(f"Für Modus 'load_artifacts_path' fehlt der Schlüssel '{e}' in der Konfiguration.")
 
     base_path = Path(config["paths"]["output"]) / folder_flag / run_id
     models_path = base_path / "Models"
