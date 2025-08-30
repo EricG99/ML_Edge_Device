@@ -1059,9 +1059,11 @@ def _save_metrics_prediction_gerneral(
     return results_path
 
 
-def create_representative_dataset_generator(dataset, config):
+def create_representative_dataset_generator(dataset: tf.data.Dataset):
     """
-    Erstellt einen korrekten Generator für die TFLite INT8-Quantisierung.
+    Erstellt einen Generator für die Representative Dataset Funktion.
+    Erwartet ein Dataset mit Eingabe-Tensoren (oder Tupeln mit Eingabe und Label).
+    Gibt nur die Eingabe-Tensoren zurück.
     """
     def generator():
         for data_sample in dataset.take(100):  
@@ -1106,59 +1108,83 @@ def load_model_artifacts_for_inference(config: dict, folder_flag: str) -> tuple:
         except KeyError as e:
             raise ValueError(f"Für Modus 'load_artifacts_path' fehlt der Schlüssel '{e}' in der Konfiguration.")
 
-    base_path = Path(config["paths"]["output"]) / folder_flag / run_id
-    models_path = base_path / "Models"
-    scalers_path = base_path / "Scalers"
+        run_dir = os.path.join(base_path, folder_flag, load_id)
+        model_path = os.path.join(run_dir, "Models", model_filename)
+        scaler_path = os.path.join(run_dir, "Scalers", "scaler.joblib")
+        features_path = os.path.join(run_dir, "Models", "features.joblib")
+        training_config_path = os.path.join(run_dir, "Models", "training_config.json")
 
-    # Trainings-Konfiguration laden
-    training_config_path = models_path / "training_config.json"
-    if not training_config_path.exists():
-        raise FileNotFoundError(f"training_config.json nicht gefunden unter: {training_config_path}")
-    with open(training_config_path, "r", encoding="utf-8") as f:
-        training_config = json.load(f)
-    logging.info("✅ Trainings-Konfiguration geladen.")
+        logging.info(f"Lade versionierte Artefakte aus: {run_dir}")
 
-    # Feature-Liste laden
-    features_path = models_path / "features.joblib"
-    if not features_path.exists():
-        raise FileNotFoundError(f"features.joblib nicht gefunden unter: {features_path}")
-    feature_list = joblib.load(features_path)
+        if os.path.exists(training_config_path):
+            try:
+                with open(training_config_path, 'r') as f:
+                    training_config = json.load(f)
+                logging.info("✅ Trainings-Konfiguration geladen.")
+            except Exception as e:
+                logging.warning(f"Konnte Trainings-Konfiguration nicht laden: {e}")
 
-    # Modell laden (mit Logik für verschiedene Dateitypen)
-    model_filename = config.get("model_filename")
-    if not model_filename:
-        raise ValueError("Kein 'model_filename' in der Konfiguration für die Inferenz gefunden.")
-    
-    model_path = models_path / model_filename
-    if not model_path.exists():
-        raise FileNotFoundError(f"Modell-Datei '{model_filename}' nicht gefunden unter: {model_path}")
-
-    model = None
-    if model_filename.endswith(('.keras', '.h5')):
-        model = tf.keras.models.load_model(model_path)
-    elif model_filename.endswith('.tflite'):
-        model = tf.lite.Interpreter(model_path=str(model_path))
-        model.allocate_tensors()
-    elif model_filename.endswith(('.joblib', '.pkl', '.json')):
-        model = joblib.load(model_path)
+    elif mode == 'load_artifacts_fast':
+        model_path = config.get("model_path_static", "trained_rf_model.joblib")
+        scaler_path = config.get("scaler_path_static", "trained_rf_scaler.joblib")
+        features_path = config.get("features_path_static", "trained_rf_features.joblib")
+        logging.info("Lade Artefakte von statischen Pfaden.")
     else:
-        raise ValueError(f"Unbekanntes Modellformat für Datei: {model_filename}")
-    
-    # Scaler laden (mit Prüfung der Konfiguration)
-    scaler = None
-    y_scaler = None
-    if training_config.get('scale_other_features', True):
-        scaler_path = scalers_path / "scaler.joblib"
-        if not scaler_path.exists():
-            raise FileNotFoundError(f"scaler.joblib wurde erwartet (scale_other_features=true), aber nicht gefunden unter: {scaler_path}")
-        scaler = joblib.load(scaler_path)
+        raise ValueError(f"Unbekannter 'inference_mode': '{mode}'. Gültig: 'load_artifacts_fast', 'load_artifacts_path'.")
 
-    if training_config.get('scale_target', False):
-        y_scaler_path = scalers_path / "y_scaler.joblib"
-        if y_scaler_path.exists():
+    # ----- Existenz prüfen -----
+    for path in [model_path, scaler_path, features_path]:
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"Benötigte Artefakt-Datei wurde nicht gefunden unter: {path}")
+
+    # ----- Modell laden (je nach Endung) -----
+    if model_path.endswith((".keras", ".h5")):
+        if tf is None:
+            raise ImportError("TensorFlow wird für das Laden von .keras/.h5 benötigt. Bitte installieren/aktivieren.")
+        model = tf.keras.models.load_model(model_path)
+
+    elif model_path.endswith(".joblib"):
+        model = joblib.load(model_path)
+
+    elif model_path.endswith(".tflite"):
+        if tf is None:
+            raise ImportError("TensorFlow wird für das Laden von .tflite benötigt. Bitte installieren/aktivieren.")
+        logging.info("Lade TFLite-Modell.")
+        # Windows/CPU: ohne Flex-Delegate laden
+        interpreter = tf.lite.Interpreter(model_path=model_path)
+        interpreter.allocate_tensors()
+        model = interpreter
+
+    elif model_path.endswith(".json"):
+        try:
+            import xgboost as xgb
+            model = xgb.XGBRegressor()
+            model.load_model(model_path)
+            logging.info("XGBoost-Modell aus .json-Datei geladen.")
+        except ImportError:
+            raise ImportError("Die 'xgboost'-Bibliothek wird benötigt, um .json-Modelle zu laden (pip install xgboost).")
+        except Exception as e:
+            raise IOError(f"Fehler beim Laden des XGBoost-Modells von {model_path}: {e}")
+
+    else:
+        raise ValueError(f"Unbekannte Modelldatei-Endung. Unterstützt: .keras, .h5, .joblib, .tflite, .json. Pfad: {model_path}")
+
+    # ----- Scaler & Featureliste laden -----
+    scaler = joblib.load(scaler_path)
+    features = joblib.load(features_path)
+
+    # Optionaler y-Scaler
+    y_scaler_path = os.path.join(os.path.dirname(scaler_path), "y_scaler.joblib")
+    if os.path.exists(y_scaler_path):
+        try:
             y_scaler = joblib.load(y_scaler_path)
+            logging.info("✅ Target scaler (y_scaler) erfolgreich geladen.")
+        except Exception as e:
+            logging.warning(f"Konnte y_scaler nicht laden von {y_scaler_path}: {e}")
 
-    return scaler, feature_list, model, training_config, y_scaler
+    logging.info("✅ Alle Artefakte erfolgreich geladen.")
+    return scaler, features, model, training_config, y_scaler
+
 
 
 class ModelScalerSaver:
