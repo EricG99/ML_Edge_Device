@@ -99,7 +99,12 @@ class LightXGBoostInference(BaseInferenceProcessor):
             logging.warning("Light_XGBoostInference: NaNs im finalen Inferenz-Vektor entdeckt. Überspringe Schritt.")
             return None, None, None
 
-        X_live_scaled = self.scaler.transform(last_vector_full.values) if self.scaler else last_vector_full.values
+        # Skaliert -> wieder als DataFrame mit Spaltennamen zurückgeben (verhindert Warnings, stabilisiert Inferenz)
+        if self.scaler is not None:
+            np_input = self.scaler.transform(last_vector_full.values)
+            X_live = pd.DataFrame(np_input, columns=self.feature_list, index=last_vector_full.index)
+        else:
+            X_live = last_vector_full  # bereits DataFrame mit korrekten Spalten
 
         timestamp = last_vector_full.index[-1]
         key_to_find = self.target_feature.lower()
@@ -107,7 +112,8 @@ class LightXGBoostInference(BaseInferenceProcessor):
         if true_value is None:
             logging.warning("Light_XGBoostInference: true_value ('%s') nicht im Payload gefunden.", key_to_find)
 
-        return X_live_scaled, timestamp, true_value
+        return X_live, timestamp, true_value
+
 
     def _inverse_transform_prediction(self, prediction_scaled: np.ndarray) -> np.ndarray:
         # analog XGBoost: Rückskalierung optional (hier: Identität)

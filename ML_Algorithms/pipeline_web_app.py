@@ -688,12 +688,23 @@ def inference_manager(config: dict, inference_class, folder_flag: str, algorithm
 
                     # RAM
                     ram_mb_val, ram_percent_val = None, None
-                    if ram_usage_dict and ram_usage_dict.get("used_gb") != "N/A":
+                    if psutil is not None and proc is not None:
                         try:
-                            ram_mb_val = float(ram_usage_dict["used_gb"]) * 1024
-                            ram_percent_val = float(ram_usage_dict["percent"])
-                            prediction_entry['ram_usage'] = ram_usage_dict  # für Web-UI
-                        except (ValueError, TypeError):
+                            # Prozess-spezifischen Speicher (RSS) in MB messen
+                            process_memory_info = proc.memory_info()
+                            ram_mb_val = process_memory_info.rss / (1024 * 1024)
+                            
+                            # Systemweiten Prozentwert für Gesamtkontext
+                            system_memory = psutil.virtual_memory()
+                            ram_percent_val = system_memory.percent
+
+                            # Detailliertere Infos für die Web-UI hinzufügen
+                            prediction_entry['ram_usage'] = {
+                                "process_mb": round(ram_mb_val, 2),
+                                "system_percent": ram_percent_val,
+                                "system_total_gb": round(system_memory.total / (1024**3), 2)
+                            }
+                        except (ValueError, TypeError, psutil.NoSuchProcess):
                             pass
 
                     # Persistieren dieses Schritts

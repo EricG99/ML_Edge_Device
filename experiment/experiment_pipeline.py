@@ -40,6 +40,8 @@ import csv
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
+import logging
+
 
 # ---- Projektpfad sicherstellen ----
 PROJECT_ROOT = Path(__file__).resolve().parent.parent  # Annahme: Datei liegt im Ordner "experiment/"
@@ -473,24 +475,24 @@ def summarize_step_csv(step_csv: Path) -> Tuple[Optional[float], Optional[float]
         return None, None, None, None
 
 
-def read_model_size_mb(training_config_json: Path) -> Optional[float]:
+def read_model_size_mb(training_config_json: Path, model_variant_file: str) -> Optional[float]:
+    """Liest die spezifische Modellgröße aus der training_config.json."""
     if not training_config_json.exists():
         return None
     try:
         with open(training_config_json, "r", encoding="utf-8") as f:
             js = json.load(f)
+        
+        # Neue Logik: In 'model_sizes_mb' nach dem spezifischen Dateinamen suchen
+        sizes_dict = js.get("model_sizes_mb", {})
+        if model_variant_file in sizes_dict:
+            return _safe_float(sizes_dict[model_variant_file])
+        
+        # Fallback auf den alten Schlüssel 'model_size_MB' für Abwärtskompatibilität
+        logging.warning(f"Spezifische Größe für '{model_variant_file}' nicht in 'model_sizes_mb' gefunden. Nutze Fallback 'model_size_MB'.")
         return _safe_float(js.get("model_size_MB"))
     except Exception:
         return None
-
-def _map_variant_to_quant_mode(model_file: str) -> str:
-    if model_file == "model_quant_int8_full.tflite":
-        return "quant-8-full"
-    if model_file == "model_quant_int8.tflite":
-        return "quant-8"
-    if model_file == "model_quant_float16.tflite":
-        return "quant-16"
-    return "no-quant"
 
 def append_summary_row(summary_csv: Path, row: InferenceResult) -> None:
     header = [
@@ -553,6 +555,8 @@ def cleanup_model_binaries(models_dir: Path) -> None:
 # ---------------------------
 # Orchestrierung
 # ---------------------------
+
+# In experiment_pipeline.py
 
 def _run_all_inferences_and_summarize(
     algo: str,
@@ -642,7 +646,10 @@ def _run_all_inferences_and_summarize(
 
         # Modellgröße laden (bleibt pro Run konstant; Quelle: training_config.json)
         training_cfg_json = models_dir / "training_config.json"
-        model_size_mb = read_model_size_mb(training_cfg_json)
+        
+        # --- KORREKTUR HIER: Das fehlende Argument 'inference_variant' übergeben ---
+        model_size_mb = read_model_size_mb(training_cfg_json, inference_variant)
+        # --- ENDE DER KORREKTUR ---
 
         # quant_mode sicher bestimmen: entweder aus gewünschtem Modus oder aus Dateiname abgeleitet
         effective_qmode = qmode if qmode != "auto" else _map_variant_to_quant_mode(inference_variant)

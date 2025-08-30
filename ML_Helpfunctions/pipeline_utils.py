@@ -1205,33 +1205,28 @@ class ModelScalerSaver:
         self._ensure_output_dirs_exist(["Models", "Scalers", "Model_Structures", "Loss_Plots"])
 
 
-
-# In Pipeline_Utils.py -> Klasse ModelScalerSaver
-
     def _export_tflite_variants(self, model, representative_dataset=None) -> dict:
         """
-        Exportiert TFLite-Varianten basierend auf den 'quant_modes' in der Konfiguration.
-        'no-quant' blockiert NICHT länger andere Modi.
+        Exportiert TFLite-Varianten und gibt ein Dictionary mit Pfaden und Größen (in MB) zurück.
         """
         import os, logging
         import tensorflow as tf
 
         results = {}
+        models_dir = self.paths.get("Models")
+        os.makedirs(models_dir, exist_ok=True)
 
         q_modes_raw = self.config.get('quant_modes', [])
         q_modes = set(str(m).lower() for m in (q_modes_raw or []))
-
-        if not q_modes:
-            return results
-
-        # Effektive Modi: alles außer 'no-quant'
         effective = q_modes - {'no-quant'}
-        # Nur wenn wirklich NUR 'no-quant' da ist -> keine Quantisierung
+        
         if not effective:
             return results
 
-        models_dir = self.paths.get("Models")
-        os.makedirs(models_dir, exist_ok=True)
+        def get_size_mb(path):
+            if path and os.path.exists(path):
+                return round(os.path.getsize(path) / (1024 * 1024), 4)
+            return None
 
         is_recurrent_model = any(isinstance(l, (tf.keras.layers.LSTM, tf.keras.layers.GRU)) for l in model.layers)
 
@@ -1249,8 +1244,10 @@ class ModelScalerSaver:
                 path = os.path.join(models_dir, "model_quant_float16.tflite")
                 with open(path, "wb") as f:
                     f.write(tflite_model)
-                results["tflite_float16"] = path
-                logging.info(f"✅ TFLite FLOAT16 gespeichert: {path}")
+                
+                size = get_size_mb(path)
+                results["tflite_float16"] = {"path": path, "size_mb": size}
+                logging.info(f"✅ TFLite FLOAT16 gespeichert: {path} ({size} MB)")
             except Exception as e:
                 logging.error(f"❌ Float16-Konvertierung fehlgeschlagen: {e}", exc_info=True)
 
@@ -1268,8 +1265,10 @@ class ModelScalerSaver:
                 path_dyn = os.path.join(models_dir, "model_quant_int8.tflite")
                 with open(path_dyn, "wb") as f:
                     f.write(tflite_model_dynamic)
-                results["tflite_int8_dynamic"] = path_dyn
-                logging.info(f"✅ TFLite INT8 (dynamic) gespeichert: {path_dyn}")
+
+                size_dyn = get_size_mb(path_dyn)
+                results["tflite_int8_dynamic"] = {"path": path_dyn, "size_mb": size_dyn}
+                logging.info(f"✅ TFLite INT8 (dynamic) gespeichert: {path_dyn} ({size_dyn} MB)")
             except Exception as e:
                 logging.error(f"❌ INT8 (dynamic) fehlgeschlagen: {e}", exc_info=True)
 
@@ -1290,8 +1289,10 @@ class ModelScalerSaver:
                     path_full = os.path.join(models_dir, "model_quant_int8_full.tflite")
                     with open(path_full, "wb") as f:
                         f.write(tflite_model_full)
-                    results["tflite_int8_full"] = path_full
-                    logging.info(f"✅ TFLite INT8 (full) gespeichert: {path_full}")
+                    
+                    size_full = get_size_mb(path_full)
+                    results["tflite_int8_full"] = {"path": path_full, "size_mb": size_full}
+                    logging.info(f"✅ TFLite INT8 (full) gespeichert: {path_full} ({size_full} MB)")
                 except Exception as e:
                     logging.error(f"❌ INT8 (full) fehlgeschlagen: {e}", exc_info=True)
             else:
@@ -1343,9 +1344,10 @@ class ModelScalerSaver:
     
     def save_artifacts(self, model, scaler, **kwargs) -> dict:
         """
-        Hauptmethode zum Speichern. Speichert zuerst das Modell, ermittelt dessen Größe,
+        Hauptmethode zum Speichern. Speichert zuerst das Modell, ermittelt dessen Größe(n),
         fügt sie zur Konfiguration hinzu und speichert dann die Konfigurations-JSON.
         """
+        import os, logging
         print(f"--- 🚀 Starte Speichern der Deployment-Artefakte für Modell: {self.config.get('model_name')} ---")
         results = {}
         
@@ -1367,20 +1369,39 @@ class ModelScalerSaver:
         
         results.update(model_artifacts)
 
-        # Schritt 3: Modellgröße ermitteln und zur Konfiguration hinzufügen
-        model_path = results.get("model_path")
-        if model_path and os.path.exists(model_path):
+        # Schritt 3: Größen ALLER Modellvarianten erfassen
+        size_map: dict[str, float] = {}
+        
+        # Innere Hilfsfunktion zur Größenermittlung
+        def _add_size_if_exists(path_or_dict: any):
+            path = None
+            if isinstance(path_or_dict, dict):
+                path = path_or_dict.get("path")
+            elif isinstance(path_or_dict, str):
+                path = path_or_dict
+            
+            if not path: return
             try:
-                model_size_bytes = os.path.getsize(model_path)
-                model_size_mb = round(model_size_bytes / (1024 * 1024), 4)
-                self.config['model_size_MB'] = model_size_mb
-                logging.info(f"✅ Modellgröße ermittelt: {model_size_mb} MB")
+                if os.path.exists(path):
+                    size_mb = round(os.path.getsize(path) / (1024 * 1024), 4)
+                    size_map[os.path.basename(path)] = size_mb
             except Exception as e:
-                logging.error(f"❌ Fehler beim Ermitteln der Modellgröße: {e}")
-        else:
-            logging.warning("⚠️ Modellpfad nach dem Speichern nicht gefunden. Größe wird nicht in die Konfiguration geschrieben.")
+                logging.warning(f"Größe für '{path}' konnte nicht ermittelt werden: {e}")
 
-        # Schritt 4: Konfiguration als JSON speichern (jetzt mit der Modellgröße)
+        # Hauptmodell und TFLite-Varianten prüfen
+        _add_size_if_exists(results.get("model_path"))
+        _add_size_if_exists(results.get("tflite_float16"))
+        _add_size_if_exists(results.get("tflite_int8_dynamic"))
+        _add_size_if_exists(results.get("tflite_int8_full"))
+        
+        # Neu: alle Größen gesammelt in die config schreiben
+        if size_map:
+            self.config['model_sizes_mb'] = size_map
+            logging.info(f"✅ Modellgrößen (alle Varianten): {size_map}")
+        else:
+            logging.warning("⚠️ Keine Modellgrößen ermittelt.")
+
+        # Schritt 4: Konfiguration als JSON speichern (jetzt mit Größen)
         config_path = os.path.join(self.paths.get("Models"), "training_config.json")
         saved_config_path = self._save_config_as_json(config_path)
         if saved_config_path:

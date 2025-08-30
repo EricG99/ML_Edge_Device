@@ -380,6 +380,7 @@ class BaseInferenceProcessor(ABC):
             self._mqtt_client.stop()
             logging.info("MQTT-Client gestoppt.")
             
+            
     def save_final_results(self, all_predictions: list):
         if not all_predictions:
             logging.warning("Keine Vorhersagen zum Speichern vorhanden.")
@@ -387,13 +388,18 @@ class BaseInferenceProcessor(ABC):
 
         logging.info(f"Speichere {len(all_predictions)} Vorhersagen...")
         try:
+            import numpy as np
+            import pandas as pd
+
             df = pd.DataFrame(all_predictions)
-            valid_rows_mask = df["true_value"].notna() & (df["rolling_forecast"].notna() | df["future_forecast"].notna())
+
+            # gültige Zeilen: true_value vorhanden UND mindestens eine Forecast-Spalte vorhanden
+            has_fc = df["rolling_forecast"].notna() | df["future_forecast"].notna()
+            valid_rows_mask = df["true_value"].notna() & has_fc
             df_valid = df[valid_rows_mask]
 
             if df_valid.empty:
                 logging.warning("Keine gültigen Paare aus wahren Werten und Vorhersagen gefunden. Metriken können nicht berechnet werden.")
-                # Speichere trotzdem eine leere Metrik-Datei, um Folgefehler zu vermeiden
                 pipeline_utils.save_metrics_summary(
                     metrics={"error": "No valid data to calculate metrics"},
                     run_config=self.config,
@@ -402,10 +408,8 @@ class BaseInferenceProcessor(ABC):
                 )
                 return
 
-            horizon = int(self.config.get("horizon", 1))
-            import numpy as np
+            # Forecast-Spalte wählen
             h = int(self.config.get("horizon", 1))
-
             if "rolling_forecast" in df_valid.columns and df_valid["rolling_forecast"].iloc[0] is not None:
                 fc_col = "rolling_forecast"
             elif "future_forecast" in df_valid.columns and df_valid["future_forecast"].iloc[0] is not None:
@@ -414,6 +418,7 @@ class BaseInferenceProcessor(ABC):
                 logging.error("Finale Auswertung: Keine Forecast-Spalte gefunden.")
                 return
 
+            # Hilfs-Funktion: Vektoren auf Länge H bringen (ohne künstliches Wiederholen)
             def _to_fixed(vec, H):
                 arr = np.asarray(vec, dtype=float).reshape(-1)
                 if arr.size >= H:
@@ -422,28 +427,44 @@ class BaseInferenceProcessor(ABC):
                 out[:arr.size] = arr
                 return out
 
+            # PRED (N x H)
             y_pred_list = [v for v in df_valid[fc_col] if v is not None]
             if not y_pred_list:
                 logging.warning("Forecast-Spalte enthält keine gültigen Listen. Metriken können nicht berechnet werden.")
                 return
-            
-            y_pred = np.vstack([_to_fixed(v, h) for v in y_pred_list])
-            y_true_1d = df_valid["true_value"].to_numpy()
-            y_true = np.tile(y_true_1d.reshape(-1, 1), reps=(1, y_pred.shape[1]))
+            y_pred = np.vstack([_to_fixed(v, h) for v in y_pred_list])  # (N, H)
 
-            logging.info(f"Berechne Metriken für {len(y_true)} konsistente Datenpunkte.")
-            metrics = pipeline_utils.evaluate_all_metrics(y_true, y_pred, horizon=horizon)
+            # TRUE korrekt zuordnen: pred(t+h) ↔ true(t+h)
+            y_true_1d = df_valid["true_value"].to_numpy()               # Länge N
+            N = y_pred.shape[0]
+            H = y_pred.shape[1]
+            M = max(N - H, 0)                                           # gemeinsame Länge für alle Horizonte
 
-            # --- KORRIGIERTE VERSION START ---
+            if M <= 0:
+                logging.warning("Zu wenig Punkte für horizon-gerechte Auswertung.")
+                pipeline_utils.save_metrics_summary(
+                    metrics={"error": "Not enough aligned samples for metrics"},
+                    run_config=self.config,
+                    training_config=self.training_config or {},
+                    paths=self.config.get("paths", {})
+                )
+                return
+
+            y_pred_aligned = y_pred[:M, :]                              # (M, H)
+            y_true_cols = [y_true_1d[h_ : h_ + M] for h_ in range(1, H + 1)]
+            y_true_aligned = np.column_stack(y_true_cols)               # (M, H)
+
+            # Metriken berechnen
+            logging.info(f"Berechne Metriken für {len(y_true_aligned)} konsistente Datenpunkte.")
+            metrics = pipeline_utils.evaluate_all_metrics(y_true_aligned, y_pred_aligned, horizon=int(self.config.get("horizon", 1)))
+
+            # Zusatzinfos für JSON
             extra = {}
             if hasattr(self, "_predictions_file_path") and self._predictions_file_path:
                 extra["predictions_file_path"] = self._predictions_file_path
-            
-            # Füge den eindeutigen Modell-Tag hinzu, damit die Hilfsfunktion ihn verwenden kann
             model_tag = self._model_tag()
             if model_tag:
                 extra["model_tag"] = model_tag
-            # --- KORRIGIERTE VERSION ENDE ---
 
             metrics_json_path = pipeline_utils.save_metrics_summary(
                 metrics=metrics,
@@ -462,9 +483,10 @@ class BaseInferenceProcessor(ABC):
                 logging.info(f"📊 ErrorMetrics (aggregiert, CSV): {os.path.abspath(agg_csv)}")
             except Exception:
                 pass
-            logging.info("✅ Finale Ergebnisse erfolgreich gespeichert.")
+
         except Exception as e:
-            logging.error(f"Fehler beim Speichern der finalen Ergebnisse: {e}", exc_info=True)
+            logging.error(f"Fehler beim finalen Speichern der Ergebnisse: {e}", exc_info=True)
+
 
 
     def _run_inference_unified(self, input_data: np.ndarray):
