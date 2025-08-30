@@ -112,7 +112,7 @@ MODEL_BLOBS_WHITELIST = {
     "sklearn": ["model.joblib"],
     "xgb": ["model.json"],
 }
-SUMMARY_CSV_NAME = "Experiment_Summary_Serevr_multiconfig.csv"
+SUMMARY_CSV_NAME = "Experiment_Summary_Server_multiconfig.csv"
 SCALER_FILE_NAMES = ["scaler.joblib", "y_scaler.joblib"]
 
 # ---------------------------
@@ -178,6 +178,9 @@ def algorithm_to_folder(name_or_flag: str) -> str:
 # ---------------------------
 # Konfigurationsaufbau
 # ---------------------------
+# ---------------------------
+# Konfigurationsaufbau
+# ---------------------------
 def build_training_config(algorithm: str, level: str, horizon: int, folder_flag: str, quant_modes: list) -> dict:
     """Mergt allgemeine Pfade/Flags, setzt Horizon, Komplexitäts-Level etc."""
     algo = algorithm.lower()
@@ -186,6 +189,12 @@ def build_training_config(algorithm: str, level: str, horizon: int, folder_flag:
 
     preset_cfg = COMPLEXITY_PRESETS[algo][level]
     merged = _deep_merge(BASE_COMMON, preset_cfg)
+
+    # --- ANPASSUNG FÜR BAUM-MODELLE ---
+    # Baum-basierte Modelle (RF, XGB) benötigen i.d.R. weder Ziel- noch Feature-Skalierung.
+    if algo in ["random_forest", "xgboost", "light_xgboost"]:
+        merged["scale_target"] = False
+        merged["scale_other_features"] = False # <-- DIESE ZEILE HINZUFÜGEN
 
     runtime_cfg = {
         "paths": CONFIG_PATH["paths"],

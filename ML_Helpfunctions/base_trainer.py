@@ -47,17 +47,14 @@ class BaseTrainer(ABC):
         self.scaler = pipeline.scaler
         self.y_scaler = getattr(pipeline, 'y_scaler', None)
 
-        # KORREKTUR: Die Logik zur Bestimmung der Feature-Liste wird vereinfacht.
-        # Die Pipeline ist nun dafür verantwortlich, die korrekte und vollständig geordnete
-        # Feature-Liste bereitzustellen (`pipeline.full_feature_list`).
-        # Der BaseTrainer speichert diese Liste einfach ab.
-        # Die Unterscheidung zwischen DataPipeline3D und 2D ist hier nicht mehr nötig.
         self.features = pipeline.full_feature_list
         logging.info(f"Die zu speichernde Feature-Liste für die Inferenz enthält {len(self.features)} Spalten.")
         logging.debug(f"Feature-Liste: {self.features}")
 
-
-        if self.scaler is None or not self.features:
+        # --- KORRIGIERTE PRÜFUNG ---
+        # Prüft nur auf einen Feature-Scaler, wenn die Skalierung aktiviert war.
+        # Die Feature-Liste muss aber immer vorhanden sein.
+        if (self.config.get('scale_other_features', False) and self.scaler is None) or not self.features:
             logging.critical("CRITICAL: Data pipeline failed to generate scaler or feature list.")
             sys.exit(1)
         
