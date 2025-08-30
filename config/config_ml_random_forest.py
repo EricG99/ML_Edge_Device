@@ -27,7 +27,7 @@ _COMMON = {
 
     # Scaling-Flags (bei Bedarf von eurer FE/Trainer-Logik genutzt)
     "scale_other_features": True,
-    "scale_target": True,
+    "scale_target": False,
     "scaler_type": "robust",  # 'robust' oder 'minmax'
 
     # Sonstige Flags
@@ -106,3 +106,5 @@ random_forest_server = {
     "include_roll_mean": True,
     "include_roll_std": True,
 }
+
+random_forest = random_forest_edge

@@ -7,7 +7,7 @@ __pycache__/
 
 # Virtuelle Umgebungen
 .venv/
-
+3.10/
 .venv_backup/
 
 venv/

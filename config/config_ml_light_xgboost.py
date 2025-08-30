@@ -25,7 +25,7 @@ _COMMON = {
     "target_feature": "Group4-2_S6_VolumetricFlowRate",
 
     "scale_other_features": True,
-    "scale_target": True,
+    "scale_target": False,
     "scaler_type": "robust",
 
     "inference_interval_sec": 1.0,
