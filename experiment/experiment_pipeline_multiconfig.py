@@ -36,30 +36,19 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-try:
-    # bevorzugt: aus dem Paket importieren
-    from ML_Algorithms.pipeline_web_app import (
-        algorithm_to_folder,
-        normalize_quant_label,
-        list_model_variants,
-        summarize_step_csv,
-        discover_predictions_file_from_json,
-        fallback_find_step_csv,
-        get_summary_output_path,
-        run_inference_via_subprocess,
-    )
-except ImportError:
-    # Fallback: falls das Paket nicht gefunden wird (z.B. beim direkten Aufruf aus dem selben Ordner)
-    from pipeline_web_app import (
-        algorithm_to_folder,
-        normalize_quant_label,
-        list_model_variants,
-        summarize_step_csv,
-        discover_predictions_file_from_json,
-        fallback_find_step_csv,
-        get_summary_output_path,
-        run_inference_via_subprocess,
-    )
+
+# bevorzugt: aus dem Paket importieren
+from ML_Algorithms.pipeline_web_app import (
+    algorithm_to_folder,
+    normalize_quant_label,
+    list_model_variants,
+    summarize_step_csv,
+    discover_predictions_file_from_json,
+    fallback_find_step_csv,
+    get_summary_output_path,
+    run_inference_via_subprocess,
+)
+
 
 
 # ---- Projektpfad sicherstellen ----
@@ -142,7 +131,7 @@ MODEL_BLOBS_WHITELIST = {
     "sklearn": ["model.joblib"],
     "xgb": ["model.json"],
 }
-SUMMARY_CSV_NAME = "Experiment_Summary_Server_multiconfig_run.csv"
+SUMMARY_CSV_NAME = "Experiment_Summary_Server_multiconfig_run_merged.csv"
 SCALER_FILE_NAMES = ["scaler.joblib", "y_scaler.joblib"]
 
 # ---------------------------
@@ -205,9 +194,6 @@ def algorithm_to_folder(name_or_flag: str) -> str:
     return name_or_flag.upper() or "MODEL"
 
 
-# ---------------------------
-# Konfigurationsaufbau
-# ---------------------------
 # ---------------------------
 # Konfigurationsaufbau
 # ---------------------------
