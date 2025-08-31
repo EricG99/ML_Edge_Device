@@ -1,3 +1,4 @@
+#pipeline_utils
 import os
 import joblib
 import numpy as np
@@ -768,9 +769,7 @@ def _evaluate_model(
 
 def run_timed_inference(model: object, input_data: np.ndarray) -> tuple[np.ndarray, float]:
     """
-    Führt eine einzelne Inferenz durch und misst die exakte Dauer.
-    Unterstützt Keras-Modelle, scikit-learn-Modelle und TFLite-Interpreter.
-    Achtung: Für INT8-TFLite wird korrekt mit scale/zero_point quantisiert.
+    Führt eine einzelne Inferenz durch, misst die Dauer und behandelt INT8-Dequantisierung.
     """
     start_time = time.perf_counter()
 
@@ -779,22 +778,36 @@ def run_timed_inference(model: object, input_data: np.ndarray) -> tuple[np.ndarr
         output_details = model.get_output_details()
 
         tensor = np.asarray(input_data)
-
         in_det = input_details[0]
+
         if in_det['dtype'] == np.int8:
             scale, zero_point = in_det.get('quantization', (0.0, 0))
-            if scale == 0.0:
-                tensor = tensor.astype(np.int8)
-            else:
+            if scale and scale != 0.0:
                 tensor = np.round(tensor / scale + zero_point).astype(np.int8)
+            else:
+                tensor = tensor.astype(np.float32)
         else:
             tensor = tensor.astype(in_det['dtype'])
 
         model.set_tensor(in_det['index'], tensor)
         model.invoke()
-        prediction = model.get_tensor(output_details[0]['index'])
+
+        out_det = output_details[0]
+        prediction = model.get_tensor(out_det['index'])
+
+        if out_det['dtype'] == np.int8:
+            o_scale, o_zero = out_det.get('quantization', (0.0, 0))
+            if o_scale and o_scale != 0.0:
+                prediction = (prediction.astype(np.float32) - float(o_zero)) * float(o_scale)
+            else:
+                prediction = prediction.astype(np.float32)
+
+        prediction = np.asarray(prediction, dtype=np.float32)
+
     else:
         prediction = model.predict(input_data)
+        if not isinstance(prediction, np.ndarray):
+            prediction = np.asarray(prediction, dtype=np.float32)
 
     duration_ms = (time.perf_counter() - start_time) * 1000.0
     return prediction, duration_ms
@@ -1059,31 +1072,29 @@ def _save_metrics_prediction_gerneral(
     return results_path
 
 
-def create_representative_dataset_generator(dataset: tf.data.Dataset):
+def create_representative_dataset_generator(dataset, config):
     """
-    Erstellt einen Generator für die Representative Dataset Funktion.
-    Erwartet ein Dataset mit Eingabe-Tensoren (oder Tupeln mit Eingabe und Label).
-    Gibt nur die Eingabe-Tensoren zurück.
+    Erstellt einen korrekten Generator für die TFLite INT8-Quantisierung.
     """
     def generator():
-        for data_sample in dataset.take(100):  
-            if isinstance(data_sample, tuple):
-                input_data = data_sample[0]
-            else:
-                input_data = data_sample
-            yield [tf.cast(input_data, tf.float32)]
-
+        if dataset is None or len(dataset) == 0:
+            return
+        
+        # Konvertiere das NumPy-Array in ein tf.data.Dataset
+        tf_dataset = tf.data.Dataset.from_tensor_slices(dataset.astype(np.float32))
+        
+        # Nimm eine Teilmenge der Daten (z.B. 100 Samples) für die Kalibrierung
+        for data_sample in tf_dataset.batch(1).take(100):
+            yield [data_sample] # WICHTIG: Muss eine Liste/ein Tuple sein
+            
     return generator
+
 
 
 def load_model_artifacts_for_inference(config: dict, folder_flag: str):
     """
-    Lädt alle notwendigen Artefakte für die Inferenz.
-    Diese Version prüft die Konfiguration und die Dateiendung, um die korrekte Ladefunktion 
-    für Keras, TFLite, Scikit-learn (joblib) und natives XGBoost (json) zu verwenden.
+    Lädt alle notwendigen Artefakte für die Inferenz und behandelt XGBoost .json korrekt.
     """
-    logging.info("--> [DEBUG] Intelligente Ladefunktion für Artefakte wird verwendet.")
-
     run_id = config.get("load_id") or config.get("run_id")
     if not run_id:
         raise ValueError("Keine 'run_id' oder 'load_id' in der Konfiguration zum Laden von Artefakten gefunden.")
@@ -1092,22 +1103,18 @@ def load_model_artifacts_for_inference(config: dict, folder_flag: str):
     models_path = base_path / "Models"
     scalers_path = base_path / "Scalers"
 
-    # 1. Trainings-Konfiguration laden
     training_config_path = models_path / "training_config.json"
     if not training_config_path.exists():
         raise FileNotFoundError(f"training_config.json nicht gefunden unter: {training_config_path}")
-    
     with open(training_config_path, "r", encoding="utf-8") as f:
         training_config = json.load(f)
     logging.info("✅ Trainings-Konfiguration geladen.")
 
-    # 2. Feature-Liste laden
     features_path = models_path / "features.joblib"
     if not features_path.exists():
         raise FileNotFoundError(f"features.joblib nicht gefunden unter: {features_path}")
     feature_list = joblib.load(features_path)
 
-    # 3. Modell laden (mit Logik für verschiedene Dateitypen)
     model_filename = config.get("model_filename")
     if not model_filename:
         raise ValueError("Kein 'model_filename' in der Konfiguration für die Inferenz gefunden.")
@@ -1122,36 +1129,34 @@ def load_model_artifacts_for_inference(config: dict, folder_flag: str):
     elif model_filename.endswith('.tflite'):
         model = tf.lite.Interpreter(model_path=str(model_path))
         model.allocate_tensors()
-    elif model_filename.endswith('.json'):
-        logging.info(f"Lade natives XGBoost-Modell aus {model_filename}...")
-        model = xgb.XGBRegressor()
-        model.load_model(model_path)
     elif model_filename.endswith(('.joblib', '.pkl')):
         model = joblib.load(model_path)
+    elif model_filename.endswith('.json'):
+        try:
+            import xgboost as xgb
+            model = xgb.XGBRegressor()
+            model.load_model(str(model_path))
+            logging.info(f"✅ XGBoost-Modell aus JSON geladen: {model_path}")
+        except Exception as e:
+            raise RuntimeError(f"Konnte XGBoost-JSON nicht laden: {model_path} -> {e}")
     else:
         raise ValueError(f"Unbekanntes Modellformat für Datei: {model_filename}")
     
-    # 4. Scaler laden (JETZT MIT PRÜFUNG DER KONFIGURATION)
-    scaler = None
-    y_scaler = None
-
-    # Lade Feature-Scaler nur, wenn Skalierung im Training aktiviert war
-    if training_config.get('scale_other_features', True): # Default True für Abwärtskompatibilität
-        logging.info("--> [DEBUG] Skalierung ist laut training_config aktiviert. Versuche scaler.joblib zu laden.")
+    scaler, y_scaler = None, None
+    # Skalierer nur laden, wenn in der Trainings-Config angegeben
+    if training_config.get('scale_other_features', False): # False als Default für unskalierte Modelle
         scaler_path = scalers_path / "scaler.joblib"
         if not scaler_path.exists():
-            raise FileNotFoundError(f"Benötigte Artefakt-Datei wurde nicht gefunden unter: {scaler_path}")
+             raise FileNotFoundError(f"scaler.joblib wurde erwartet (scale_other_features=true), aber nicht gefunden: {scaler_path}")
         scaler = joblib.load(scaler_path)
-    else:
-        logging.info("--> [DEBUG] Skalierung ist laut training_config deaktiviert. Überspringe das Laden von scaler.joblib.")
 
-    # Lade Target-Scaler nur, wenn Skalierung im Training aktiviert war
     if training_config.get('scale_target', False):
         y_scaler_path = scalers_path / "y_scaler.joblib"
         if y_scaler_path.exists():
             y_scaler = joblib.load(y_scaler_path)
 
     return scaler, feature_list, model, training_config, y_scaler
+
 
 class ModelScalerSaver:
     """
@@ -1171,32 +1176,37 @@ class ModelScalerSaver:
         self._ensure_output_dirs_exist(["Models", "Scalers", "Model_Structures", "Loss_Plots"])
 
 
+
     def _export_tflite_variants(self, model, representative_dataset=None) -> dict:
         """
-        Exportiert TFLite-Varianten und gibt ein Dictionary mit Pfaden und Größen (in MB) zurück.
+        Exportiert TFLite-Varianten basierend auf den 'quant_modes' in der Konfiguration.
+        Gibt ein Dict zurück, in dem jede Variante ein Subdict mit 'path' und 'size_mb' enthält.
         """
         import os, logging
         import tensorflow as tf
 
         results = {}
-        models_dir = self.paths.get("Models")
-        os.makedirs(models_dir, exist_ok=True)
 
         q_modes_raw = self.config.get('quant_modes', [])
         q_modes = set(str(m).lower() for m in (q_modes_raw or []))
+        if not q_modes:
+            return results
+
         effective = q_modes - {'no-quant'}
-        
         if not effective:
             return results
 
-        def get_size_mb(path):
-            if path and os.path.exists(path):
-                return round(os.path.getsize(path) / (1024 * 1024), 4)
-            return None
+        models_dir = self.paths.get("Models")
+        os.makedirs(models_dir, exist_ok=True)
+
+        def _size_mb(p: str) -> float | None:
+            try:
+                return round(os.path.getsize(p) / (1024 * 1024), 4) if os.path.exists(p) else None
+            except Exception:
+                return None
 
         is_recurrent_model = any(isinstance(l, (tf.keras.layers.LSTM, tf.keras.layers.GRU)) for l in model.layers)
 
-        # --- FLOAT16 ---
         if 'quant-16' in effective:
             try:
                 conv = tf.lite.TFLiteConverter.from_keras_model(model)
@@ -1210,17 +1220,13 @@ class ModelScalerSaver:
                 path = os.path.join(models_dir, "model_quant_float16.tflite")
                 with open(path, "wb") as f:
                     f.write(tflite_model)
-                
-                size = get_size_mb(path)
-                results["tflite_float16"] = {"path": path, "size_mb": size}
-                logging.info(f"✅ TFLite FLOAT16 gespeichert: {path} ({size} MB)")
+                results["tflite_float16"] = {"path": path, "size_mb": _size_mb(path)}
+                logging.info(f"✅ TFLite FLOAT16 gespeichert: {path} ({results['tflite_float16']['size_mb']} MB)")
             except Exception as e:
                 logging.error(f"❌ Float16-Konvertierung fehlgeschlagen: {e}", exc_info=True)
 
-        # --- INT8 (dynamic + optional full) ---
         if 'quant-8' in effective:
-            # dynamic INT8
-            try:
+            try: # Dynamic INT8
                 conv = tf.lite.TFLiteConverter.from_keras_model(model)
                 conv.optimizations = [tf.lite.Optimize.DEFAULT]
                 if is_recurrent_model:
@@ -1231,22 +1237,18 @@ class ModelScalerSaver:
                 path_dyn = os.path.join(models_dir, "model_quant_int8.tflite")
                 with open(path_dyn, "wb") as f:
                     f.write(tflite_model_dynamic)
-
-                size_dyn = get_size_mb(path_dyn)
-                results["tflite_int8_dynamic"] = {"path": path_dyn, "size_mb": size_dyn}
-                logging.info(f"✅ TFLite INT8 (dynamic) gespeichert: {path_dyn} ({size_dyn} MB)")
+                results["tflite_int8_dynamic"] = {"path": path_dyn, "size_mb": _size_mb(path_dyn)}
+                logging.info(f"✅ TFLite INT8 (dynamic) gespeichert: {path_dyn} ({results['tflite_int8_dynamic']['size_mb']} MB)")
             except Exception as e:
                 logging.error(f"❌ INT8 (dynamic) fehlgeschlagen: {e}", exc_info=True)
 
-            # full-INT8 nur mit representative dataset
-            if representative_dataset is not None:
+            if representative_dataset: # Full INT8
                 try:
                     conv = tf.lite.TFLiteConverter.from_keras_model(model)
                     conv.optimizations = [tf.lite.Optimize.DEFAULT]
                     conv.representative_dataset = representative_dataset
                     conv.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS_INT8]
                     if is_recurrent_model:
-                        logging.info("LSTM/GRU erkannt – zusätzlich SELECT_TF_OPS für INT8 (full).")
                         conv.target_spec.supported_ops.append(tf.lite.OpsSet.SELECT_TF_OPS)
                         conv._experimental_lower_tensor_list_ops = False
                     conv.inference_input_type = tf.int8
@@ -1255,18 +1257,11 @@ class ModelScalerSaver:
                     path_full = os.path.join(models_dir, "model_quant_int8_full.tflite")
                     with open(path_full, "wb") as f:
                         f.write(tflite_model_full)
-                    
-                    size_full = get_size_mb(path_full)
-                    results["tflite_int8_full"] = {"path": path_full, "size_mb": size_full}
-                    logging.info(f"✅ TFLite INT8 (full) gespeichert: {path_full} ({size_full} MB)")
+                    results["tflite_int8_full"] = {"path": path_full, "size_mb": _size_mb(path_full)}
+                    logging.info(f"✅ TFLite INT8 (full) gespeichert: {path_full} ({results['tflite_int8_full']['size_mb']} MB)")
                 except Exception as e:
                     logging.error(f"❌ INT8 (full) fehlgeschlagen: {e}", exc_info=True)
-            else:
-                logging.info("Kein representative_dataset → INT8 (full) wird übersprungen.")
-
         return results
-
-
 
     def _save_config_as_json(self, output_path: str):
         """Speichert die Konfiguration als JSON-Datei."""
@@ -1308,20 +1303,36 @@ class ModelScalerSaver:
         
         return None
     
+    def _save_scaler(self, scaler) -> dict:
+        """
+        Speichert den Feature-Scaler, wenn 'scale_other_features' aktiv ist.
+        """
+        if self.config.get("scale_other_features", True) and scaler is not None:
+            try:
+                path = os.path.join(self.paths.get("Scalers"), "scaler.joblib")
+                os.makedirs(self.paths.get("Scalers"), exist_ok=True)
+                joblib.dump(scaler, path)
+                print(f"✅ Skalierer gespeichert unter: {path}")
+                return {"scaler_path": path}
+            except Exception as e:
+                print(f"⚠️ Fehler beim Speichern des Skalierers: {e}", exc_info=True)
+        return {}
+
+
     def save_artifacts(self, model, scaler, **kwargs) -> dict:
         """
-        Hauptmethode zum Speichern. Speichert zuerst das Modell, ermittelt dessen Größe(n),
-        fügt sie zur Konfiguration hinzu und speichert dann die Konfigurations-JSON.
+        Speichert Modell/Scaler/Artefakte und schreibt Größen ALLER Varianten in die Config:
+        - self.config['model_size_MB'] (Hauptdatei, Backwards-Compat)
+        - self.config['model_sizes_mb'] = {<Dateiname>: <MB>, ...}
+        Außerdem: training_config.json wird IMMER geschrieben.
         """
-        import os, logging
         print(f"--- 🚀 Starte Speichern der Deployment-Artefakte für Modell: {self.config.get('model_name')} ---")
         results = {}
-        
-        # Schritt 1: Scaler speichern
+
+        # 1) Scaler speichern (Feature-Scaler)
         results.update(self._save_scaler(scaler))
 
-        # Schritt 2: Modell-spezifische Artefakte speichern
-        model_artifacts = {}
+        # 2) Modell-Artefakte
         if isinstance(model, tf.keras.Model):
             model_artifacts = self._save_keras_artifacts(model, **kwargs)
         elif isinstance(model, xgb.XGBRegressor):
@@ -1332,50 +1343,61 @@ class ModelScalerSaver:
             model_artifacts = self._save_lightgbm_model(model)
         else:
             print(f"⚠️ Warnung: Kein spezifischer Speicherpfad für Modelltyp {type(model).__name__} implementiert.")
-        
+            model_artifacts = {}
         results.update(model_artifacts)
 
-        # Schritt 3: Größen ALLER Modellvarianten erfassen
+        # 3) Größen erfassen
+        import os
         size_map: dict[str, float] = {}
-        
-        # Innere Hilfsfunktion zur Größenermittlung
-        def _add_size_if_exists(path_or_dict: any):
-            path = None
-            if isinstance(path_or_dict, dict):
-                path = path_or_dict.get("path")
-            elif isinstance(path_or_dict, str):
-                path = path_or_dict
-            
-            if not path: return
-            try:
-                if os.path.exists(path):
-                    size_mb = round(os.path.getsize(path) / (1024 * 1024), 4)
-                    size_map[os.path.basename(path)] = size_mb
-            except Exception as e:
-                logging.warning(f"Größe für '{path}' konnte nicht ermittelt werden: {e}")
 
-        # Hauptmodell und TFLite-Varianten prüfen
-        _add_size_if_exists(results.get("model_path"))
-        _add_size_if_exists(results.get("tflite_float16"))
-        _add_size_if_exists(results.get("tflite_int8_dynamic"))
-        _add_size_if_exists(results.get("tflite_int8_full"))
-        
-        # Neu: alle Größen gesammelt in die config schreiben
+        def _add_size(path_like) -> None:
+            if not path_like:
+                return
+            if isinstance(path_like, dict):
+                path, size = path_like.get("path"), path_like.get("size_mb")
+            else:
+                path, size = str(path_like), None
+            if not path:
+                return
+            try:
+                if size is None and os.path.exists(path):
+                    size = round(os.path.getsize(path) / (1024 * 1024), 4)
+                if size is not None:
+                    size_map[os.path.basename(path)] = float(size)
+            except Exception:
+                pass
+
+        _add_size(results.get("model_path"))
+        _add_size(results.get("tflite_float16"))
+        _add_size(results.get("tflite_int8_dynamic"))
+        _add_size(results.get("tflite_int8_full"))
+
+        # Backwards-Compat: Hauptmodellgröße
+        main_path = results.get("model_path")
+        if isinstance(main_path, dict):
+            self.config['model_size_MB'] = main_path.get("size_mb")
+        elif isinstance(main_path, str) and os.path.exists(main_path):
+            self.config['model_size_MB'] = round(os.path.getsize(main_path) / (1024 * 1024), 4)
+        else:
+            self.config['model_size_MB'] = None
+
+        if self.config.get('model_size_MB') is not None:
+            logging.info(f"✅ Modellgröße (Hauptdatei): {self.config['model_size_MB']} MB")
+
         if size_map:
             self.config['model_sizes_mb'] = size_map
             logging.info(f"✅ Modellgrößen (alle Varianten): {size_map}")
         else:
             logging.warning("⚠️ Keine Modellgrößen ermittelt.")
 
-        # Schritt 4: Konfiguration als JSON speichern (jetzt mit Größen)
+        # 4) training_config.json immer speichern
         config_path = os.path.join(self.paths.get("Models"), "training_config.json")
         saved_config_path = self._save_config_as_json(config_path)
         if saved_config_path:
             results["training_config_path"] = saved_config_path
-        
-        # Schritt 5: Weitere Artefakte speichern
+
+        # 5) optionale Edge-Artefakte
         results.update(self._save_edge_artifacts())
-        
         return results
 
     def _ensure_output_dirs_exist(self, dir_keys: list):
@@ -1388,17 +1410,27 @@ class ModelScalerSaver:
         except Exception as e:
             print(f"❌ Fehler beim Erstellen von Verzeichnissen: {e}")
 
-    def _save_scaler(self, scaler) -> dict:
-        """Speichert das Skalierer-Objekt, falls Skalierung aktiviert ist."""
-        if (self.config.get("scale_target", False)) and scaler:
+    def save_scaler(scaler, config: dict, paths: dict) -> str:
+        """
+        Speichert den Feature-Scaler, wenn laut Konfiguration skaliert wurde.
+        Wichtig: immer als Scalers/scaler.joblib speichern, da die Inferenz diesen Pfad erwartet.
+        """
+        scaler_path = None
+        should_scale = bool(config.get("scale_other_features", True))  # <- Flag korrigiert
+
+        if should_scale and scaler is not None:
             try:
-                path = os.path.join(self.paths.get("Scalers"), "scaler.joblib")
-                joblib.dump(scaler, path)
-                print(f"✅ Skalierer gespeichert unter: {path}")
-                return {"scaler_path": path}
+                scaler_dir = paths.get("Scalers")
+                os.makedirs(scaler_dir, exist_ok=True)
+                scaler_path = os.path.join(scaler_dir, "scaler.joblib")  # <- fixer Name
+                joblib.dump(scaler, scaler_path)
+                print(f"✅ Skalierer gespeichert unter: {scaler_path}")
             except Exception as e:
-                print(f"⚠️ Fehler beim Speichern des Skalierers: {e}", exc_info=True)
-        return {}
+                print(f"⚠️ Fehler beim Speichern des Skalierers: {e}")
+                print(traceback.format_exc())
+        elif should_scale and scaler is None:
+            print("⚠️ Warnung: Skalierung war konfiguriert, aber es wurde kein Skalierer-Objekt übergeben.")
+        return scaler_path
 
     def _save_keras_artifacts(self, model: tf.keras.Model, **kwargs) -> dict:
         """Speichert alle Artefakte für ein Keras-Modell (inkl. TFLite-Varianten)."""

@@ -1,3 +1,4 @@
+
 #!/usr/bin/env python3
 from __future__ import annotations
 """
@@ -5,7 +6,7 @@ Experiment Pipeline
 -------------------
 
 Zweck
-  * Führt automatisiert Trainings- und Inferenzläufe über Modelle, Komplexitätsstufen (simple/medium/high),
+  * Führt automatisiert Trainings- und Inferenzläufe über Modelle, Komplexitätsstufen (simple/medium/high)A,
     einen Horizon-Grid und (falls zutreffend) quantisierte Modellvarianten aus.
   * Nutzt fest integrierte Hyperparameter-Sets je nach Komplexitätsstufe.
   * Startet das initiale Training programmatisch, sammelt die erzeugte run_id
@@ -90,7 +91,7 @@ COMPLEXITY_PRESETS = {
 # --- Basis-Defaults, die für alle Modelle gelten ---
 BASE_COMMON = {
     "dataset": "mqtt_data_filtered.csv",
-    "train_fraction": 0.8,
+    "train_fraction": 0.85,
     "base_features": ["Group4-2_S6_VolumetricFlowRate", "Group4-2_S6_MassFlowRate"],
     "time_features": [],
     "target_feature": "Group4-2_S6_VolumetricFlowRate",
@@ -101,8 +102,8 @@ BASE_COMMON = {
     "enable_edge": True,
     "validation_fraction": 0.2,
     "early_stopping_patience": 10,
-    "rolling_window_size": 2, # Fest auf 10 gesetzt
-    "lags": 2, # Fest auf 20 gesetzt
+    "rolling_window_size": 10, # Fest auf 10 gesetzt
+    "lags": 20, # Fest auf 20 gesetzt
 }
 
 # Modell-Dateien, die als "groß" gelten und nach der Inferenz entfernt werden dürfen
@@ -112,7 +113,7 @@ MODEL_BLOBS_WHITELIST = {
     "sklearn": ["model.joblib"],
     "xgb": ["model.json"],
 }
-SUMMARY_CSV_NAME = "Experiment_Summary_Server.csv"
+SUMMARY_CSV_NAME = "Experiment_Summary_Server_multiconfig_run.csv"
 SCALER_FILE_NAMES = ["scaler.joblib", "y_scaler.joblib"]
 
 # ---------------------------
@@ -178,6 +179,9 @@ def algorithm_to_folder(name_or_flag: str) -> str:
 # ---------------------------
 # Konfigurationsaufbau
 # ---------------------------
+# ---------------------------
+# Konfigurationsaufbau
+# ---------------------------
 def build_training_config(algorithm: str, level: str, horizon: int, folder_flag: str, quant_modes: list) -> dict:
     """Mergt allgemeine Pfade/Flags, setzt Horizon, Komplexitäts-Level etc."""
     algo = algorithm.lower()
@@ -186,6 +190,12 @@ def build_training_config(algorithm: str, level: str, horizon: int, folder_flag:
 
     preset_cfg = COMPLEXITY_PRESETS[algo][level]
     merged = _deep_merge(BASE_COMMON, preset_cfg)
+
+    # --- ANPASSUNG FÜR BAUM-MODELLE ---
+    # Baum-basierte Modelle (RF, XGB) benötigen i.d.R. weder Ziel- noch Feature-Skalierung.
+    if algo in ["random_forest", "xgboost", "light_xgboost"]:
+        merged["scale_target"] = False
+        merged["scale_other_features"] = False # <-- DIESE ZEILE HINZUFÜGEN
 
     runtime_cfg = {
         "paths": CONFIG_PATH["paths"],
@@ -225,7 +235,7 @@ def run_training(algorithm: str, config: dict, folder_flag: str) -> Tuple[str, P
             with open(training_cfg_json, "w", encoding="utf-8") as f:
                 json.dump(js, f, indent=2, ensure_ascii=False)
     except Exception as e:
-        print(f"⚠️ Konnte training_time_s nicht schreiben: {e}")
+        print(f"?? Konnte training_time_s nicht schreiben: {e}")
 
     run_id = str(config.get("run_id"))
     models_dir = Path(config["paths"]["Models"])
@@ -252,7 +262,7 @@ def run_inference_via_subprocess(
     try:
         app_path = _import_pipeline_web_app_path()
     except FileNotFoundError as e:
-        print(f"❌ {e}")
+        print(f"? {e}")
         return 2
 
     cmd = [
@@ -318,13 +328,28 @@ def summarize_step_csv(step_csv: Path) -> Tuple[Optional[float], Optional[float]
     except Exception:
         return None, None, None, None
 
-def read_model_size_mb(training_config_json: Path) -> Optional[float]:
-    if not training_config_json.exists(): return None
+def read_model_size_mb(training_config_json: Path, model_variant_file: str) -> Optional[float]:
+    """
+    Liest die spezifische Modellgröße (MB) aus training_config.json.
+    Bevorzugt 'model_sizes_mb[<Dateiname>]', fällt zurück auf 'model_size_MB'.
+    """
+    if not training_config_json.exists():
+        return None
     try:
+        import os, json
         with open(training_config_json, "r", encoding="utf-8") as f:
-            return _safe_float(json.load(f).get("model_size_MB"))
+            js = json.load(f)
+
+        sizes_dict = js.get("model_sizes_mb") or js.get("model_sizes_MB") or {}
+        if isinstance(sizes_dict, dict):
+            key = os.path.basename(model_variant_file)
+            if key in sizes_dict:
+                return _safe_float(sizes_dict[key])
+        
+        return _safe_float(js.get("model_size_MB"))
     except Exception:
         return None
+
 
 def _map_variant_to_quant_mode(model_file: str) -> str:
     if "int8_full" in model_file: return "quant-8-full"
@@ -367,9 +392,9 @@ def cleanup_model_binaries_and_scalers(models_dir: Path, scalers_dir: Path) -> N
     for fp in sorted(to_delete):
         try:
             fp.unlink()
-            print(f"🧹 Gelöscht: {fp}")
+            print(f"?? Gelöscht: {fp}")
         except Exception as e:
-            print(f"⚠️ Fehler beim Löschen von {fp}: {e}")
+            print(f"?? Fehler beim Löschen von {fp}: {e}")
 
 
 # ---------------------------
@@ -388,10 +413,10 @@ def _run_all_inferences_and_summarize(
     algo: str, cfg: dict, run_id: str, models_dir: Path, inference_steps: int,
     loading_strategy: str, interval_sec: float, summary_csv: Path, delete_models: bool
 ) -> None:
-    """Führt für jeden gewünschten/verfügbaren Quantisierungsmodus eine Inferenz aus."""
+    """Führt für jeden gewünschten/verfügbaren Quantisierungsmodus eine Inferenz aus und schreibt die Summary-Zeilen."""
     variants_present = set(list_model_variants(models_dir))
     if not variants_present:
-        print("⚠️ Kein Modell gefunden – Inferenz für diesen Lauf übersprungen.")
+        print("?? Kein Modell gefunden – Inferenz für diesen Lauf übersprungen.")
         return
 
     modes_to_run = cfg.get("quant_modes", ["no-quant"])
@@ -402,27 +427,44 @@ def _run_all_inferences_and_summarize(
         if chosen and (qmode, chosen) not in queue:
             queue.append((qmode, chosen))
         else:
-            print(f"ℹ️ Überspringe Modus '{qmode}': keine passende Datei gefunden (gesucht: {candidates})")
+            print(f"?? Überspringe Modus '{qmode}': keine passende Datei gefunden (gesucht: {candidates})")
     
-    if not queue: # Fallback, falls kein Modus passt
+    if not queue:
         best_available = next((f for f in ["model.keras", "model.joblib", "model.json"] if f in variants_present), None)
-        if best_available: queue.append(("no-quant", best_available))
+        if best_available:
+            queue.append(("no-quant", best_available))
 
     for qmode, model_file in queue:
-        print(f"\n✅ Starte Inferenz für Modus '{qmode}' mit Datei '{model_file}'.")
+        print(f"\n? Starte Inferenz für Modus '{qmode}' mit Datei '{model_file}'.")
         rc = run_inference_via_subprocess(
             algorithm=algo, run_id=run_id, model_filename=model_file,
             inference_steps=inference_steps, loading_strategy=loading_strategy, interval_sec=interval_sec
         )
         if rc != 0:
-            print(f"⚠️ Inferenz-Subprozess mit Fehlercode {rc} für {model_file} fehlgeschlagen.")
+            print(f"?? Inferenz-Subprozess mit Fehlercode {rc} für {model_file} fehlgeschlagen.")
+            res = InferenceResult(
+                algorithm=algo, level=cfg.get("level_used", "unknown"),
+                lags=int(cfg.get("lags", 0)), horizon=int(cfg.get("horizon", 0)),
+                model_variant=f"FAILED: {model_file}", quant_mode=qmode,
+                avg_inference_time_ms=None, avg_total_time_ms=None,
+                avg_cpu_percent=None, avg_ram_percent=None,
+                model_size_mb=None, run_id=run_id,
+            )
+            append_summary_row(summary_csv, res)
             continue
 
         err_dir = Path(cfg["paths"]["Error_Metrics"])
         pred_dir = Path(cfg["paths"]["Prediction_Data"])
         step_csv = _discover_predictions_file_from_json(run_id, err_dir) or _fallback_find_step_csv(run_id, pred_dir)
 
-        avg_inf_ms, avg_total_ms, avg_cpu, avg_ram = summarize_step_csv(step_csv) if step_csv else (None,)*4
+        avg_inf_ms = avg_total_ms = avg_cpu = avg_ram = None
+        if step_csv and step_csv.exists():
+            avg_inf_ms, avg_total_ms, avg_cpu, avg_ram = summarize_step_csv(step_csv)
+        else:
+            print("⚠️ StepPredictions CSV nicht gefunden – Zusammenfassung unvollständig.")
+
+        training_cfg_json = models_dir / "training_config.json"
+        model_size_mb = read_model_size_mb(training_cfg_json, model_file)
 
         res = InferenceResult(
             algorithm=algo, level=cfg.get("level_used", "unknown"),
@@ -430,10 +472,10 @@ def _run_all_inferences_and_summarize(
             model_variant=model_file, quant_mode=_map_variant_to_quant_mode(model_file),
             avg_inference_time_ms=avg_inf_ms, avg_total_time_ms=avg_total_ms,
             avg_cpu_percent=avg_cpu, avg_ram_percent=avg_ram,
-            model_size_mb=read_model_size_mb(models_dir / "training_config.json"), run_id=run_id,
+            model_size_mb=model_size_mb, run_id=run_id,
         )
         append_summary_row(summary_csv, res)
-        print(f"📈 Zusammenfassung für {res.quant_mode} ({model_file}) in CSV geschrieben.")
+        print(f"?? Zusammenfassung für {res.quant_mode} ({model_file}) in CSV geschrieben.")
 
     if delete_models:
         cleanup_model_binaries_and_scalers(models_dir, Path(cfg["paths"]["Scalers"]))
@@ -450,11 +492,10 @@ def run_experiments(
     runs_done = 0
     levels = ["simple", "medium", "high"]
 
-
     for algorithm in algorithms:
         algo = algorithm.lower()
         if algo not in TRAINER_MAP:
-            print(f"⚠️ Unbekannter Algorithmus '{algorithm}' wird übersprungen.")
+            print(f"?? Unbekannter Algorithmus '{algorithm}' wird übersprungen.")
             continue
 
         quant_modes_for_algo = ["no-quant", "quant-16", "quant-8"] if algo in ["cnn1d", "lstm"] else ["no-quant"]
@@ -472,7 +513,7 @@ def run_experiments(
 
                 print(f"\n=== LAUF {runs_done + 1} | Train: {algo} | Level: {level} | Horizon: {horizon} ===")
                 run_id, models_dir = run_training(algo, cfg, folder_flag)
-                print(f"✅ Training abgeschlossen. run_id={run_id}")
+                print(f"? Training abgeschlossen. run_id={run_id}")
 
                 _run_all_inferences_and_summarize(
                     algo, cfg, run_id, models_dir,

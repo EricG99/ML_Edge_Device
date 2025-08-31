@@ -492,22 +492,45 @@ class BaseInferenceProcessor(ABC):
     def _run_inference_unified(self, input_data: np.ndarray):
         start = time.perf_counter()
         if hasattr(self.model, "get_input_details"):
-            # --- KORRIGIERTE VERSION START ---
-            # Der Interpreter wird nun VOR der Schleife alloziert.
-            # Hier erfolgen nur noch die Schritte pro Inferenz.
             interpreter = self.model
             input_details = interpreter.get_input_details()
             output_details = interpreter.get_output_details()
             
-            # 1. Daten in den Input-Tensor schreiben
-            interpreter.set_tensor(input_details[0]["index"], input_data.astype(np.float32))
+            # --- KORREKTUR: Datentyp-Prüfung und manuelle Quantisierung der Eingabe ---
+            input_tensor_index = input_details[0]["index"]
+            expected_dtype = input_details[0]["dtype"]
             
-            # 2. Inferenz ausführen
+            input_tensor = np.asarray(input_data)
+
+            if expected_dtype == np.int8:
+                # Quantisierungsparameter aus dem Modell extrahieren
+                quantization_params = input_details[0].get('quantization', (1.0, 0))
+                scale, zero_point = quantization_params
+                
+                # Manuelle Quantisierung der Float32-Eingabedaten nach INT8
+                if scale != 0.0:
+                    input_tensor = (input_tensor / scale + zero_point).astype(np.int8)
+                else:
+                    input_tensor = input_tensor.astype(np.int8) # Fallback
+                
+                interpreter.set_tensor(input_tensor_index, input_tensor)
+            else:
+                # Standardfall für FLOAT32 oder andere Typen
+                interpreter.set_tensor(input_tensor_index, input_tensor.astype(expected_dtype))
+            # --- ENDE EINGABE-KORREKTUR ---
+            
             interpreter.invoke()
             
-            # 3. Ergebnis aus dem Output-Tensor lesen
             pred = interpreter.get_tensor(output_details[0]["index"])
-            # --- KORRIGIERTE VERSION ENDE ---
+
+            # --- KORREKTUR: De-Quantisierung der Ausgabe ---
+            # Wenn der Output ebenfalls quantisiert ist, muss er zurück in float konvertiert werden
+            if output_details[0]['dtype'] == np.int8:
+                quantization_params = output_details[0].get('quantization', (1.0, 0))
+                scale, zero_point = quantization_params
+                if scale != 0.0:
+                    pred = (pred.astype(np.float32) - zero_point) * scale
+            # --- ENDE AUSGABE-KORREKTUR ---
 
         elif hasattr(self.model, "predict"):
             try:

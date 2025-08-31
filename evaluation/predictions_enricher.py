@@ -438,7 +438,15 @@ def process_run_for_N(
         "true_value_series": "",
     }
 
-    # Predictions CSV
+    # --- NEU: Per-Algorithmus-Shift-Override (nur RF minus 1 Schritt) ---
+    algo_name = str(row.get("algorithm", "")).lower()
+    SHIFT_MODE_BY_ALGO = {
+        "random_forest": "t_plus_h_minus_1",
+    }
+    row_shift_mode = SHIFT_MODE_BY_ALGO.get(algo_name, shift_mode)
+    # ---------------------------------------------------------------------
+
+    # Predictions CSV finden
     p = resolve_pred_csv_path(row, base)
     if not p:
         if include_error_json:
@@ -455,6 +463,7 @@ def process_run_for_N(
     if "true_value" in dfp.columns:
         out["true_value_series"] = _series_to_tuple_string(dfp["true_value"])
 
+    # verfügbare pred_h* Spalten
     avail = sorted(int(m.group(1)) for c in dfp.columns if (m := re.match(r"pred_h(\d+)$", c)))
     if not avail:
         if include_error_json:
@@ -478,7 +487,10 @@ def process_run_for_N(
         out[f"pred_h{h}_series"] = _series_to_tuple_string(dfp[col])
 
         y_pred_h = pd.to_numeric(dfp[col], errors="coerce")
-        y_true_h = pd.to_numeric(_true_for_h(y_true_all, h, shift_mode), errors="coerce")
+        # --- GEÄNDERT: Shift mit row_shift_mode statt global shift_mode ---
+        y_true_h = pd.to_numeric(_true_for_h(y_true_all, h, row_shift_mode), errors="coerce")
+        # ------------------------------------------------------------------
+
         mask = y_pred_h.notna() & y_true_h.notna()
         y = y_true_h[mask].to_numpy()
         yhat = y_pred_h[mask].to_numpy()
@@ -512,7 +524,9 @@ def process_run_for_N(
     target_col = f"pred_h{int(N)}"
     if target_col in dfp.columns:
         y_pred_N = pd.to_numeric(dfp[target_col], errors="coerce")
-        y_true_N = pd.to_numeric(_true_for_h(y_true_all, int(N), shift_mode), errors="coerce")
+        # --- GEÄNDERT: Shift mit row_shift_mode statt global shift_mode ---
+        y_true_N = pd.to_numeric(_true_for_h(y_true_all, int(N), row_shift_mode), errors="coerce")
+        # ------------------------------------------------------------------
         maskN = y_pred_N.notna() & y_true_N.notna()
         yN = y_true_N[maskN].to_numpy()
         yhatN = y_pred_N[maskN].to_numpy()
@@ -521,8 +535,8 @@ def process_run_for_N(
 
     if include_error_json:
         attach_error_metrics_fields(out, row, json_index)
-
     return out
+
 
 # --------------------- Pipeline (mit Index) -------------------------------
 def enrich_summary(
