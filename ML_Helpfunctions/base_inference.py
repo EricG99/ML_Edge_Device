@@ -111,91 +111,66 @@ class BaseInferenceProcessor(ABC):
         if not prediction_entry:
             return None
 
-        if not hasattr(self, "_predictions_file_path"):
-            self._predictions_file_path = None
+        # Metadaten
+        date = prediction_entry.get("datetime")
+        true_value = prediction_entry.get("true_value")
+        forecast = prediction_entry.get("future_forecast") or []
+        inference_time_s = prediction_entry.get("inference_time_s")
+        breakdown = prediction_entry.get("breakdown") or {}
 
-        # --- NEU: Eindeutigen Dateinamen pro Modellvariante erstellen (nur beim ersten Aufruf) ---
+        # Zielpfad bestimmen / cachen
         path_to_use = output_path
-        if path_to_use is None and self._predictions_file_path is None:
+        if not path_to_use:
             try:
-                paths = self.config.get("paths", {})
-                pred_dir = paths.get("Prediction_Data", ".")
-                os.makedirs(pred_dir, exist_ok=True) # Sicherstellen, dass der Ordner existiert
+                paths = self.config.get("paths", {}) or {}
+                pred_dir = paths.get("Prediction_Data")
+                if not pred_dir:
+                    base = paths.get("run_dir") or paths.get("output") or "."
+                    pred_dir = os.path.join(base, "Prediction_Data")
+                os.makedirs(pred_dir, exist_ok=True)
 
-                run_id = self.config.get("run_id", "unknown_run")
-                algo = getattr(self, "folder_flag", "algo")
-                
-                # Verwende einen stabilen Namen für die Datenquelle
-                data_name = os.path.splitext(os.path.basename(self.config.get("dataset", "live_data")))[0]
-                
-                model_tag = self._model_tag()
-                
-                # Dateinamen zusammensetzen
+                run_id = self.config.get("run_id", "run")
+                algo = self.config.get("model_name") or self.config.get("algorithm") or "model"
+                data_name = self.config.get("dataset") or self.config.get("data_name") or "data"
+
+                def _safe_tag():
+                    try:
+                        return self._model_tag()
+                    except Exception:
+                        return "error"
+
+                model_tag = _safe_tag()
                 filename = f"StepPredictions_{run_id}_{algo}_{data_name}"
                 if model_tag:
                     filename += f"__{model_tag}"
                 filename += ".csv"
-                
-                generated_path = os.path.join(pred_dir, filename)
-                self._predictions_file_path = generated_path
-                path_to_use = self._predictions_file_path
-                logging.info(f"Ergebnis-CSV für diesen Lauf: {generated_path}")
 
+                path_to_use = os.path.join(pred_dir, filename)
+                self._predictions_file_path = path_to_use
+                logging.info(f"Ergebnis-CSV für diesen Lauf: {path_to_use}")
             except Exception as e:
-                logging.error(f"Fehler bei der Erstellung des eindeutigen Dateipfads: {e}")
-                # Fallback, um einen Absturz zu verhindern
-                path_to_use = self._predictions_file_path or None
+                logging.error(f"Konnte Pfad für Step-CSV nicht bestimmen: {e}", exc_info=True)
+                return None
 
-        elif path_to_use is None:
-            path_to_use = self._predictions_file_path
-        # --- ENDE NEU ---
-
-        date = prediction_entry.get("datetime")
-        true_value = prediction_entry.get("true_value")
-
-        # RF-spezifisches Alignment (Logik bleibt unverändert)
-        future_list = (
-            prediction_entry.get("future_forecast")
-            or prediction_entry.get("rolling_forecast")
-            or []
-        )
-        pred_t = prediction_entry.get("prediction", None)
-        horizon = int(self.config.get("horizon", 1))
-        folder_lower = str(getattr(self, "folder_flag", "")).lower()
-        is_rf = folder_lower in ("random_forest", "random forest", "rf")
-
-        if is_rf:
-            aligned_forecast = []
-            if horizon >= 1:
-                if pred_t is not None:
-                    aligned_forecast.append(pred_t)
-                else:
-                    aligned_forecast.append(future_list[0] if future_list else None)
-            if horizon > 1:
-                aligned_forecast.extend(list(future_list[:max(0, horizon - 1)]))
-            forecast = aligned_forecast
-        else:
-            forecast = list(future_list[:horizon]) if horizon > 0 else list(future_list)
-
-        inference_time_s = prediction_entry.get("inference_time_s", None)
-        breakdown = prediction_entry.get("time_breakdown", None)
-
-        # Der Aufruf der Hilfsfunktion schreibt nun in den eindeutigen Pfad
-        final_path = pipeline_utils.append_prediction_step(
-            config=self.config,
-            date=date,
-            true_value=true_value,
-            forecast=forecast,
-            inference_time_s=inference_time_s,
-            total_time_s=total_time_s,
-            cpu_percent=cpu_percent,
-            ram_mb=ram_mb,
-            ram_percent=ram_percent,
-            breakdown=breakdown,
-            output_path=path_to_use
-        )
-
-        return final_path
+        # Tatsächliches Anhängen der Zeile
+        try:
+            final_path = pipeline_utils.append_prediction_step(
+                config=self.config,
+                date=date,
+                true_value=true_value,
+                forecast=forecast,
+                inference_time_s=inference_time_s,
+                total_time_s=total_time_s,
+                cpu_percent=cpu_percent,
+                ram_mb=ram_mb,
+                ram_percent=ram_percent,   # CSV behält 'ram_percent' als Spalte
+                breakdown=breakdown,
+                output_path=path_to_use
+            )
+            return final_path
+        except Exception as e:
+            logging.error(f"Fehler beim Schreiben der Step-CSV: {e}", exc_info=True)
+            return None
 
 
     def flush_pending_entry(self) -> dict | None:
@@ -259,13 +234,12 @@ class BaseInferenceProcessor(ABC):
 
         # 2) noch kein ausreichend gefülltes Fenster
         if input_data is None:
-            if true_value_t is not None:
+            # Warmup: wenn wir noch keinen vollständigen Input haben, ggf. minimalen Platzhalter zurückgeben
+            if self.step_counter == 0:
                 return {
                     "datetime": timestamp_t,
                     "prediction": None,
-                    "true_value": float(true_value_t),
-                    "future_forecast": [],
-                    # für UI/CSV: trotzdem mit erwarteten Keys schreiben
+                    "true_value": float(true_value_t) if true_value_t is not None else None,
                     "cpu_percent": None,
                     "ram_mb": None,
                 }
@@ -292,36 +266,46 @@ class BaseInferenceProcessor(ABC):
         if self._pending_entry is not None:
             completed_entry_for_t = self._pending_entry.copy()
             completed_entry_for_t["true_value"] = None if true_value_t is None else float(true_value_t)
-            # inference_time_s aus pending übernehmen
+            # inference_time aus pending übernehmen
             it_ms = self._pending_entry.get("model_inference_time_ms")
             if it_ms is not None:
                 completed_entry_for_t["inference_time_s"] = float(it_ms) / 1000.0
-            # **NEU/Backcompat:** System-Metriken in erwarteten Keys
+                completed_entry_for_t["inference_time_ms"] = float(it_ms)
+            # System-Metriken in erwarteten Keys
             completed_entry_for_t["cpu_percent"] = self._pending_entry.get("cpu_percent")
             completed_entry_for_t["ram_mb"] = self._pending_entry.get("ram_mb")
+            # alias für Web-UI: memory_percent (Fallback von ram_percent)
+            mp = self._pending_entry.get("memory_percent")
+            if mp is None:
+                mp = self._pending_entry.get("ram_percent")
+            completed_entry_for_t["memory_percent"] = mp
 
-        # 6) System-Metriken abgreifen (in erwarteten Keys!)
+        # 6) System-Metriken abgreifen
         cpu_percent = None
         ram_mb = None
+        ram_percent = None
+        mem = None
         try:
             from ML_Helpfunctions import pipeline_utils as PU
             cpu_percent = float(PU.get_cpu_usage())
-            mem = PU.get_memory_usage()  # dict: {"total_gb","used_gb","percent"} oder "N/A"
-            ram_mb = float(mem["used_gb"]) * 1024.0 if isinstance(mem, dict) and mem.get("used_gb") != "N/A" else None
-            ram_percent = float(mem["percent"]) if isinstance(mem, dict) and mem.get("used_gb") != "N/A" else None
+            mem = PU.get_memory_usage()  # dict mit total_gb, used_gb, percent
+            if isinstance(mem, dict) and mem.get("used_gb") != "N/A":
+                ram_mb = float(mem["used_gb"]) * 1024.0
+                ram_percent = float(mem["percent"])
         except Exception:
             pass
 
-        # 7) neuen Pending für t+1 setzen (mit erwarteten Keys)
-        import pandas as pd
+        # 7) neuen Pending für t+1 setzen (mit erwarteten Keys + Alias)
         self._pending_entry = {
             "datetime": timestamp_t + pd.Timedelta(seconds=self.config.get("inference_interval_sec", 1.0)),
             "prediction": float(future_pred_unscaled[0]) if np.isfinite(future_pred_unscaled[0]) else None,
             "true_value": None,
             "rolling_forecast": future_pred_unscaled.tolist(),
             "cpu_percent": cpu_percent,
+            "ram_mb": ram_mb,
             "ram_percent": ram_percent,
-            "ram_usage": mem,  
+            "memory_percent": ram_percent,  # <<< Alias für Web-UI
+            "ram_usage": mem,
             "model_inference_time_ms": float(t_inf_ms),
             "total_processing_time_ms": float((time.perf_counter() - start_processing_time) * 1000.0),
         }
@@ -336,23 +320,19 @@ class BaseInferenceProcessor(ABC):
                 "cpu_percent": cpu_percent,
                 "ram_mb": ram_mb,
                 "ram_percent": ram_percent,
+                "memory_percent": ram_percent,  # <<< Alias für Web-UI
             }
 
         # kompletten Horizon am t-Eintrag hinterlegen
         completed_entry_for_t["future_forecast"] = future_pred_unscaled.tolist()
 
         # 9) Logging
-        true_str = (
-            f"{completed_entry_for_t['true_value']:.4f}"
-            if completed_entry_for_t.get("true_value") is not None else "N/A"
-        )
-        pred_str_t = (
-            f"{completed_entry_for_t['prediction']:.4f}"
-            if completed_entry_for_t.get("prediction") is not None else "Warte..."
-        )
-        pred_str_t_plus_1 = (
-            f"{future_pred_unscaled[0]:.4f}" if np.isfinite(future_pred_unscaled[0]) else "N/A"
-        )
+        pred_str_t = (f"{completed_entry_for_t['prediction']:.4f}"
+                    if completed_entry_for_t.get("prediction") is not None else "Warte...")
+        pred_str_t_plus_1 = (f"{future_pred_unscaled[0]:.4f}"
+                            if np.isfinite(future_pred_unscaled[0]) else "N/A")
+        true_str = (f"{completed_entry_for_t['true_value']:.4f}"
+                    if completed_entry_for_t.get("true_value") is not None else "N/A")
         ts_str = timestamp_t.strftime("%H:%M:%S.%f")[:-3] if hasattr(timestamp_t, "strftime") else str(timestamp_t)
 
         logging.info(
