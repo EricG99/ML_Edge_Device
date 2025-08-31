@@ -967,7 +967,7 @@ def save_predictions_to_csv(pred_orig: np.ndarray, true_orig: np.ndarray,
 # HELPER 4: METRIKEN SPEICHERN
 # -----------------------------------------------------------------------------
 def save_metrics_csv(metrics: dict, config: dict, paths: dict, 
-                                 power_time: float, prediction_path: str) -> str:
+        power_time: float, prediction_path: str) -> str:
     """Fügt die Metriken des aktuellen Laufs zu einer zentralen Übersichts-CSV hinzu."""
     summary_path = None
     if not prediction_path:
