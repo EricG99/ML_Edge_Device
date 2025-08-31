@@ -32,24 +32,6 @@ import csv
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
-
-# bevorzugt: aus dem Paket importieren
-from ML_Algorithms.pipeline_web_app import (
-    algorithm_to_folder,
-    normalize_quant_label,
-    list_model_variants,
-    summarize_step_csv,
-    discover_predictions_file_from_json,
-    fallback_find_step_csv,
-    get_summary_output_path,
-    run_inference_via_subprocess,
-)
-
-
 
 # ---- Projektpfad sicherstellen ----
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -131,7 +113,7 @@ MODEL_BLOBS_WHITELIST = {
     "sklearn": ["model.joblib"],
     "xgb": ["model.json"],
 }
-SUMMARY_CSV_NAME = "Experiment_Summary_Server_multiconfig_run_merged.csv"
+SUMMARY_CSV_NAME = "Experiment_Summary_Server_multiconfig_run.csv"
 SCALER_FILE_NAMES = ["scaler.joblib", "y_scaler.joblib"]
 
 # ---------------------------
@@ -194,6 +176,9 @@ def algorithm_to_folder(name_or_flag: str) -> str:
     return name_or_flag.upper() or "MODEL"
 
 
+# ---------------------------
+# Konfigurationsaufbau
+# ---------------------------
 # ---------------------------
 # Konfigurationsaufbau
 # ---------------------------
@@ -367,7 +352,7 @@ def read_model_size_mb(training_config_json: Path, model_variant_file: str) -> O
 
 
 def _map_variant_to_quant_mode(model_file: str) -> str:
-    if "int8_full" in model_file: return "quant-8"
+    if "int8_full" in model_file: return "quant-8-full"
     if "int8" in model_file: return "quant-8"
     if "float16" in model_file: return "quant-16"
     return "no-quant"
