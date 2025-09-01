@@ -119,7 +119,6 @@ BASE_COMMON = {
     "edge_device": True,
     "enable_edge": True,
     "validation_fraction": 0.2,
-    "rolling_min_periods": 4,
     "early_stopping_patience": 10,
     "rolling_window_size": 10, # Fest auf 10 gesetzt
     "lags": 20, # Fest auf 20 gesetzt
@@ -132,7 +131,7 @@ MODEL_BLOBS_WHITELIST = {
     "sklearn": ["model.joblib"],
     "xgb": ["model.json"],
 }
-SUMMARY_CSV_NAME = "Experiment_Summary_test_rf_light_xgboost.csv"
+SUMMARY_CSV_NAME = "Experiment_Summary_Server_multiconfig_run_merged.csv"
 SCALER_FILE_NAMES = ["scaler.joblib", "y_scaler.joblib"]
 
 # ---------------------------
@@ -507,9 +506,6 @@ def run_experiments(
 
     runs_done = 0
     levels = ["simple", "medium", "high"]
-    
-    levels = ["medium"]
-
 
     for algorithm in algorithms:
         algo = algorithm.lower()

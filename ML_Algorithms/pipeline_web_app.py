@@ -382,10 +382,10 @@ def _merge_artifacts_for_swap(current_infer_obj, shared_dict):
 def inference_manager(config: dict, inference_class, folder_flag: str, algorithm: str, mode: str):
     """
     Führt die Inferenz in Zyklen/Schritten aus.
-    - Speichert pro Schritt: True, Forecast(H), inference_time_s, total_time_s, CPU%, RAM.
+    - Speichert pro Schritt: True, Forecast(H), inference_time_s (aus prediction_entry), total_time_s, CPU%, RAM.
     - Sammelt pro Schritt Retraining-Material und triggert am Zyklusende ein non-blocking Retraining.
-    - Führt einen Hot-Swap durch, sobald ein neues Modell/Abhängigkeiten bereitstehen.
-    - Stellt einen robusten Warm-Start des Datenpuffers sicher, inkl. Vorsammeln bei Live-Daten.
+    - Hot-Swap, sobald neues Modell/Abhängigkeiten bereitstehen.
+    - Lädt bei reiner Inferenz training_config.json (merge), falls vorhanden.
     """
     import os
     import json
@@ -393,12 +393,11 @@ def inference_manager(config: dict, inference_class, folder_flag: str, algorithm
     import threading
     import logging
     import pandas as pd
-    import math
     from copy import deepcopy
 
     try:
         import psutil
-    except ImportError:
+    except Exception:
         psutil = None
 
     global all_predictions, shared_model, shared_resource_lock, PIPELINE_STATE, retraining_thread_task
@@ -421,11 +420,23 @@ def inference_manager(config: dict, inference_class, folder_flag: str, algorithm
     def _guess_model_dir(cfg: dict) -> str | None:
         paths = (cfg or {}).get("paths", {}) or {}
         p_models = paths.get("Models")
-        if p_models and os.path.isdir(p_models): return p_models
+        if p_models and os.path.isdir(p_models):
+            return p_models
+        m_static = (cfg or {}).get("model_path_static")
+        if m_static and os.path.isabs(m_static) and os.path.isfile(m_static):
+            return os.path.dirname(m_static)
         base_out = paths.get("Base_Output_Path")
         if base_out:
             cand = os.path.join(base_out, "Models")
-            if os.path.isdir(cand): return cand
+            if os.path.isdir(cand):
+                return cand
+        art_base = (cfg or {}).get("artifacts_base_path")
+        if art_base:
+            cand = os.path.join(art_base, "Models")
+            if os.path.isdir(cand):
+                return cand
+        if base_out and os.path.isdir(base_out):
+            return base_out
         return None
 
     def _try_load_training_config_for_inference_only(cfg: dict, _mode: str) -> dict:
@@ -435,8 +446,12 @@ def inference_manager(config: dict, inference_class, folder_flag: str, algorithm
         if not model_dir:
             logging.info("Kein Modellordner gefunden. Überspringe training_config.json-Import.")
             return cfg
-        found = os.path.join(model_dir, "training_config.json")
-        if not os.path.isfile(found):
+        candidates = [
+            os.path.join(model_dir, "training_config.json"),
+            os.path.join(os.path.dirname(model_dir), "training_config.json")
+        ]
+        found = next((c for c in candidates if c and os.path.isfile(c)), None)
+        if not found:
             logging.info(f"Keine training_config.json in {model_dir} gefunden. (Optional)")
             return cfg
         try:
@@ -450,17 +465,15 @@ def inference_manager(config: dict, inference_class, folder_flag: str, algorithm
             logging.warning(f"training_config.json konnte nicht geladen/gewertet werden ({found}): {e}")
             return cfg
 
-    proc, n_cpus = None, 1
-    if psutil:
+    if psutil is not None:
         try:
             proc = psutil.Process(os.getpid())
             n_cpus = max(psutil.cpu_count(logical=True) or 1, 1)
         except Exception:
-            pass
-            
-    # ======================================================================
-    # PHASE 1: INITIALISIERUNG
-    # ======================================================================
+            proc, n_cpus = None, 1
+    else:
+        proc, n_cpus = None, 1
+
     try:
         while PIPELINE_STATE.get("status") == "initializing":
             time.sleep(0.2)
@@ -469,6 +482,7 @@ def inference_manager(config: dict, inference_class, folder_flag: str, algorithm
             return
 
         config = _try_load_training_config_for_inference_only(config, mode)
+
         with shared_resource_lock:
             PIPELINE_STATE["status"] = "inference_running"
         logging.info(f"--- INFERENCE MANAGER: Startet im Modus '{mode}' ---")
@@ -476,11 +490,48 @@ def inference_manager(config: dict, inference_class, folder_flag: str, algorithm
         inference_processor = inference_class(config, folder_flag=folder_flag)
 
         if shared_model.get("model") is not None:
-            logging.info("Übernehme Artefakte aus dem initialen Training (In-Memory).")
             inference_processor.set_artifacts_from_memory(shared_model)
+            dp = getattr(inference_processor, "data_processor", None)
+            if dp is not None and hasattr(dp, "reconfigure"):
+                loaded_training_cfg = getattr(inference_processor, "training_config", None) or config
+                try:
+                    dp.reconfigure({"training_config": loaded_training_cfg}, keep_buffer=True)
+                    logging.info("RealTimeDataProcessor re-initialized with loaded training config.")
+                except Exception as e:
+                    logging.warning(f"Reconfigure des DataProcessors fehlgeschlagen: {e}")
+            try:
+                init_df = shared_model.get("initial_training_data")
+                dp = getattr(inference_processor, "data_processor", None)
+                if dp is not None and init_df is not None and hasattr(dp, "prime_buffer"):
+                    want = getattr(dp, "_min_data_points", 1)
+                    dp.prime_buffer(init_df.tail(want))
+                    logging.info("🔧 DataProcessor warm-started mit initialem Fenster.")
+            except Exception as e:
+                logging.warning(f"Konnte DataProcessor nicht vorfüttern: {e}")
         else:
-            logging.info("Lade Artefakte von der Festplatte.")
-            inference_processor.load_artifacts()
+            if config.get('load_id'):
+                inference_processor.load_artifacts()
+                dp = getattr(inference_processor, "data_processor", None)
+                if dp is not None and hasattr(dp, "reconfigure"):
+                    loaded_training_cfg = getattr(inference_processor, "training_config", None) or config
+                    try:
+                        dp.reconfigure({"training_config": loaded_training_cfg}, keep_buffer=True)
+                        logging.info("RealTimeDataProcessor re-initialized with loaded training config.")
+                    except Exception as e:
+                        logging.warning(f"Reconfigure des DataProcessors fehlgeschlagen: {e}")
+            else:
+                try:
+                    inference_processor.load_artifacts()
+                except SystemExit:
+                    logging.error("Artefakte konnten nicht geladen werden (SystemExit in load_artifacts).")
+                    raise
+                except Exception as e:
+                    raise RuntimeError(
+                        "Kein trainiertes Modell im Speicher und Artefakte konnten nicht von Platte geladen werden. "
+                        "Stelle sicher, dass 'paths.Models' korrekt gesetzt ist und dort 'model.keras' / "
+                        "'trained_*.joblib' sowie 'training_config.json' liegen."
+                    ) from e
+
             with shared_resource_lock:
                 shared_model.update({
                     "model": getattr(inference_processor, "model", None),
@@ -491,137 +542,75 @@ def inference_manager(config: dict, inference_class, folder_flag: str, algorithm
                     "initial_training_data": getattr(inference_processor, "_batch_data_df", None)
                 })
 
-        # ======================================================================
-        # PHASE 2: WARM-START & VORSAMMELN
-        # ======================================================================
-        data_processor = getattr(inference_processor, "data_processor", None)
-        if data_processor is None:
-            raise RuntimeError("Inference Processor hat keinen DataProcessor initialisiert.")
-
-        initial_data_source = shared_model.get("initial_training_data")
-        if config.get("loading_strategy") == "split" and initial_data_source is not None and not getattr(initial_data_source, "empty", True):
-            # KEIN Testdaten-Priming → nur erlaubte Vor-Historie verwenden, wenn vorhanden
-            initial_history_df = shared_model.get("initial_history_df")
-            if initial_history_df is not None and not initial_history_df.empty:
-                min_points = getattr(data_processor, "_min_data_points", 1)
-                data_processor.prime_buffer(initial_history_df.tail(min_points))
-                logging.info(f"🔧 DataProcessor warm-gestartet mit {len(initial_history_df.tail(min_points))} Zeilen.")
+        # Datenquelle
         data_source_iterator = inference_processor.get_data_source_iterator()
 
-        if str(config.get("loading_strategy", "split")).lower() == "live_mqtt":
-            min_points_needed = getattr(data_processor, "_min_data_points", 1)
-            priming_timeout = float(config.get("priming_timeout_sec", 60.0))
-            logging.info(f"--- MQTT-Vorsammeln: Benötige {min_points_needed} Punkte (Timeout {priming_timeout}s). ---")
-            primed = len(getattr(data_processor, "_buffer", [])) if hasattr(data_processor, "_buffer") else 0
-            t0 = time.perf_counter()
-            priming_iterator = data_source_iterator('infinite')
-            while primed < min_points_needed:
-                if PIPELINE_STATE.get("is_finished"):
-                    logging.warning("Vorsammeln durch Benutzer beendet.")
-                    return
-                try:
-                    payload = next(priming_iterator)
-                except StopIteration:
-                    if (time.perf_counter() - t0) > priming_timeout:
-                        logging.warning(f"Priming-Timeout nach {priming_timeout}s mit {primed}/{min_points_needed}.")
-                        break
-                    time.sleep(0.05)
-                    continue
-                try:
-                    data_processor.update_and_process(payload)
-                    primed = len(getattr(data_processor, "_buffer", [])) if hasattr(data_processor, "_buffer") else primed
-                    with shared_resource_lock:
-                        PIPELINE_STATE["primed_count"] = primed
-                except Exception as e:
-                    logging.warning(f"Priming: Fehler bei Payload-Verarbeitung: {e}")
-                if (time.perf_counter() - t0) > priming_timeout:
-                    logging.warning(f"Priming-Timeout nach {priming_timeout}s mit {primed}/{min_points_needed}.")
-                    break
-            logging.info(f"--- MQTT-Vorsammeln abgeschlossen. Puffer hat {primed} Einträge. ---")
-
-        # ======================================================================
-        # PHASE 3: HAUPT-INFERENZ
-        # ======================================================================
-        if str(mode).lower() == "retraining":
+        # Zyklen & Schritte pro Zyklus
+        if mode == "retraining":
             max_cycles = int(config.get("retraining_cycles", 5))
             steps_per_cycle = int(config.get("retraining_interval_steps", 20))
         else:
             max_cycles = 1
             steps_cfg = config.get("inference_steps", "infinite")
-            steps_per_cycle = float('inf') if str(steps_cfg).lower() == "infinite" else int(steps_cfg)
+            if isinstance(steps_cfg, str) and steps_cfg.lower() == "infinite":
+                steps_per_cycle = int(1e12)  # praktisch endlos
+            else:
+                steps_per_cycle = int(steps_cfg)
 
         target_interval_sec = float(config.get("inference_interval_sec", 1.0))
+
         with shared_resource_lock:
             PIPELINE_STATE.update({
                 "total_cycles": max_cycles,
-                "total_steps": -1 if steps_per_cycle == float('inf') else steps_per_cycle,
+                "total_steps": steps_per_cycle,
                 "mode": mode
             })
 
+        # --- Hauptschleife ---
         for cycle in range(max_cycles):
             with shared_resource_lock:
                 PIPELINE_STATE.update({
                     "cycle_count": cycle + 1,
-                    "retraining_status": "collecting" if str(mode).lower() == "retraining" else "idle"
+                    "retraining_status": "collecting" if mode == "retraining" else "idle"
                 })
             logging.info(f"--- Zyklus {cycle + 1}/{max_cycles}: Starte Inferenz. ---")
 
-            iterator_steps = 'infinite' if steps_per_cycle == float('inf') else (10**12 if str(config.get("loading_strategy","split")).lower() == "split" else 'infinite')
-            current_cycle_iterator = data_source_iterator(iterator_steps)
+            current_cycle_iterator = data_source_iterator(steps_per_cycle)
 
-            predictions_done = 0
-
-            while predictions_done < steps_per_cycle:
-                while PIPELINE_STATE.get("is_paused"): time.sleep(0.2)
-                if PIPELINE_STATE.get("is_finished"): break
-
-                try:
-                    payload = next(current_cycle_iterator)
-                except StopIteration:
-                    logging.info("Datenquelle erschöpft, beende Zyklus.")
-                    break
-
+            for step, payload in enumerate(current_cycle_iterator):
                 step_wall_t0 = time.perf_counter()
 
+                # System-Ressourcen (Start)
                 cpu_t0, ram_mb_val, ram_percent_val = None, None, None
-                if psutil:
+                if psutil is not None:
                     try:
-                        proc.cpu_percent(interval=None)
+                        proc.cpu_percent(interval=None)  # prime
                         cpu_t0 = proc.cpu_times()
                         pinfo = proc.memory_info()
                         ram_mb_val = pinfo.rss / (1024 * 1024)
-                        ram_percent_val = psutil.virtual_memory().percent
+                        vm = psutil.virtual_memory()
+                        ram_percent_val = vm.percent
                     except Exception:
-                        pass
+                        cpu_t0, ram_mb_val, ram_percent_val = None, None, None
 
+                # Pause/Stop
+                while PIPELINE_STATE.get("is_paused"):
+                    time.sleep(0.2)
+                if PIPELINE_STATE.get("is_finished"):
+                    break
+                with shared_resource_lock:
+                    PIPELINE_STATE["steps_in_cycle"] = step + 1
+
+                # Schritt verarbeiten
                 prediction_entry = inference_processor.process_step(payload)
+
                 if prediction_entry:
-                    # >>> NEU: Nur „echte“ Forecasts zählen/speichern
-                    _fc = prediction_entry.get("future_forecast")
-                    _has_real_fc = False
-                    if isinstance(_fc, (list, tuple)):
-                        for _v in _fc:
-                            try:
-                                if _v is not None and not (isinstance(_v, float) and (math.isnan(_v) or math.isinf(_v))):
-                                    _has_real_fc = True
-                                    break
-                            except Exception:
-                                _has_real_fc = True
-                                break
-                    if not _has_real_fc:
-                        # warm-up/platzhalter → überspringen
-                        elapsed = time.perf_counter() - step_wall_t0
-                        if (sleep_dur := target_interval_sec - elapsed) > 0: time.sleep(sleep_dur)
-                        continue
-                    # <<< Ende Neu
-
-                    predictions_done += 1
-                    with shared_resource_lock:
-                        PIPELINE_STATE["steps_in_cycle"] = predictions_done
-
+                    # Gesamtzeit (Wall)
                     step_total_time_s = time.perf_counter() - step_wall_t0
+
+                    # CPU%
                     cpu_percent = None
-                    if psutil and cpu_t0:
+                    if psutil is not None and cpu_t0 is not None:
                         try:
                             cpu_t1 = proc.cpu_times()
                             cpu_used = (cpu_t1.user + cpu_t1.system) - (cpu_t0.user + cpu_t0.system)
@@ -641,7 +630,7 @@ def inference_manager(config: dict, inference_class, folder_flag: str, algorithm
                     except Exception as persist_err:
                         logging.error(f"Fehler beim Speichern des Inferenz-Schritts: {persist_err}", exc_info=True)
 
-                    # Aliasse für die Web-UI
+                    # >>> Live-Aliasse für die Web-UI
                     if prediction_entry.get("inference_time_s") is not None and "inference_time_ms" not in prediction_entry:
                         prediction_entry["inference_time_ms"] = float(prediction_entry["inference_time_s"]) * 1000.0
                     prediction_entry["total_time_s"] = float(step_total_time_s)
@@ -651,10 +640,12 @@ def inference_manager(config: dict, inference_class, folder_flag: str, algorithm
                     if "ram_mb" not in prediction_entry and ram_mb_val is not None:
                         prediction_entry["ram_mb"] = float(ram_mb_val)
 
+                    # In-Memory für UI/Fazit
                     with shared_resource_lock:
                         all_predictions.append(prediction_entry)
 
-                    if str(mode).lower() == "retraining":
+                    # Retraining-Material (nur 'retraining'-Modus)
+                    if mode == "retraining":
                         try:
                             if hasattr(payload, "to_dict"):
                                 pl = payload.to_dict()
@@ -662,20 +653,19 @@ def inference_manager(config: dict, inference_class, folder_flag: str, algorithm
                                 pl = dict(payload)
                         except Exception:
                             pl = {}
+                        if "datetime" not in pl and "datetime" in prediction_entry:
+                            pl["datetime"] = prediction_entry["datetime"]
                         retraining_data_list.append(pl)
 
                 # Hot-Swap?
                 with shared_resource_lock:
                     ready = PIPELINE_STATE.get("retraining_status") == "ready_to_swap"
                 if ready:
-                    try:
-                        to_swap = _merge_artifacts_for_swap(inference_processor, shared_model)  # noqa: F821
-                        inference_processor.set_artifacts_from_memory(to_swap)
-                        with shared_resource_lock:
-                            PIPELINE_STATE["retraining_status"] = "idle"
-                        logging.info("--- INFERENCE MANAGER: Neues Modell & Abhängigkeiten aktiv (Hot-Swap) ---")
-                    except Exception as e:
-                        logging.error(f"Fehler beim Hot-Swap: {e}", exc_info=True)
+                    to_swap = _merge_artifacts_for_swap(inference_processor, shared_model)
+                    inference_processor.set_artifacts_from_memory(to_swap)
+                    with shared_resource_lock:
+                        PIPELINE_STATE["retraining_status"] = "idle"
+                    logging.info("--- INFERENCE MANAGER: Neues Modell & Abhängigkeiten aktiv (Hot-Swap) ---")
 
                 # Zyklus-Takt
                 elapsed = time.perf_counter() - step_wall_t0
@@ -686,21 +676,31 @@ def inference_manager(config: dict, inference_class, folder_flag: str, algorithm
             if PIPELINE_STATE.get("is_finished"):
                 break
 
-            if str(mode).lower() == "retraining" and cycle < max_cycles - 1 and retraining_data_list:
-                logging.info(f"--- Zyklus {cycle + 1}: Starte Retraining (non-blocking). ---")
-                retraining_df = pd.DataFrame(retraining_data_list)
-                if "datetime" in retraining_df.columns:
-                    retraining_df = retraining_df.set_index("datetime")
-                retraining_data_list.clear()
-                with shared_resource_lock:
-                    is_training = PIPELINE_STATE.get("retraining_status") == "training"
-                if not is_training:
-                    threading.Thread(
-                        target=retraining_thread_task, args=(retraining_df.copy(), algorithm),
-                        name=f"RetrainingThread-{cycle+1}", daemon=True
-                    ).start()
+            # Retraining am Zyklusende?
+            if mode == "retraining" and cycle < max_cycles - 1:
+                if len(retraining_data_list) == 0:
+                    logging.info("--- Kein neues Retraining-Material gesammelt; starte kein Retraining. ---")
                 else:
-                    logging.info("--- Überspringe Retraining-Start: Ein Training läuft bereits. ---")
+                    logging.info(f"--- Zyklus {cycle + 1}: Datensammlung abgeschlossen. Starte Retraining (non-blocking). ---")
+                    retraining_df = pd.DataFrame(retraining_data_list)
+                    if "datetime" in retraining_df.columns:
+                        retraining_df = retraining_df.set_index("datetime")
+                    retraining_data_list.clear()
+
+                    with shared_resource_lock:
+                        already_training = (PIPELINE_STATE.get("retraining_status") == "training")
+
+                    if not already_training:
+                        retraining_thread = threading.Thread(
+                            target=retraining_thread_task,
+                            args=(retraining_df.copy(), algorithm),
+                            name=f"RetrainingThread-{cycle+1}",
+                            daemon=True
+                        )
+                        retraining_thread.start()
+                        logging.info("--- Retraining läuft im Hintergrund; Inferenz läuft weiter. ---")
+                    else:
+                        logging.info("--- Überspringe Retraining-Start: Ein Retraining läuft bereits. ---")
 
     except Exception as e:
         logging.error(f"Schwerwiegender Fehler im Inference Manager: {e}", exc_info=True)
@@ -711,23 +711,360 @@ def inference_manager(config: dict, inference_class, folder_flag: str, algorithm
         with shared_resource_lock:
             PIPELINE_STATE.update({"status": "finished", "is_finished": True})
 
-        if inference_processor:
-            if hasattr(inference_processor, 'stop'):
-                try: inference_processor.stop()
-                except Exception: pass
-            if hasattr(inference_processor, 'flush_pending_entry'):
-                try:
-                    last_entry = inference_processor.flush_pending_entry()
-                    if last_entry:
-                        with shared_resource_lock:
-                            all_predictions.append(last_entry)
-                except Exception:
-                    pass
+        if inference_processor is not None and hasattr(inference_processor, 'stop'):
             try:
-                if all_predictions:
-                    inference_processor.save_final_results(all_predictions)
+                inference_processor.stop()
+            except Exception:
+                pass
+
+        if inference_processor is not None and hasattr(inference_processor, 'flush_pending_entry'):
+            try:
+                last_entry = inference_processor.flush_pending_entry()
+                if last_entry:
+                    with shared_resource_lock:
+                        all_predictions.append(last_entry)
+            except Exception:
+                pass
+
+        try:
+            if inference_processor is not None and all_predictions:
+                logging.info("Speichere finale Vorhersagen...")
+                inference_processor.save_final_results(all_predictions)
+        except Exception as e:
+            logging.error(f"Fehler beim finalen Speichern der Ergebnisse: {e}", exc_info=True)
+
+
+    def _try_load_training_config_for_inference_only(cfg: dict, _mode: str) -> dict:
+        """
+        Wenn wir NICHT im Retraining sind, versuche training_config.json aus dem
+        Modellordner zu laden und in cfg zu mergen.
+        WICHTIG: Kommandozeilen-Argumente wie 'model_filename' haben Priorität.
+        """
+        if str(_mode).lower() == "retraining":
+            return cfg
+
+        model_dir = _guess_model_dir(cfg)
+        if not model_dir:
+            logging.info("Kein Modellordner gefunden. Überspringe training_config.json-Import.")
+            return cfg
+            
+        candidates = [
+            os.path.join(model_dir, "training_config.json"),
+            os.path.join(os.path.dirname(model_dir), "training_config.json")
+        ]
+        found = next((c for c in candidates if c and os.path.isfile(c)), None)
+
+        if not found:
+            logging.info(f"Keine training_config.json in {model_dir} gefunden. (Optional)")
+            return cfg
+
+        try:
+            # 1. Trainings-Konfig laden (Basis)
+            with open(found, "r", encoding="utf-8") as f:
+                loaded_from_training = json.load(f)
+            # 2. Laufende cfg hat Vorrang
+            merged = _deep_merge(loaded_from_training, cfg)
+            merged["mode"] = _mode
+            logging.info(f"training_config.json geladen und gemergt: {found}")
+            return merged
+        except Exception as e:
+            logging.warning(f"training_config.json konnte nicht geladen/gewertet werden ({found}): {e}")
+            return cfg
+
+    # ------------------------------------------------------------
+    # Prozess & CPU-Kerne für Prozentberechnung
+    # ------------------------------------------------------------
+    if psutil is not None:
+        try:
+            proc = psutil.Process(os.getpid())
+            n_cpus = max(psutil.cpu_count(logical=True) or 1, 1)
+        except Exception:
+            proc, n_cpus = None, 1
+    else:
+        proc, n_cpus = None, 1
+
+    try:
+        # Auf Initialisierung warten
+        while PIPELINE_STATE.get("status") == "initializing":
+            time.sleep(0.2)
+        if PIPELINE_STATE.get("status") == "error":
+            logging.error("Inferenz-Manager startet nicht, da ein Fehler bei der Initialisierung aufgetreten ist.")
+            return
+
+        # NEU: falls nur Inferenz läuft -> versuche training_config.json zu laden/mergen
+        config = _try_load_training_config_for_inference_only(config, mode)
+
+        # Status setzen
+        with shared_resource_lock:
+            PIPELINE_STATE["status"] = "inference_running"
+        logging.info(f"--- INFERENCE MANAGER: Startet im Modus '{mode}' ---")
+
+        # Inferenz-Objekt aufsetzen + Artefakte laden/übernehmen
+        inference_processor = inference_class(config, folder_flag=folder_flag)
+
+        # 1) Falls bereits Artefakte im Speicher (z. B. nach initialem Training)
+        if shared_model.get("model") is not None:
+            inference_processor.set_artifacts_from_memory(shared_model)
+            dp = getattr(inference_processor, "data_processor", None)
+            if dp is not None and hasattr(dp, "reconfigure"):
+                loaded_training_cfg = getattr(inference_processor, "training_config", None) or config
+                try:
+                    dp.reconfigure({"training_config": loaded_training_cfg}, keep_buffer=True)
+                    logging.info("RealTimeDataProcessor re-initialized with loaded training config.")
+                except Exception as e:
+                    logging.warning(f"Reconfigure des DataProcessors fehlgeschlagen: {e}")
+            # Warm-Start des DataProcessors
+            try:
+                init_df = shared_model.get("initial_training_data")
+                dp = getattr(inference_processor, "data_processor", None)
+                if dp is not None and init_df is not None and hasattr(dp, "prime_buffer"):
+                    want = getattr(dp, "_min_data_points", 1)
+                    dp.prime_buffer(init_df.tail(want))
+                    logging.info("🔧 DataProcessor warm-started mit initialem Fenster.")
             except Exception as e:
-                logging.error(f"Fehler beim finalen Speichern der Ergebnisse: {e}", exc_info=True)
+                logging.warning(f"Konnte DataProcessor nicht vorfüttern: {e}")
+
+        # 2) Sonst von Platte laden
+        else:
+            if config.get('load_id'):
+                inference_processor.load_artifacts()
+                dp = getattr(inference_processor, "data_processor", None)
+                if dp is not None and hasattr(dp, "reconfigure"):
+                    loaded_training_cfg = getattr(inference_processor, "training_config", None) or config
+                    try:
+                        dp.reconfigure({"training_config": loaded_training_cfg}, keep_buffer=True)
+                        logging.info("RealTimeDataProcessor re-initialized with loaded training config.")
+                    except Exception as e:
+                        logging.warning(f"Reconfigure des DataProcessors fehlgeschlagen: {e}")
+            else:
+                try:
+                    inference_processor.load_artifacts()
+                except SystemExit:
+                    logging.error("Artefakte konnten nicht geladen werden (SystemExit in load_artifacts).")
+                    raise
+                except Exception as e:
+                    raise RuntimeError(
+                        "Kein trainiertes Modell im Speicher und Artefakte konnten nicht von Platte geladen werden. "
+                        "Stelle sicher, dass 'paths.Models' korrekt gesetzt ist und dort 'model.keras' / "
+                        "'trained_*.joblib' sowie 'training_config.json' liegen."
+                    ) from e
+
+            # Nach Laden: shared_model BEFÜLLEN
+            with shared_resource_lock:
+                shared_model.update({
+                    "model": getattr(inference_processor, "model", None),
+                    "scaler": getattr(inference_processor, "scaler", None),
+                    "y_scaler": getattr(inference_processor, "y_scaler", None),
+                    "features": getattr(inference_processor, "feature_list", None),
+                    "config": getattr(inference_processor, "config", None),
+                    "initial_training_data": getattr(inference_processor, "_batch_data_df", None)
+                })
+
+        # Datenquelle (zustandsbehafteter Iterator-Fabrik)
+        data_source_iterator = inference_processor.get_data_source_iterator()
+
+        # Zyklen & Schritte pro Zyklus
+        if mode == "retraining":
+            max_cycles = int(config.get("retraining_cycles", 5))
+            steps_per_cycle = int(config.get("retraining_interval_steps", 20))
+        else:
+            max_cycles = 1
+            steps_cfg = config.get("inference_steps", "infinite")
+            # >>> FIX: "infinite" wirklich als endlos interpretieren
+            if isinstance(steps_cfg, str) and steps_cfg.lower() == "infinite":
+                steps_per_cycle = int(1e12)  # praktisch endlos
+            else:
+                steps_per_cycle = int(steps_cfg)
+
+        target_interval_sec = float(config.get("inference_interval_sec", 1.0))
+
+        with shared_resource_lock:
+            PIPELINE_STATE.update({
+                "total_cycles": max_cycles,
+                "total_steps": steps_per_cycle,
+                "mode": mode
+            })
+
+        # --- Hauptschleife über Zyklen ---
+        for cycle in range(max_cycles):
+            with shared_resource_lock:
+                PIPELINE_STATE.update({
+                    "cycle_count": cycle + 1,
+                    "retraining_status": "collecting" if mode == "retraining" else "idle"
+                })
+            logging.info(f"--- Zyklus {cycle + 1}/{max_cycles}: Starte Inferenz. ---")
+
+            current_cycle_iterator = data_source_iterator(steps_per_cycle)
+
+            # --- Schritt-Schleife ---
+            for step, payload in enumerate(current_cycle_iterator):
+                step_wall_t0 = time.perf_counter()
+
+                # System-Ressourcen Messung (Anfang)
+                cpu_t0, ram_usage_dict = None, None
+                if psutil is not None:
+                    try:
+                        _ = psutil.cpu_percent(interval=None)  # Prime
+                        cpu_t0 = psutil.Process(os.getpid()).cpu_times()
+                        ram_usage_dict = PipelineUtils.get_memory_usage()
+                    except Exception:
+                        cpu_t0, ram_usage_dict = None, None
+
+                # Pause/Stop
+                while PIPELINE_STATE.get("is_paused"):
+                    time.sleep(0.2)
+                if PIPELINE_STATE.get("is_finished"):
+                    break
+                with shared_resource_lock:
+                    PIPELINE_STATE["steps_in_cycle"] = step + 1
+
+                # Einen Schritt verarbeiten
+                prediction_entry = inference_processor.process_step(payload)
+
+                if prediction_entry:
+                    # Gesamtzeit (Wall)
+                    step_total_time_s = time.perf_counter() - step_wall_t0
+
+                    # CPU%
+                    cpu_percent = None
+                    if psutil is not None and cpu_t0 is not None:
+                        try:
+                            cpu_t1 = psutil.Process(os.getpid()).cpu_times()
+                            cpu_used = (cpu_t1.user + cpu_t1.system) - (cpu_t0.user + cpu_t0.system)
+                            cpu_percent = (cpu_used / max(step_total_time_s, 1e-12)) / max(psutil.cpu_count(logical=True) or 1, 1) * 100.0
+                        except Exception:
+                            cpu_percent = None
+
+                    # RAM (Prozess + System)
+                    ram_mb_val, ram_percent_val = None, None
+                    if psutil is not None:
+                        try:
+                            pinfo = psutil.Process(os.getpid()).memory_info()
+                            ram_mb_val = pinfo.rss / (1024 * 1024)
+                            vm = psutil.virtual_memory()
+                            ram_percent_val = vm.percent
+                            prediction_entry['ram_usage'] = {
+                                "process_mb": round(ram_mb_val, 2),
+                                "system_percent": ram_percent_val,
+                                "system_total_gb": round(vm.total / (1024**3), 2)
+                            }
+                        except Exception:
+                            pass
+
+                    # Persistieren dieses Schritts
+                    try:
+                        inference_processor.save_step_result(
+                            prediction_entry=prediction_entry,
+                            total_time_s=step_total_time_s,
+                            cpu_percent=cpu_percent,
+                            ram_mb=ram_mb_val,
+                            ram_percent=ram_percent_val
+                        )
+                    except Exception as persist_err:
+                        logging.error(f"Fehler beim Speichern des Inferenz-Schritts: {persist_err}", exc_info=True)
+
+                    # >>> FIX: Live-Metriken in die UI-Payload mitschreiben
+                    prediction_entry.update({
+                        "total_time_s": step_total_time_s,
+                        "cpu_percent": cpu_percent,
+                        "ram_mb": ram_mb_val,
+                        "ram_percent": ram_percent_val,
+                    })
+
+                    # In-Memory sammeln (für finale Metriken und UI)
+                    with shared_resource_lock:
+                        all_predictions.append(prediction_entry)
+
+                    # Retraining-Material sammeln (nur im Modus 'retraining')
+                    if mode == "retraining":
+                        try:
+                            if hasattr(payload, "to_dict"):
+                                pl = payload.to_dict()
+                            else:
+                                pl = dict(payload)
+                        except Exception:
+                            pl = {}
+                        if "datetime" not in pl and "datetime" in prediction_entry:
+                            pl["datetime"] = prediction_entry["datetime"]
+                        retraining_data_list.append(pl)
+
+                # Hot-Swap, wenn Retraining fertig
+                with shared_resource_lock:
+                    ready = PIPELINE_STATE.get("retraining_status") == "ready_to_swap"
+                if ready:
+                    to_swap = _merge_artifacts_for_swap(inference_processor, shared_model)
+                    inference_processor.set_artifacts_from_memory(to_swap)
+                    with shared_resource_lock:
+                        PIPELINE_STATE["retraining_status"] = "idle"
+                    logging.info("--- INFERENCE MANAGER: Neues Modell & Abhängigkeiten aktiv (Hot-Swap) ---")
+
+                # Zyklus-Takt einhalten
+                elapsed = time.perf_counter() - step_wall_t0
+                sleep_dur = target_interval_sec - elapsed
+                if sleep_dur > 0:
+                    time.sleep(sleep_dur)
+
+            # vorzeitig beendet?
+            if PIPELINE_STATE.get("is_finished"):
+                break
+
+            # --- Am Zyklusende: Retraining non-blocking starten (nur wenn etwas gesammelt wurde) ---
+            if mode == "retraining" and cycle < max_cycles - 1:
+                if len(retraining_data_list) == 0:
+                    logging.info("--- Kein neues Retraining-Material gesammelt; starte kein Retraining. ---")
+                else:
+                    logging.info(f"--- Zyklus {cycle + 1}: Datensammlung abgeschlossen. Starte Retraining (non-blocking). ---")
+                    retraining_df = pd.DataFrame(retraining_data_list)
+                    if "datetime" in retraining_df.columns:
+                        retraining_df = retraining_df.set_index("datetime")
+                    retraining_data_list.clear()
+
+                    with shared_resource_lock:
+                        already_training = (PIPELINE_STATE.get("retraining_status") == "training")
+
+                    if not already_training:
+                        retraining_thread = threading.Thread(
+                            target=retraining_thread_task,
+                            args=(retraining_df.copy(), algorithm),
+                            name=f"RetrainingThread-{cycle+1}",
+                            daemon=True
+                        )
+                        retraining_thread.start()
+                        logging.info("--- Retraining läuft im Hintergrund; Inferenz läuft weiter. ---")
+                    else:
+                        logging.info("--- Überspringe Retraining-Start: Ein Retraining läuft bereits. ---")
+
+    except Exception as e:
+        logging.error(f"Schwerwiegender Fehler im Inference Manager: {e}", exc_info=True)
+        with shared_resource_lock:
+            PIPELINE_STATE.update({"status": "error", "error_message": str(e)})
+    finally:
+        logging.info("--- Pipeline beendet. Aufräumen und Speichern. ---")
+        with shared_resource_lock:
+            PIPELINE_STATE.update({"status": "finished", "is_finished": True})
+
+        if inference_processor is not None and hasattr(inference_processor, 'stop'):
+            try:
+                inference_processor.stop()
+            except Exception:
+                pass
+
+        if inference_processor is not None and hasattr(inference_processor, 'flush_pending_entry'):
+            try:
+                last_entry = inference_processor.flush_pending_entry()
+                if last_entry:
+                    with shared_resource_lock:
+                        all_predictions.append(last_entry)
+            except Exception:
+                pass
+
+        try:
+            if inference_processor is not None and all_predictions:
+                logging.info("Speichere finale Vorhersagen...")
+                inference_processor.save_final_results(all_predictions)
+        except Exception as e:
+            logging.error(f"Fehler beim finalen Speichern der Ergebnisse: {e}", exc_info=True)
+
 
 
 def main():

@@ -438,8 +438,13 @@ def process_run_for_N(
         "true_value_series": "",
     }
 
-    # Vereinheitlichter Shift für alle Algorithmen (kein Sonderfall mehr für RF)
-    row_shift_mode = shift_mode
+    # --- NEU: Per-Algorithmus-Shift-Override (nur RF minus 1 Schritt) ---
+    algo_name = str(row.get("algorithm", "")).lower()
+    SHIFT_MODE_BY_ALGO = {
+        "random_forest": "t_plus_h_minus_1",
+    }
+    row_shift_mode = SHIFT_MODE_BY_ALGO.get(algo_name, shift_mode)
+    # ---------------------------------------------------------------------
 
     # Predictions CSV finden
     p = resolve_pred_csv_path(row, base)
@@ -482,7 +487,9 @@ def process_run_for_N(
         out[f"pred_h{h}_series"] = _series_to_tuple_string(dfp[col])
 
         y_pred_h = pd.to_numeric(dfp[col], errors="coerce")
+        # --- GEÄNDERT: Shift mit row_shift_mode statt global shift_mode ---
         y_true_h = pd.to_numeric(_true_for_h(y_true_all, h, row_shift_mode), errors="coerce")
+        # ------------------------------------------------------------------
 
         mask = y_pred_h.notna() & y_true_h.notna()
         y = y_true_h[mask].to_numpy()
@@ -517,7 +524,9 @@ def process_run_for_N(
     target_col = f"pred_h{int(N)}"
     if target_col in dfp.columns:
         y_pred_N = pd.to_numeric(dfp[target_col], errors="coerce")
+        # --- GEÄNDERT: Shift mit row_shift_mode statt global shift_mode ---
         y_true_N = pd.to_numeric(_true_for_h(y_true_all, int(N), row_shift_mode), errors="coerce")
+        # ------------------------------------------------------------------
         maskN = y_pred_N.notna() & y_true_N.notna()
         yN = y_true_N[maskN].to_numpy()
         yhatN = y_pred_N[maskN].to_numpy()
@@ -536,95 +545,61 @@ def enrich_summary(
     out_file: Optional[str] = None,
     shift_mode: str = "t_plus_h",
     drop_old_metrics: bool = True,
-    include_error_json: bool = False,           # explizit: KEINE JSON-Felder anhängen
+    include_error_json: bool = True,
     error_json_roots: Optional[List[str]] = None,
 ) -> pd.DataFrame:
     """
-    Liest summary_file aus base, rechnet MAE/R² neu aus Predictions
-    und speichert eine Ausgabe, die NUR diese neuen Fehlermetriken hinzufügt.
+    Liest summary_file aus base, reichert an und speichert als:
+        base/Analysis/<out_file or 'Experiment_Enriched_SingleMetricKachel.csv'>
+    JSONs werden EINMAL indexiert (schnell), nicht pro Run gesucht.
     """
     base = Path(base)
 
-    # 1) KEIN JSON-Index (nur Metriken aus Predictions)
-    json_index: Dict[str, List[Dict[str, Any]]] = {}
+    # 1) JSON-Index nur einmal bauen
+    roots = _candidate_roots_for_json_search(base, error_json_roots)
+    json_index = build_error_json_index(roots)
 
     # 2) Summary einlesen
     summary_path = base / summary_file
     df = pd.read_csv(summary_path)
 
-    # 3) Horizon robust (immer Series gleicher Länge herstellen)
-    raw_H = df.get("horizon_num", df.get("horizon"))
-    if raw_H is None:
-        H_series = pd.Series([np.nan] * len(df), dtype=float)
-    else:
-        H_series = pd.to_numeric(raw_H, errors="coerce")
-        if not isinstance(H_series, pd.Series):
-            H_series = pd.Series([H_series] * len(df), dtype=float)
+    # 3) Horizon robust
+    H_series = pd.to_numeric(df.get("horizon_num", df.get("horizon")), errors="coerce")
 
-    # 4) Läufe verarbeiten – ausschließlich Predictions-Metriken berechnen
+    # 4) Schleife Runs
     rows: List[Dict[str, Any]] = []
+    missing_preds = 0
     for i, row in df.iterrows():
-        H = H_series.iat[i]
-        try:
-            N = int(H) if pd.notna(H) and float(H).is_integer() else 1
-        except Exception:
-            N = 1
+        H = H_series.iat[i] if i < len(H_series) else None
+        N = int(H) if (pd.notna(H) and float(H).is_integer()) else 1
+        res = process_run_for_N(row, N, base, shift_mode, include_error_json, json_index)
+        if np.isnan(res.get("mae_from_preds", np.nan)) and res.get("true_value_series", "") == "":
+            missing_preds += 1
+        rows.append(res)
 
-        # Kompatibel zur evtl. erweiterten Signatur von process_run_for_N
-        try:
-            res = process_run_for_N(row, N, base, shift_mode)
-        except TypeError:
-            # Fallback, falls (row, N, base, shift_mode, include_error_json, json_index) erwartet wird
-            res = process_run_for_N(row, N, base, shift_mode, False, json_index)
+    metrics_df = pd.DataFrame(rows)
+    df_out = pd.concat([df.reset_index(drop=True), metrics_df], axis=1)
 
-        rows.append(res or {})
-
-    metrics_df = pd.DataFrame(rows).fillna(np.nan)
-
-    # 5) Nur neue Fehlermetrik-Spalten übernehmen
-    keep_patterns = [
-        r"^mae_h\d+_from_preds$",
-        r"^r2_h\d+_from_preds$",
-        r"^mae_(from_preds|all_(avg|pooled)_from_preds)$",
-        r"^r2_(from_preds|all_(avg|pooled)_from_preds)$",
-    ]
-    def _is_metric_col(c: str) -> bool:
-        return any(re.match(p, c) for p in keep_patterns)
-
-    metric_cols = [c for c in metrics_df.columns if _is_metric_col(c)]
-    metrics_df = metrics_df[metric_cols]
-
-    # 6) Alte/enriched Spalten gleichen Namens aus df entfernen, dann zusammenführen
-    drop_cols_same = [c for c in metric_cols if c in df.columns]
-    if drop_cols_same:
-        df = df.drop(columns=drop_cols_same)
-
-    df_out = pd.concat([df.reset_index(drop=True), metrics_df.reset_index(drop=True)], axis=1)
-
-    # 7) Unerwünschte Spalten entfernen
-    #    - alte "metrics.*" der Summary
-    #    - alle err_* (aus früheren Enrichments)
-    #    - etwaige *_series (True/Pred-Serien)
-    drop_regexes = []
+    # 5) Alte metrics-Spalten optional entfernen
     if drop_old_metrics:
-        drop_regexes += [r"^metrics_value\.", r"^metrics_mean\.", r"^metrics_h\d+\.", r"^metrics\."]
-    drop_regexes += [r"^err_", r"_series$"]
+        drop_patterns = [r"^metrics_value\.", r"^metrics_mean\.", r"^metrics_h\d+\.", r"^metrics\."]
+        to_drop = [c for c in df_out.columns if any(re.match(pat, c) for pat in drop_patterns)]
+        if to_drop:
+            df_out = df_out.drop(columns=sorted(set(to_drop)))
 
-    to_drop = [c for c in df_out.columns if any(re.match(pat, c) for pat in drop_regexes)]
-    if to_drop:
-        df_out = df_out.drop(columns=sorted(set(to_drop)))
-
-    # 8) Speichern
+    # 6) Speichern
     if out_file is None:
         out_file = "Experiment_Enriched_SingleMetricKachel.csv"
     out_path = base / "Analysis" / out_file
     out_path.parent.mkdir(parents=True, exist_ok=True)
     df_out.to_csv(out_path, index=False, encoding="utf-8")
-    print(f"OK: Nur MAE/R² aus Predictions übernommen → {out_path}")
+
+    # 7) Info
+    print(f"OK: Serien + MAE/R² je h<=N + Aggregationen + MAE/R²@N + ErrorMetrics(JSON) → {out_path}")
+    if missing_preds:
+        print(f"Warnung: {missing_preds} Zeilen ohne auffindbare Predictions-CSV.")
 
     return df_out
-
-
 
 # --------------------- CLI entrypoint (optional) --------------------------
 if __name__ == "__main__":

@@ -107,9 +107,6 @@ class BaseInferenceProcessor(ABC):
         """
         import os
         import logging
-        import math as _math
-        import pandas as _pd
-        import numpy as _np
 
         if not prediction_entry:
             return None
@@ -120,36 +117,6 @@ class BaseInferenceProcessor(ABC):
         forecast = prediction_entry.get("future_forecast") or []
         inference_time_s = prediction_entry.get("inference_time_s")
         breakdown = prediction_entry.get("breakdown") or {}
-
-        # --- Guard: nur persistieren, wenn Zeitstempel gültig und Forecast echt ist ---
-        # 1) Datum prüfen (kein NaT/None)
-        try:
-            _ts = _pd.to_datetime(date)
-            _date_ok = (_ts is not None) and _pd.notna(_ts)
-        except Exception:
-            _date_ok = False
-
-        # 2) Forecast-Liste normalisieren & auf echte Werte prüfen
-        _fc = forecast
-        if isinstance(_fc, _np.ndarray):
-            _fc = _fc.tolist()
-        elif not isinstance(_fc, (list, tuple)):
-            _fc = []
-
-        def _is_real_number(v) -> bool:
-            try:
-                # True für finite Zahlen (auch wenn als str kommt)
-                x = float(v)
-                return not (_math.isnan(x) or _math.isinf(x))
-            except Exception:
-                return False
-
-        _has_real_fc = any((v is not None) and _is_real_number(v) for v in _fc)
-
-        if not (_date_ok and _has_real_fc):
-            # Warm-up/Platzhalter → NICHT schreiben
-            return None
-        # --- Ende Guard ---
 
         # Zielpfad bestimmen / cachen
         path_to_use = output_path
@@ -191,7 +158,7 @@ class BaseInferenceProcessor(ABC):
                 config=self.config,
                 date=date,
                 true_value=true_value,
-                forecast=_fc,  # normalisierte Forecast-Liste
+                forecast=forecast,
                 inference_time_s=inference_time_s,
                 total_time_s=total_time_s,
                 cpu_percent=cpu_percent,
@@ -204,7 +171,6 @@ class BaseInferenceProcessor(ABC):
         except Exception as e:
             logging.error(f"Fehler beim Schreiben der Step-CSV: {e}", exc_info=True)
             return None
-
 
 
     def flush_pending_entry(self) -> dict | None:
