@@ -131,7 +131,7 @@ MODEL_BLOBS_WHITELIST = {
     "sklearn": ["model.joblib"],
     "xgb": ["model.json"],
 }
-SUMMARY_CSV_NAME = "Experiment_Summary_Server_multiconfig_run_merged.csv"
+SUMMARY_CSV_NAME = "Experiment_Summary_Server_multiconfig_Final.csv"
 SCALER_FILE_NAMES = ["scaler.joblib", "y_scaler.joblib"]
 
 # ---------------------------
