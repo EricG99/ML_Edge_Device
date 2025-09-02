@@ -59,7 +59,7 @@ from experiment_pipeline_multiconfig import (
 )
 
 # === Summary & Dateinamen ===
-SUMMARY_CSV_NAME = "Experiment_Summary_LagHorizonGrid_test.csv"
+SUMMARY_CSV_NAME = "Experiment_Summary_LagHorizonGrid_revpi.csv"
 SCALER_FILE_NAMES = ["scaler.joblib", "y_scaler.joblib"]
 MODEL_BLOBS_WHITELIST = {
     "keras": ["model.keras"],
