@@ -188,7 +188,7 @@ COMPLEXITY_PRESETS = {
         "high": {"model_params": {"alpha": 0.013292918943162165}},
     },
     "svm": {
-        "simple": {"model_params": {"svm_kernel": "linear", "C": 0.05611516415334506, "epsilon": 0.4802857225639665}},
+        "simple": {"model_params": {"svm_kernel": "rbf", "C": 0.05611516415334506, "epsilon": 0.4802857225639665}},
         "medium": {"model_params": {"svm_kernel": "rbf", "C": 5.6115164153345045, "epsilon": 0.19063571821788408, "gamma": 0.029106359131330698}},
         "high": {"model_params": {"svm_kernel": "poly", "C": 539.5030966670226, "epsilon": 0.015751320499779727, "degree": 2}},
     },
