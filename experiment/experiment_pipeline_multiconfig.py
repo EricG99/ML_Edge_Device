@@ -81,79 +81,191 @@ TRAINER_MAP = {
 }
 
 # --- NEUE HYPERPARAMETER (aus CSV integriert am 28.08.2025) ---
+# --- NEUE HYPERPARAMETER (aus CSV integriert am 28.08.2025) ---
 COMPLEXITY_PRESETS = {
     "lstm": {
-        "simple": {"dropout": 0.3502, "batch_size": 64, "epochs": 100, "learning_rate": 0.0001587, "optimizer": "nadam", "loss": "huber", "clipnorm": 0.7164,
-                   "model_params": {"dropout": 0.3502, "batch_size": 64, "epochs": 100, "learning_rate": 0.0001587, "optimizer": "nadam", "loss": "huber", "clipnorm": 0.7164, "num_layers": 1, "initial_units": 32}},
-        "medium": {"dropout": 0.4091, "batch_size": 32, "epochs": 40, "learning_rate": 0.000803, "optimizer": "adam", "loss": "huber", "clipnorm": 2.5225,
-                   "model_params": {"dropout": 0.4091, "batch_size": 32, "epochs": 40, "learning_rate": 0.000803, "optimizer": "adam", "loss": "huber", "clipnorm": 2.5225, "num_layers": 2, "initial_units": 64}},
-        "high":   {"dropout": 0.3120, "batch_size": 32, "epochs": 40, "learning_rate": 0.003931, "optimizer": "rmsprop", "loss": "mse", "clipnorm": 4.9347,
-                   "model_params": {"dropout": 0.3120, "batch_size": 32, "epochs": 40, "learning_rate": 0.003931, "optimizer": "rmsprop", "loss": "mse", "clipnorm": 4.9347, "num_layers": 3, "initial_units": 96}},
+        "simple": {
+            "dropout": 0.19529936497786138, "batch_size": 64, "epochs": 15,
+            "learning_rate": 0.0022762444049473666, "optimizer": "adam",
+            "model_params": {
+                "dropout": 0.19529936497786138, "batch_size": 64, "epochs": 15,
+                "learning_rate": 0.0022762444049473666, "optimizer": "adam",
+                "num_layers": 1, "initial_units": 40
+            }
+        },
+        "medium": {
+            "dropout": 0.2225137917526093, "batch_size": 64, "epochs": 25,
+            "learning_rate": 0.0006974907450159999, "optimizer": "adam",
+            "model_params": {
+                "dropout": 0.2225137917526093, "batch_size": 64, "epochs": 25,
+                "learning_rate": 0.0006974907450159999, "optimizer": "adam",
+                "num_layers": 2, "initial_units": 80
+            }
+        },
+        "high": {
+            "dropout": 0.2805095587111947, "batch_size": 64, "epochs": 63,
+            "learning_rate": 0.000312735303678037, "optimizer": "adam",
+            "clipnorm": 1.2801020317667162,
+            "model_params": {
+                "dropout": 0.2805095587111947, "batch_size": 64, "epochs": 63,
+                "learning_rate": 0.000312735303678037, "optimizer": "adam",
+                "clipnorm": 1.2801020317667162,
+                "num_layers": 3, "initial_units": 128  # Hinweis: units_2/units_3 werden in eurem LSTM-Builder nicht explizit genutzt
+            }
+        },
     },
+
     "cnn1d": {
-        "simple": {"batch_size": 128, "epochs": 40, "learning_rate": 0.001296, "optimizer": "rmsprop", "loss": "mse", "clipnorm": 1.0063, "cnn_dropout": 0.2048, "cnn_activation": "gelu",
-                   "model_params": {"batch_size": 128, "epochs": 40, "learning_rate": 0.001296, "optimizer": "rmsprop", "loss": "mse", "clipnorm": 1.0063, "cnn_dropout": 0.2048, "cnn_activation": "gelu", "cnn_blocks": 1, "cnn_base_filters": 32, "cnn_kernel_size": 3}},
-        "medium": {"batch_size": 128, "epochs": 90, "learning_rate": 0.000210, "optimizer": "rmsprop", "loss": "mse", "clipnorm": 1.7381, "cnn_dropout": 0.1939, "cnn_activation": "tanh",
-                   "model_params": {"batch_size": 128, "epochs": 90, "learning_rate": 0.000210, "optimizer": "rmsprop", "loss": "mse", "clipnorm": 1.7381, "cnn_dropout": 0.1939, "cnn_activation": "tanh", "cnn_blocks": 2, "cnn_base_filters": 64, "cnn_kernel_size": 5}},
-        "high":   {"batch_size": 32, "epochs": 90, "learning_rate": 0.000346, "optimizer": "nadam", "loss": "huber", "clipnorm": 2.6112, "cnn_dropout": 0.00473, "cnn_activation": "relu",
-                   "model_params": {"batch_size": 32, "epochs": 90, "learning_rate": 0.000346, "optimizer": "nadam", "loss": "huber", "clipnorm": 2.6112, "cnn_dropout": 0.00473, "cnn_activation": "relu", "cnn_blocks": 3, "cnn_base_filters": 96, "cnn_kernel_size": 7}},
+        "simple": {
+            "batch_size": 128, "epochs": 14, "learning_rate": 0.001401296843184881,
+            "cnn_dropout": 0.04463648631286946, "cnn_activation": "relu",
+            "model_params": {
+                "batch_size": 128, "epochs": 14, "learning_rate": 0.001401296843184881,
+                "cnn_dropout": 0.04463648631286946, "cnn_activation": "relu",
+                "cnn_blocks": 1, "cnn_base_filters": 16, "cnn_kernel_size": 3
+            }
+        },
+        "medium": {
+            "batch_size": 128, "epochs": 26, "learning_rate": 0.00032467423912841846,
+            "cnn_dropout": 0.18163854446997776, "cnn_activation": "relu",
+            "model_params": {
+                "batch_size": 128, "epochs": 26, "learning_rate": 0.00032467423912841846,
+                "cnn_dropout": 0.18163854446997776, "cnn_activation": "relu",
+                "cnn_blocks": 2, "cnn_base_filters": 48, "cnn_kernel_size": 5
+            }
+        },
+        "high": {
+            "batch_size": 32, "epochs": 100, "learning_rate": 0.00012764019898650196,
+            "cnn_dropout": 0.493960086115395, "cnn_activation": "relu",
+            "model_params": {
+                "batch_size": 32, "epochs": 100, "learning_rate": 0.00012764019898650196,
+                "cnn_dropout": 0.493960086115395, "cnn_activation": "relu",
+                "cnn_blocks": 5, "cnn_base_filters": 192, "cnn_kernel_size": 7
+            }
+        },
     },
+
     "random_forest": {
-        "simple": {"min_samples_split": 16, "min_samples_leaf": 1, "max_features": 0.6052, "bootstrap": False, "n_jobs": -1, "random_state": 42,
-                   "model_params": {"min_samples_split": 16, "min_samples_leaf": 1, "max_features": 0.6052, "bootstrap": False, "n_estimators": 120, "max_depth": 6}},
-        "medium": {"min_samples_split": 2, "min_samples_leaf": 6, "max_features": 0.5581, "bootstrap": False, "n_jobs": -1, "random_state": 42,
-                   "model_params": {"min_samples_split": 2, "min_samples_leaf": 6, "max_features": 0.5581, "bootstrap": False, "n_estimators": 280, "max_depth": 10}},
-        "high":   {"min_samples_split": 12, "min_samples_leaf": 7, "max_features": 0.8435, "bootstrap": False, "n_jobs": -1, "random_state": 42,
-                   "model_params": {"min_samples_split": 12, "min_samples_leaf": 7, "max_features": 0.8435, "bootstrap": False, "n_estimators": 400, "max_depth": 12}},
+        "simple": {
+            "min_samples_split": 12, "min_samples_leaf": 8,
+            "n_jobs": -1, "random_state": 42,
+            "model_params": {"n_estimators": 70, "max_depth": 9,
+                             "min_samples_split": 12, "min_samples_leaf": 8}
+        },
+        "medium": {
+            "min_samples_split": 8, "min_samples_leaf": 3,
+            "n_jobs": -1, "random_state": 42,
+            "model_params": {"n_estimators": 140, "max_depth": 12,
+                             "min_samples_split": 8, "min_samples_leaf": 3,
+                             "max_features": 0.7832290311184182}
+        },
+        "high": {
+            "min_samples_split": 4, "min_samples_leaf": 2,
+            "n_jobs": -1, "random_state": 42,
+            "model_params": {"n_estimators": 500, "max_depth": 28,
+                             "min_samples_split": 4, "min_samples_leaf": 2,
+                             "max_features": "log2", "criterion": "squared_error"}
+        },
     },
+
     "xgboost": {
-        "simple": {"learning_rate": 0.005, "subsample": 0.8129, "colsample_bytree": 0.4073, "min_child_weight": 15, "gamma": 4.3521, "reg_lambda": 0.0156, "reg_alpha": 0.0014,
-                   "tree_method": "hist", "n_jobs": -1, "random_state": 42, "objective": "reg:squarederror",
-                   "xgb_params": {"learning_rate": 0.005, "subsample": 0.8129, "colsample_bytree": 0.4073, "min_child_weight": 15, "gamma": 4.3521, "reg_lambda": 0.0156, "reg_alpha": 0.0014, "n_estimators": 200, "max_depth": 3}},
-        "medium": {"learning_rate": 0.0145, "subsample": 0.8846, "colsample_bytree": 0.9263, "min_child_weight": 4, "gamma": 2.4491, "reg_lambda": 0.0549, "reg_alpha": 1.798e-6,
-                   "tree_method": "hist", "n_jobs": -1, "random_state": 42, "objective": "reg:squarederror",
-                   "xgb_params": {"learning_rate": 0.0145, "subsample": 0.8846, "colsample_bytree": 0.9263, "min_child_weight": 4, "gamma": 2.4491, "reg_lambda": 0.0549, "reg_alpha": 1.798e-6, "n_estimators": 400, "max_depth": 5}},
-        "high":   {"learning_rate": 0.0332, "subsample": 0.9226, "colsample_bytree": 0.4054, "min_child_weight": 6, "gamma": 4.1146, "reg_lambda": 0.4810, "reg_alpha": 0.0076,
-                   "tree_method": "hist", "n_jobs": -1, "random_state": 42, "objective": "reg:squarederror",
-                   "xgb_params": {"learning_rate": 0.0332, "subsample": 0.9226, "colsample_bytree": 0.4054, "min_child_weight": 6, "gamma": 4.1146, "reg_lambda": 0.4810, "reg_alpha": 0.0076, "n_estimators": 600, "max_depth": 6}},
+        "simple": {
+            "learning_rate": 0.14909151091745487,
+            "tree_method": "hist", "n_jobs": -1, "random_state": 42, "objective": "reg:squarederror",
+            "xgb_params": {"n_estimators": 400, "max_depth": 5, "learning_rate": 0.14909151091745487}
+        },
+        "medium": {
+            "learning_rate": 0.07322143929930418, "subsample": 0.8708346165630747,
+            "colsample_bytree": 0.9104387449292713, "reg_alpha": 0.00029195402848902145,
+            "reg_lambda": 1.7605401657650275e-06,
+            "tree_method": "hist", "n_jobs": -1, "random_state": 42, "objective": "reg:squarederror",
+            "xgb_params": {
+                "n_estimators": 700, "max_depth": 8, "learning_rate": 0.07322143929930418,
+                "subsample": 0.8708346165630747, "colsample_bytree": 0.9104387449292713,
+                "reg_alpha": 0.00029195402848902145, "reg_lambda": 1.7605401657650275e-06
+            }
+        },
+        "high": {
+            "learning_rate": 0.02245904943595313, "subsample": 0.691658793318229,
+            "colsample_bytree": 0.8362716526895602, "reg_alpha": 1.1544324995943998,
+            "reg_lambda": 7.938329339953408, "min_child_weight": 3, "gamma": 0.2954271784040281,
+            "tree_method": "hist", "n_jobs": -1, "random_state": 42, "objective": "reg:squarederror",
+            "xgb_params": {
+                "n_estimators": 1300, "max_depth": 8, "learning_rate": 0.02245904943595313,
+                "subsample": 0.691658793318229, "colsample_bytree": 0.8362716526895602,
+                "reg_alpha": 1.1544324995943998, "reg_lambda": 7.938329339953408,
+                "min_child_weight": 3, "gamma": 0.2954271784040281
+            }
+        },
     },
+
     "light_xgboost": {
-        "simple": {"learning_rate": 0.0094, "bagging_fraction": 0.9910, "feature_fraction": 0.6422, "min_child_samples": 2, "reg_lambda": 0.0110, "reg_alpha": 3.081e-6,
-                   "max_bin": 256, "n_jobs": -1, "random_state": 42, "objective": "regression",
-                   "lgbm_params": {"learning_rate": 0.0094, "bagging_fraction": 0.9910, "feature_fraction": 0.6422, "min_child_samples": 2, "reg_lambda": 0.0110, "reg_alpha": 3.081e-6, "max_bin": 256, "n_estimators": 100, "num_leaves": 198}},
-        "medium": {"learning_rate": 0.0060, "bagging_fraction": 0.8470, "feature_fraction": 0.4016, "min_child_samples": 13, "reg_lambda": 0.0039, "reg_alpha": 1.996e-5,
-                   "max_bin": 224, "n_jobs": -1, "random_state": 42, "objective": "regression",
-                   "lgbm_params": {"learning_rate": 0.0060, "bagging_fraction": 0.8470, "feature_fraction": 0.4016, "min_child_samples": 13, "reg_lambda": 0.0039, "reg_alpha": 1.996e-5, "max_bin": 224, "n_estimators": 200, "num_leaves": 108}},
-        "high":   {"learning_rate": 0.0233, "bagging_fraction": 0.7452, "feature_fraction": 0.8878, "min_child_samples": 11, "reg_lambda": 0.0028, "reg_alpha": 0.0026,
-                   "max_bin": 160, "n_jobs": -1, "random_state": 42, "objective": "regression",
-                   "lgbm_params": {"learning_rate": 0.0233, "bagging_fraction": 0.7452, "feature_fraction": 0.8878, "min_child_samples": 11, "reg_lambda": 0.0028, "reg_alpha": 0.0026, "max_bin": 160, "n_estimators": 300, "num_leaves": 126}},
+        "simple": {
+            "learning_rate": 0.14985514163361244,
+            "n_jobs": -1, "random_state": 42, "objective": "regression",
+            "lgbm_params": {
+                "learning_rate": 0.14985514163361244, "n_estimators": 400, "max_depth": -1
+            }
+        },
+        "medium": {
+            # Mapping: subsample->bagging_fraction, colsample_bytree->feature_fraction
+            "bagging_fraction": 0.8242596846233595, "feature_fraction": 0.906681555623289,
+            "reg_alpha": 0.000766230177703436, "reg_lambda": 0.0005288995361097962,
+            "n_jobs": -1, "random_state": 42, "objective": "regression",
+            "learning_rate": 0.07202442399352145,
+            "lgbm_params": {
+                "bagging_fraction": 0.8242596846233595, "feature_fraction": 0.906681555623289,
+                "reg_alpha": 0.000766230177703436, "reg_lambda": 0.0005288995361097962,
+                "n_estimators": 800, "max_depth": 11,
+                # falls euer Trainer num_leaves erwartet, könnt ihr eine sinnvolle Zahl setzen
+            }
+        },
+        "high": {
+            "bagging_fraction": 0.8579300353952888, "feature_fraction": 0.7902901313370199,
+            "reg_alpha": 0.2688293088201511, "reg_lambda": 1.5776015824820329,
+            "n_jobs": -1, "random_state": 42, "objective": "regression",
+            "learning_rate": 0.04902624817259419,
+            "lgbm_params": {
+                "bagging_fraction": 0.8579300353952888, "feature_fraction": 0.7902901313370199,
+                "reg_alpha": 0.2688293088201511, "reg_lambda": 1.5776015824820329,
+                "n_estimators": 900, "max_depth": 7, "min_child_samples": 8
+            }
+        },
     },
+
     "ridge": {
-        "simple": {"alpha": 1.0, "fit_intercept": True, "tol": 1e-4, "max_iter": 10000,
-                   "model_params": {"alpha": 1.0, "fit_intercept": True, "tol": 1e-4, "max_iter": 10000}},
-        "medium": {"alpha": 0.5, "fit_intercept": True, "tol": 5e-5, "max_iter": 20000,
-                   "model_params": {"alpha": 0.5, "fit_intercept": True, "tol": 5e-5, "max_iter": 20000}},
-        "high":   {"alpha": 0.2, "fit_intercept": True, "tol": 1e-5, "max_iter": 30000,
-                   "model_params": {"alpha": 0.2, "fit_intercept": True, "tol": 1e-5, "max_iter": 30000}},
+        "simple": {"alpha": 4.32845022129388, "fit_intercept": True, "tol": 1e-4, "max_iter": 10000,
+                   "model_params": {"alpha": 4.32845022129388, "fit_intercept": True, "tol": 1e-4, "max_iter": 10000}},
+        "medium": {"alpha": 0.5611516415334505, "fit_intercept": True, "tol": 5e-5, "max_iter": 20000,
+                   "model_params": {"alpha": 0.5611516415334505, "fit_intercept": True, "tol": 5e-5, "max_iter": 20000}},
+        "high":   {"alpha": 0.013292918943162165, "fit_intercept": True, "tol": 1e-5, "max_iter": 30000,
+                   "model_params": {"alpha": 0.013292918943162165, "fit_intercept": True, "tol": 1e-5, "max_iter": 30000}},
     },
+
     "lasso": {
-        "simple": {"alpha": 0.001, "fit_intercept": True, "tol": 1e-4, "max_iter": 15000,
-                   "model_params": {"alpha": 0.001, "fit_intercept": True, "tol": 1e-4, "max_iter": 15000}},
-        "medium": {"alpha": 0.0005, "fit_intercept": True, "tol": 5e-5, "max_iter": 30000,
-                   "model_params": {"alpha": 0.0005, "fit_intercept": True, "tol": 5e-5, "max_iter": 30000}},
-        "high":   {"alpha": 0.0002, "fit_intercept": True, "tol": 1e-5, "max_iter": 50000,
-                   "model_params": {"alpha": 0.0002, "fit_intercept": True, "tol": 1e-5, "max_iter": 50000}},
+        "simple": {"alpha": 4.32845022129388, "fit_intercept": True, "tol": 1e-4, "max_iter": 15000,
+                   "model_params": {"alpha": 4.32845022129388, "fit_intercept": True, "tol": 1e-4, "max_iter": 15000}},
+        "medium": {"alpha": 0.5611516415334505, "fit_intercept": True, "tol": 5e-5, "max_iter": 30000,
+                   "model_params": {"alpha": 0.5611516415334505, "fit_intercept": True, "tol": 5e-5, "max_iter": 30000}},
+        "high":   {"alpha": 0.013292918943162165, "fit_intercept": True, "tol": 1e-5, "max_iter": 50000,
+                   "model_params": {"alpha": 0.013292918943162165, "fit_intercept": True, "tol": 1e-5, "max_iter": 50000}},
     },
+
     "svm": {
-        "simple": {"svm_kernel": "linear", "C": 1.0, "epsilon": 0.1, "tol": 1e-3, "max_iter": 10000,
-                   "model_params": {"svm_kernel": "linear", "C": 1.0, "epsilon": 0.1, "tol": 1e-3, "max_iter": 10000}},
-        "medium": {"svm_kernel": "linear", "C": 2.0, "epsilon": 0.1, "tol": 5e-4, "max_iter": 20000,
-                   "model_params": {"svm_kernel": "linear", "C": 2.0, "epsilon": 0.1, "tol": 5e-4, "max_iter": 20000}},
-        "high":   {"svm_kernel": "rbf", "C": 2.0, "epsilon": 0.1, "gamma": "scale", "tol": 1e-3, "max_iter": 25000,
-                   "model_params": {"svm_kernel": "rbf", "C": 2.0, "epsilon": 0.1, "gamma": "scale", "tol": 1e-3, "max_iter": 25000}},
+        "simple": {"svm_kernel": "linear", "C": 0.05611516415334506, "epsilon": 0.4802857225639665,
+                   "tol": 1e-3, "max_iter": 10000,
+                   "model_params": {"svm_kernel": "linear", "C": 0.05611516415334506, "epsilon": 0.4802857225639665,
+                                    "tol": 1e-3, "max_iter": 10000}},
+        "medium": {"svm_kernel": "linear", "C": 5.6115164153345045, "epsilon": 0.19063571821788408,
+                   "gamma": 0.029106359131330698, "tol": 5e-4, "max_iter": 20000,
+                   "model_params": {"svm_kernel": "linear", "C": 5.6115164153345045, "epsilon": 0.19063571821788408,
+                                    "gamma": 0.029106359131330698, "tol": 5e-4, "max_iter": 20000}},
+        "high":   {"svm_kernel": "poly", "C": 539.5030966670226, "epsilon": 0.015751320499779727,
+                   "degree": 2, "tol": 1e-3, "max_iter": 25000,
+                   "model_params": {"svm_kernel": "poly", "C": 539.5030966670226, "epsilon": 0.015751320499779727,
+                                    "degree": 2, "tol": 1e-3, "max_iter": 25000}},
     },
 }
-
 
 
 # --- Basis-Defaults, die für alle Modelle gelten ---
