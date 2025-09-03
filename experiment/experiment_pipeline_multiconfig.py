@@ -80,193 +80,119 @@ TRAINER_MAP = {
     "svm": ("ML_Algorithms.SVM.svm_train", "SVMTrainer", "SVM"),
 }
 
-# --- NEUE HYPERPARAMETER (aus CSV integriert am 28.08.2025) ---
-# --- NEUE HYPERPARAMETER (aus CSV integriert am 28.08.2025) ---
+# --- OPTIMIERTE HYPERPARAMETER (je Level für Komplexitätsvergleich, Stand: 03.09.2025) ---
 COMPLEXITY_PRESETS = {
     "lstm": {
-        "simple": {
-            "dropout": 0.19529936497786138, "batch_size": 64, "epochs": 15,
-            "learning_rate": 0.0022762444049473666, "optimizer": "adam",
+        "simple": { # Bester Trial: #34, Value: 1.169
+            "dropout": 0.032631774170782744, "batch_size": 128, "epochs": 13,
+            "learning_rate": 0.0034510766784961646, "optimizer": "adam",
             "model_params": {
-                "dropout": 0.19529936497786138, "batch_size": 64, "epochs": 15,
-                "learning_rate": 0.0022762444049473666, "optimizer": "adam",
-                "num_layers": 1, "initial_units": 40
+                "num_layers": 1, "initial_units": 32,
+                "dropout": 0.032631774170782744, "batch_size": 128, "epochs": 13,
+                "learning_rate": 0.0034510766784961646, "optimizer": "adam"
             }
         },
-        "medium": {
+        "medium": { # Bester Trial: #21, Value: 1.164
             "dropout": 0.2225137917526093, "batch_size": 64, "epochs": 25,
             "learning_rate": 0.0006974907450159999, "optimizer": "adam",
             "model_params": {
+                "num_layers": 2, "initial_units": 80,
                 "dropout": 0.2225137917526093, "batch_size": 64, "epochs": 25,
-                "learning_rate": 0.0006974907450159999, "optimizer": "adam",
-                "num_layers": 2, "initial_units": 80
+                "learning_rate": 0.0006974907450159999, "optimizer": "adam"
             }
         },
-        "high": {
+        "high": { # Bester Trial: #3, Value: 1.134
             "dropout": 0.2805095587111947, "batch_size": 64, "epochs": 63,
-            "learning_rate": 0.000312735303678037, "optimizer": "adam",
-            "clipnorm": 1.2801020317667162,
+            "learning_rate": 0.000312735303678037, "optimizer": "adam", "clipnorm": 1.2801020317667162,
             "model_params": {
+                "num_layers": 3, "initial_units": 128,
                 "dropout": 0.2805095587111947, "batch_size": 64, "epochs": 63,
-                "learning_rate": 0.000312735303678037, "optimizer": "adam",
-                "clipnorm": 1.2801020317667162,
-                "num_layers": 3, "initial_units": 128  # Hinweis: units_2/units_3 werden in eurem LSTM-Builder nicht explizit genutzt
+                "learning_rate": 0.000312735303678037, "optimizer": "adam", "clipnorm": 1.2801020317667162
             }
         },
     },
-
     "cnn1d": {
-        "simple": {
-            "batch_size": 128, "epochs": 14, "learning_rate": 0.001401296843184881,
-            "cnn_dropout": 0.04463648631286946, "cnn_activation": "relu",
+        "simple": { # Bester Trial: #43, Value: 0.956
+            "epochs": 14, "learning_rate": 0.001401296843184881, "cnn_dropout": 0.04463648631286946,
             "model_params": {
-                "batch_size": 128, "epochs": 14, "learning_rate": 0.001401296843184881,
-                "cnn_dropout": 0.04463648631286946, "cnn_activation": "relu",
-                "cnn_blocks": 1, "cnn_base_filters": 16, "cnn_kernel_size": 3
+                "cnn_blocks": 1, "filters": 16, "kernel_size": 3, "epochs": 14,
+                "learning_rate": 0.001401296843184881, "cnn_dropout": 0.04463648631286946
             }
         },
-        "medium": {
-            "batch_size": 128, "epochs": 26, "learning_rate": 0.00032467423912841846,
-            "cnn_dropout": 0.18163854446997776, "cnn_activation": "relu",
+        "medium": { # Bester Trial: #31, Value: 0.924
+            "epochs": 26, "learning_rate": 0.00032467423912841846, "cnn_dropout": 0.18163854446997776, "pooling_type": "max",
             "model_params": {
-                "batch_size": 128, "epochs": 26, "learning_rate": 0.00032467423912841846,
-                "cnn_dropout": 0.18163854446997776, "cnn_activation": "relu",
-                "cnn_blocks": 2, "cnn_base_filters": 48, "cnn_kernel_size": 5
+                "cnn_blocks": 2, "filters": 48, "kernel_size": 5, "epochs": 26,
+                "learning_rate": 0.00032467423912841846, "cnn_dropout": 0.18163854446997776, "pooling_type": "max"
             }
         },
-        "high": {
-            "batch_size": 32, "epochs": 100, "learning_rate": 0.00012764019898650196,
-            "cnn_dropout": 0.493960086115395, "cnn_activation": "relu",
+        "high": { # Bester Trial: #48, Value: 0.961
+            "epochs": 100, "learning_rate": 0.00012764019898650196, "cnn_dropout": 0.493960086115395, "pooling_type": "max",
             "model_params": {
-                "batch_size": 32, "epochs": 100, "learning_rate": 0.00012764019898650196,
-                "cnn_dropout": 0.493960086115395, "cnn_activation": "relu",
-                "cnn_blocks": 5, "cnn_base_filters": 192, "cnn_kernel_size": 7
+                "conv_blocks": 5, "filters": 192, "kernel_size": 7, "epochs": 100,
+                "learning_rate": 0.00012764019898650196, "cnn_dropout": 0.493960086115395, "pooling_type": "max"
             }
         },
     },
-
-    "random_forest": {
+    "random_forest": { # Hinweis: Alle Trials hatten den gleichen Wert, daher wurde der erste Trial gewählt.
         "simple": {
-            "min_samples_split": 12, "min_samples_leaf": 8,
             "n_jobs": -1, "random_state": 42,
-            "model_params": {"n_estimators": 70, "max_depth": 9,
-                             "min_samples_split": 12, "min_samples_leaf": 8}
+            "model_params": {"n_estimators": 60, "max_depth": 10, "min_samples_split": 18, "min_samples_leaf": 8}
         },
         "medium": {
-            "min_samples_split": 8, "min_samples_leaf": 3,
             "n_jobs": -1, "random_state": 42,
-            "model_params": {"n_estimators": 140, "max_depth": 12,
-                             "min_samples_split": 8, "min_samples_leaf": 3,
-                             "max_features": 0.7832290311184182}
+            "model_params": {"n_estimators": 180, "max_depth": 24, "min_samples_split": 7, "min_samples_leaf": 3, "max_features": 0.5624074561769746}
         },
         "high": {
-            "min_samples_split": 4, "min_samples_leaf": 2,
             "n_jobs": -1, "random_state": 42,
-            "model_params": {"n_estimators": 500, "max_depth": 28,
-                             "min_samples_split": 4, "min_samples_leaf": 2,
-                             "max_features": "log2", "criterion": "squared_error"}
+            "model_params": {"n_estimators": 500, "max_depth": 59, "min_samples_split": 4, "min_samples_leaf": 2, "max_features": "sqrt", "criterion": "squared_error"}
         },
     },
-
     "xgboost": {
-        "simple": {
-            "learning_rate": 0.14909151091745487,
+        "simple": { # Bester Trial: #40, Value: 0.0623
             "tree_method": "hist", "n_jobs": -1, "random_state": 42, "objective": "reg:squarederror",
             "xgb_params": {"n_estimators": 400, "max_depth": 5, "learning_rate": 0.14909151091745487}
         },
-        "medium": {
-            "learning_rate": 0.07322143929930418, "subsample": 0.8708346165630747,
-            "colsample_bytree": 0.9104387449292713, "reg_alpha": 0.00029195402848902145,
-            "reg_lambda": 1.7605401657650275e-06,
+        "medium": { # Bester Trial: #43, Value: 0.0004
             "tree_method": "hist", "n_jobs": -1, "random_state": 42, "objective": "reg:squarederror",
-            "xgb_params": {
-                "n_estimators": 700, "max_depth": 8, "learning_rate": 0.07322143929930418,
-                "subsample": 0.8708346165630747, "colsample_bytree": 0.9104387449292713,
-                "reg_alpha": 0.00029195402848902145, "reg_lambda": 1.7605401657650275e-06
-            }
+            "xgb_params": {"n_estimators": 700, "max_depth": 8, "learning_rate": 0.07322143929930418, "subsample": 0.8708346165630747, "colsample_bytree": 0.9104387449292713, "reg_alpha": 0.00029195402848902145, "reg_lambda": 1.7605401657650275e-06}
         },
-        "high": {
-            "learning_rate": 0.02245904943595313, "subsample": 0.691658793318229,
-            "colsample_bytree": 0.8362716526895602, "reg_alpha": 1.1544324995943998,
-            "reg_lambda": 7.938329339953408, "min_child_weight": 3, "gamma": 0.2954271784040281,
+        "high": { # Bester Trial: #49, Value: 0.1934
             "tree_method": "hist", "n_jobs": -1, "random_state": 42, "objective": "reg:squarederror",
-            "xgb_params": {
-                "n_estimators": 1300, "max_depth": 8, "learning_rate": 0.02245904943595313,
-                "subsample": 0.691658793318229, "colsample_bytree": 0.8362716526895602,
-                "reg_alpha": 1.1544324995943998, "reg_lambda": 7.938329339953408,
-                "min_child_weight": 3, "gamma": 0.2954271784040281
-            }
+            "xgb_params": {"n_estimators": 1300, "max_depth": 8, "learning_rate": 0.02245904943595313, "subsample": 0.691658793318229, "colsample_bytree": 0.8362716526895602, "reg_alpha": 1.1544324995943998, "reg_lambda": 7.938329339953408, "min_child_weight": 3, "gamma": 0.2954271784040281}
         },
     },
-
     "light_xgboost": {
-        "simple": {
-            "learning_rate": 0.14985514163361244,
+        "simple": { # Bester Trial: #32, Value: 0.0228
             "n_jobs": -1, "random_state": 42, "objective": "regression",
-            "lgbm_params": {
-                "learning_rate": 0.14985514163361244, "n_estimators": 400, "max_depth": -1
-            }
+            "lgbm_params": {"n_estimators": 400, "max_depth": -1, "learning_rate": 0.14985514163361244}
         },
-        "medium": {
-            # Mapping: subsample->bagging_fraction, colsample_bytree->feature_fraction
-            "bagging_fraction": 0.8242596846233595, "feature_fraction": 0.906681555623289,
-            "reg_alpha": 0.000766230177703436, "reg_lambda": 0.0005288995361097962,
+        "medium": { # Bester Trial: #43, Value: 0.0284
             "n_jobs": -1, "random_state": 42, "objective": "regression",
-            "learning_rate": 0.07202442399352145,
-            "lgbm_params": {
-                "bagging_fraction": 0.8242596846233595, "feature_fraction": 0.906681555623289,
-                "reg_alpha": 0.000766230177703436, "reg_lambda": 0.0005288995361097962,
-                "n_estimators": 800, "max_depth": 11,
-                # falls euer Trainer num_leaves erwartet, könnt ihr eine sinnvolle Zahl setzen
-            }
+            "lgbm_params": {"n_estimators": 800, "max_depth": 11, "learning_rate": 0.07202442399352145, "subsample": 0.8242596846233595, "colsample_bytree": 0.906681555623289, "reg_alpha": 0.000766230177703436, "reg_lambda": 0.0005288995361097962}
         },
-        "high": {
-            "bagging_fraction": 0.8579300353952888, "feature_fraction": 0.7902901313370199,
-            "reg_alpha": 0.2688293088201511, "reg_lambda": 1.5776015824820329,
+        "high": { # Bester Trial: #43, Value: 0.0631
             "n_jobs": -1, "random_state": 42, "objective": "regression",
-            "learning_rate": 0.04902624817259419,
-            "lgbm_params": {
-                "bagging_fraction": 0.8579300353952888, "feature_fraction": 0.7902901313370199,
-                "reg_alpha": 0.2688293088201511, "reg_lambda": 1.5776015824820329,
-                "n_estimators": 900, "max_depth": 7, "min_child_samples": 8
-            }
+            "lgbm_params": {"n_estimators": 1400, "max_depth": 9, "learning_rate": 0.04902624817259419, "subsample": 0.8579300353952888, "colsample_bytree": 0.7902901313370199, "reg_alpha": 0.2688293088201511, "reg_lambda": 1.5776015824820329, "min_child_samples": 8}
         },
     },
-
+    # Für Ridge, Lasso, SVM wurden die Parameter des ersten Trials genommen, da alle Werte identisch waren.
     "ridge": {
-        "simple": {"alpha": 4.32845022129388, "fit_intercept": True, "tol": 1e-4, "max_iter": 10000,
-                   "model_params": {"alpha": 4.32845022129388, "fit_intercept": True, "tol": 1e-4, "max_iter": 10000}},
-        "medium": {"alpha": 0.5611516415334505, "fit_intercept": True, "tol": 5e-5, "max_iter": 20000,
-                   "model_params": {"alpha": 0.5611516415334505, "fit_intercept": True, "tol": 5e-5, "max_iter": 20000}},
-        "high":   {"alpha": 0.013292918943162165, "fit_intercept": True, "tol": 1e-5, "max_iter": 30000,
-                   "model_params": {"alpha": 0.013292918943162165, "fit_intercept": True, "tol": 1e-5, "max_iter": 30000}},
+        "simple": {"model_params": {"alpha": 4.32845022129388}},
+        "medium": {"model_params": {"alpha": 0.5611516415334505}},
+        "high": {"model_params": {"alpha": 0.013292918943162165}},
     },
-
     "lasso": {
-        "simple": {"alpha": 4.32845022129388, "fit_intercept": True, "tol": 1e-4, "max_iter": 15000,
-                   "model_params": {"alpha": 4.32845022129388, "fit_intercept": True, "tol": 1e-4, "max_iter": 15000}},
-        "medium": {"alpha": 0.5611516415334505, "fit_intercept": True, "tol": 5e-5, "max_iter": 30000,
-                   "model_params": {"alpha": 0.5611516415334505, "fit_intercept": True, "tol": 5e-5, "max_iter": 30000}},
-        "high":   {"alpha": 0.013292918943162165, "fit_intercept": True, "tol": 1e-5, "max_iter": 50000,
-                   "model_params": {"alpha": 0.013292918943162165, "fit_intercept": True, "tol": 1e-5, "max_iter": 50000}},
+        "simple": {"model_params": {"alpha": 4.32845022129388}},
+        "medium": {"model_params": {"alpha": 0.5611516415334505}},
+        "high": {"model_params": {"alpha": 0.013292918943162165}},
     },
-
     "svm": {
-        "simple": {"svm_kernel": "linear", "C": 0.05611516415334506, "epsilon": 0.4802857225639665,
-                   "tol": 1e-3, "max_iter": 10000,
-                   "model_params": {"svm_kernel": "linear", "C": 0.05611516415334506, "epsilon": 0.4802857225639665,
-                                    "tol": 1e-3, "max_iter": 10000}},
-        "medium": {"svm_kernel": "linear", "C": 5.6115164153345045, "epsilon": 0.19063571821788408,
-                   "gamma": 0.029106359131330698, "tol": 5e-4, "max_iter": 20000,
-                   "model_params": {"svm_kernel": "linear", "C": 5.6115164153345045, "epsilon": 0.19063571821788408,
-                                    "gamma": 0.029106359131330698, "tol": 5e-4, "max_iter": 20000}},
-        "high":   {"svm_kernel": "poly", "C": 539.5030966670226, "epsilon": 0.015751320499779727,
-                   "degree": 2, "tol": 1e-3, "max_iter": 25000,
-                   "model_params": {"svm_kernel": "poly", "C": 539.5030966670226, "epsilon": 0.015751320499779727,
-                                    "degree": 2, "tol": 1e-3, "max_iter": 25000}},
+        "simple": {"model_params": {"svm_kernel": "linear", "C": 0.05611516415334506, "epsilon": 0.4802857225639665}},
+        "medium": {"model_params": {"svm_kernel": "rbf", "C": 5.6115164153345045, "epsilon": 0.19063571821788408, "gamma": 0.029106359131330698}},
+        "high": {"model_params": {"svm_kernel": "poly", "C": 539.5030966670226, "epsilon": 0.015751320499779727, "degree": 2}},
     },
 }
-
 
 # --- Basis-Defaults, die für alle Modelle gelten ---
 BASE_COMMON = {
