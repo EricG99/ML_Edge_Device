@@ -85,64 +85,140 @@ class BaseTrainer(ABC):
         logging.info("\nStep 3: Saving artifacts for inference...")
         mode = self.config.get("inference_mode", "load_artifacts_path")
 
-        
-        
         paths = self.config.get("paths")
         if not paths:
             logging.error("Pfade nicht in der Konfiguration gefunden. Artefakte können nicht gespeichert werden.")
             return
 
+        # Kleine Helfer zum Aktualisieren der training_config.json um modellgrößen
+        def _update_model_size(models_dir: str, filename: str) -> None:
+            import json, os
+            cfg_path = os.path.join(models_dir, "training_config.json")
+            data = {}
+            if os.path.exists(cfg_path):
+                try:
+                    with open(cfg_path, "r", encoding="utf-8") as fh:
+                        data = json.load(fh) or {}
+                except Exception:
+                    data = {}
+            sizes = data.get("model_sizes_mb", {})
+            try:
+                size_mb = round(os.path.getsize(os.path.join(models_dir, filename)) / (1024 * 1024), 6)
+                sizes[filename] = size_mb
+                data["model_sizes_mb"] = sizes
+                with open(cfg_path, "w", encoding="utf-8") as fh:
+                    json.dump(data, fh, indent=2, ensure_ascii=False)
+                logging.info(f"Model size recorded in training_config.json: {filename} = {size_mb} MB")
+            except Exception as e:
+                logging.warning(f"Could not record model size for {filename}: {e}")
+
         if mode == 'load_artifacts_fast':
-            # Diese Logik bleibt unverändert
+            # Statische (legacy) Speicherpfade
             logging.info("Saving in 'fast' mode with static paths...")
             static_paths = {
                 "scaler": self.config.get("scaler_path_static", "scaler.joblib"),
                 "features": self.config.get("features_path_static", "features.joblib"),
-                "model": self.config.get("model_path_static", "model.joblib")
+                "model": self.config.get("model_path_static", "model.joblib"),
+                "y_scaler": self.config.get("y_scaler_path_static", "y_scaler.joblib"),
             }
-            joblib.dump(self.scaler, static_paths["scaler"])
-            joblib.dump(self.features, static_paths["features"])
-            joblib.dump(self.model, static_paths["model"])
-            logging.info(f"Artifacts saved to static paths: {static_paths}")
+            try:
+                joblib.dump(self.scaler, static_paths["scaler"])
+                joblib.dump(self.features, static_paths["features"])
+                joblib.dump(self.model, static_paths["model"])
+                if getattr(self, "y_scaler", None) is not None:
+                    joblib.dump(self.y_scaler, static_paths["y_scaler"])
+                logging.info(f"Artifacts saved to static paths: {static_paths}")
+            except Exception as e:
+                logging.error(f"Failed to save artifacts in fast mode: {e}")
+            return
 
         elif mode == 'load_artifacts_path':
-
+            # Train-Zeit optional mitgeben
             try:
                 self.config["train_time_s"] = float(self.train_time)
             except Exception:
                 pass
-            # Hier wird jetzt der korrekte, bereits erstellte Pfad verwendet.
-            logging.info("Saving in 'path' mode with versioned directory...")
-            saver = pipeline_utils.ModelScalerSaver(self.config, paths)
-            
-            # --- ANGEPASSTE LOGIK ZUR STEUERUNG DER QUANTISIERUNG START ---
-            rep_gen = None
-            # Prüft, ob die Quantisierung in der Konfiguration aktiviert ist (Standard ist True)
-            if self.config.get('quantization_enabled', True):
-                logging.info("Quantization is enabled. Creating representative dataset for TFLite conversion.")
-                saved_artifacts = None
-                try:
-                    rep_gen = pipeline_utils.create_representative_dataset_generator(getattr(self, '_rep_source', None), config=self.config)
-                except TypeError:
-                    # Fallback für ältere Signaturen (nur eine Positionals)
-                    rep_gen = pipeline_utils.create_representative_dataset_generator(getattr(self, '_rep_source', None))
-            else:
-                logging.info("Quantization is disabled via config. Skipping representative dataset generation.")
-            # --- ANGEPASSTE LOGIK ZUR STEUERUNG DER QUANTISIERUNG ENDE ---
 
-            # Das (potenziell leere) rep_gen wird an die Speicherfunktion übergeben.
-            # Diese Funktion muss intern damit umgehen können, um die Quantisierung zu überspringen.
-            saved_artifacts = saver.save_artifacts(model=self.model, scaler=self.scaler, representative_dataset=rep_gen)
-            
-            # Speichere den dedizierten y_scaler, falls er existiert
-            if getattr(self, 'y_scaler', None) is not None:
-                y_path = os.path.join(paths["Scalers"], "y_scaler.joblib")
-                joblib.dump(self.y_scaler, y_path)
-                logging.info(f"Target y_scaler saved to: {y_path}")
-            
-            # Speichere die korrekte Feature-Liste
+            logging.info("Saving in 'path' mode with versioned directory...")
+
+            # 1) Zentrale Saver-Logik (schreibt DL/TFLite/etc.)
+            saver = pipeline_utils.ModelScalerSaver(self.config, paths)
+
+            # Repräsentatives Dataset für Quantisierung nur erstellen, wenn benötigt
+            rep_gen = None
             try:
-                features_path = os.path.join(paths.get("Models"), "features.joblib")
+                # Bevorzugte Signatur mit config
+                rep_gen = pipeline_utils.create_representative_dataset_generator(
+                    getattr(self, '_rep_source', None),
+                    config=self.config
+                )
+            except TypeError:
+                # Fallback auf alte Signatur ohne config
+                try:
+                    rep_gen = pipeline_utils.create_representative_dataset_generator(
+                        getattr(self, '_rep_source', None)
+                    )
+                except Exception:
+                    rep_gen = None
+            except Exception:
+                rep_gen = None
+
+            saved_artifacts = None
+            try:
+                saved_artifacts = saver.save_artifacts(
+                    model=self.model,
+                    scaler=self.scaler,
+                    representative_dataset=rep_gen
+                )
+            except Exception as e:
+                logging.warning(f"Primary saver.save_artifacts failed or produced no model file: {e}")
+
+            # 2) y_scaler separat speichern (falls vorhanden)
+            try:
+                if getattr(self, "y_scaler", None) is not None:
+                    y_scaler_path = os.path.join(paths.get("Scalers"), "y_scaler.joblib")
+                    os.makedirs(paths.get("Scalers"), exist_ok=True)
+                    joblib.dump(self.y_scaler, y_scaler_path)
+                    logging.info(f"Target y_scaler saved to: {y_scaler_path}")
+                    if saved_artifacts is not None:
+                        saved_artifacts["y_scaler_path"] = y_scaler_path
+            except Exception as e:
+                logging.warning(f"Failed to save y_scaler: {e}")
+
+            # 3) Fallback: Wenn KEINE Modell-Datei existiert, generisch als model.joblib speichern (Sklearn etc.)
+            models_dir = paths.get("Models")
+            os.makedirs(models_dir, exist_ok=True)
+
+            # Kandidaten, die die Orchestrierung als "gültiges Modell" erkennt
+            candidate_files = [
+                "model.keras",
+                "model.json",  # z.B. LightGBM JSON
+                "model.joblib",
+                "model_quant_float16.tflite",
+                "model_quant_int8.tflite",
+                "model_quant_int8_full.tflite",
+            ]
+            has_model_blob = any(os.path.exists(os.path.join(models_dir, f)) for f in candidate_files)
+
+            if not has_model_blob:
+                # Universeller Dump für sklearn & Co.
+                try:
+                    out_path = os.path.join(models_dir, "model.joblib")
+                    joblib.dump(self.model, out_path)
+                    logging.info(f"Fallback: sklearn-like model saved to {out_path}")
+                    _update_model_size(models_dir, "model.joblib")
+                except Exception as e:
+                    logging.warning(f"Fallback-Save for sklearn-like model failed: {e}")
+            else:
+                # Wenn ein Modell bereits existiert, soweit möglich dessen Größe nachtragen
+                for fname in candidate_files:
+                    fpath = os.path.join(models_dir, fname)
+                    if os.path.exists(fpath):
+                        _update_model_size(models_dir, fname)
+
+            # 4) Features immer speichern
+            try:
+                features_path = os.path.join(models_dir, "features.joblib")
                 joblib.dump(self.features, features_path)
                 logging.info(f"Feature list saved to: {features_path}")
                 if saved_artifacts is not None:
@@ -151,6 +227,8 @@ class BaseTrainer(ABC):
                 logging.error(f"Failed to save feature list: {e}")
 
             logging.info(f"All artifacts for run '{self.config['run_id']}' saved successfully.")
-        
+            return
+
         else:
             logging.error(f"Unknown inference_mode '{mode}'. Artifacts not saved.")
+            return
