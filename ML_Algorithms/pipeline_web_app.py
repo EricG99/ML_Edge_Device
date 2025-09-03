@@ -394,6 +394,7 @@ def inference_manager(config: dict, inference_class, folder_flag: str, algorithm
     import logging
     import pandas as pd
     import math
+    import numpy as np  # <— für robuste NaN/Inf-Erkennung
     from copy import deepcopy
 
     try:
@@ -450,6 +451,26 @@ def inference_manager(config: dict, inference_class, folder_flag: str, algorithm
             logging.warning(f"training_config.json konnte nicht geladen/gewertet werden ({found}): {e}")
             return cfg
 
+    # ---------- NEU/ROBUST: Forecast-Validierung ----------
+    def _has_real_forecast(fc) -> bool:
+        """
+        True, wenn mindestens ein Wert numerisch und endlich ist.
+        Deckt Python-Floats, numpy-Skalare, Listen/Arrays/Series ab.
+        """
+        if fc is None:
+            return False
+        try:
+            if isinstance(fc, (list, tuple)):
+                arr = np.asarray(fc, dtype=float)
+            elif hasattr(fc, "to_numpy"):  # pandas Series
+                arr = np.asarray(fc.to_numpy(), dtype=float)
+            else:
+                arr = np.asarray([fc], dtype=float)
+            return np.isfinite(arr).any()
+        except Exception:
+            return False
+    # ------------------------------------------------------
+
     proc, n_cpus = None, 1
     if psutil:
         try:
@@ -457,7 +478,7 @@ def inference_manager(config: dict, inference_class, folder_flag: str, algorithm
             n_cpus = max(psutil.cpu_count(logical=True) or 1, 1)
         except Exception:
             pass
-            
+
     # ======================================================================
     # PHASE 1: INITIALISIERUNG
     # ======================================================================
@@ -500,7 +521,6 @@ def inference_manager(config: dict, inference_class, folder_flag: str, algorithm
 
         initial_data_source = shared_model.get("initial_training_data")
         if config.get("loading_strategy") == "split" and initial_data_source is not None and not getattr(initial_data_source, "empty", True):
-            # KEIN Testdaten-Priming → nur erlaubte Vor-Historie verwenden, wenn vorhanden
             initial_history_df = shared_model.get("initial_history_df")
             if initial_history_df is not None and not initial_history_df.empty:
                 min_points = getattr(data_processor, "_min_data_points", 1)
@@ -596,24 +616,15 @@ def inference_manager(config: dict, inference_class, folder_flag: str, algorithm
 
                 prediction_entry = inference_processor.process_step(payload)
                 if prediction_entry:
-                    # >>> NEU: Nur „echte“ Forecasts zählen/speichern
-                    _fc = prediction_entry.get("future_forecast")
-                    _has_real_fc = False
-                    if isinstance(_fc, (list, tuple)):
-                        for _v in _fc:
-                            try:
-                                if _v is not None and not (isinstance(_v, float) and (math.isnan(_v) or math.isinf(_v))):
-                                    _has_real_fc = True
-                                    break
-                            except Exception:
-                                _has_real_fc = True
-                                break
-                    if not _has_real_fc:
-                        # warm-up/platzhalter → überspringen
+                    # === WICHTIG: Nur „echte“ Forecasts zählen/speichern (keine NaN/Inf) ===
+                    fc = prediction_entry.get("future_forecast")
+                    if not _has_real_forecast(fc):
+                        # warm-up/platzhalter → NICHT zählen & NICHT speichern
                         elapsed = time.perf_counter() - step_wall_t0
-                        if (sleep_dur := target_interval_sec - elapsed) > 0: time.sleep(sleep_dur)
+                        if (sleep_dur := target_interval_sec - elapsed) > 0:
+                            time.sleep(sleep_dur)
                         continue
-                    # <<< Ende Neu
+                    # =====================================================================
 
                     predictions_done += 1
                     with shared_resource_lock:
@@ -732,8 +743,13 @@ def inference_manager(config: dict, inference_class, folder_flag: str, algorithm
 
 def main():
     parser = argparse.ArgumentParser(description="Vereinheitlichte ML-Pipeline mit Web-UI")
-    parser.add_argument('--algorithm', type=str, required=True, choices=['random_forest', 'lstm', 'cnn1d', 'xgboost', 'light_xgboost'],
-                        help="Zu verwendender Algorithmus.")
+    parser.add_argument(
+        "--algorithm",
+        required=True,
+        # 'svm' zur Liste der erlaubten Auswahlmöglichkeiten hinzufügen
+        choices=['random_forest', 'lstm', 'cnn1d', 'xgboost', 'light_xgboost', 'svm', "ridge"],
+        help="The algorithm to run."
+    )
     parser.add_argument('--config-name', type=str, help="Optional: Name der Konfigurationsvariable.")
     parser.add_argument('--retraining', action=argparse.BooleanOptionalAction, default=False,
                         help="Aktiviert den Retraining-Modus.")
@@ -794,6 +810,19 @@ def main():
         trainer_class = CNN1DTrainer
         inference_class = CNN1DInference
         folder_flag = "CNN1D"
+
+    elif args.algorithm in ('ridge', 'lasso'):
+        from ML_Algorithms.RIDGE.ridge_lasso_train import RidgeLassoTrainer
+        from ML_Algorithms.RIDGE.ridge_lasso_inference import RidgeLassoInference
+        trainer_class = RidgeLassoTrainer
+        inference_class = RidgeLassoInference
+        folder_flag = "RIDGE_LASSO"
+    elif args.algorithm in ('svm', 'linear_svr', 'svr'):
+        from ML_Algorithms.SVM.svm_train import SVMTrainer
+        from ML_Algorithms.SVM.svm_inference import SVMInference
+        trainer_class = SVMTrainer
+        inference_class = SVMInference
+        folder_flag = "SVM"
 
     config.update(CONFIG_LOAD_ARTIFACTS)
     config.update(MQTT_CONFIG)

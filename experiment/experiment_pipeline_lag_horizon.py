@@ -50,6 +50,9 @@ TRAINER_MAP = {
     "random_forest": ("ML_Algorithms.Random_Forest.rf_train", "RandomForestTrainer", "Random_Forest"),
     "xgboost": ("ML_Algorithms.XGBOOST.xgboost_train", "XGBoostTrainer", "XGBOOST"),
     "light_xgboost": ("ML_Algorithms.Light_XGBOOST.light_xgboost_train", "LightXGBoostTrainer", "Light_XGBOOST"),
+    "ridge": ("ML_Algorithms.RIDGE.ridge_lasso_train", "RidgeLassoTrainer", "RIDGE_LASSO"),
+    "lasso": ("ML_Algorithms.RIDGE.ridge_lasso_train", "RidgeLassoTrainer", "RIDGE_LASSO"),
+    "svm": ("ML_Algorithms.SVM.svm_train", "SVMTrainer", "SVM"),
 }
 
 # === Presets (werden aus multiconfig übernommen) ===
@@ -130,6 +133,8 @@ def algorithm_to_folder(name_or_flag: str) -> str:
     if "cnn" in n: return "CNN1D"
     if "xgb" in n: return "XGBOOST"
     if "random_forest" in n: return "Random_Forest"
+    if "ridge" in n or "lasso" in n: return "RIDGE_LASSO"
+    if "svm" in n: return "SVM"
     return name_or_flag.upper() or "MODEL"
 
 
@@ -293,6 +298,11 @@ def _file_candidates_for_mode(algo: str, mode: str) -> List[str]:
         return ["model.joblib"]
     if algo in ("xgboost", "light_xgboost"):
         return ["model.json", "model.joblib"]
+    if algo == "random_forest": 
+        return ["model.joblib"]
+    if algo in ("random_forest", "ridge", "lasso", "svm"):
+        return ["model.joblib"]
+
     return []
 
 
@@ -461,8 +471,8 @@ def run_experiments(
 
 def main():
     p = argparse.ArgumentParser(description="Experiment-Pipeline (Lag/Horizon-Grid, Level=medium)")
-    p.add_argument("--algorithms", default="cnn1d,lstm,random_forest,xgboost,light_xgboost",
-                   help="Kommagetrennte Liste der Algorithmen")
+    p.add_argument("--algorithms", default="cnn1d,lstm,random_forest,xgboost,light_xgboost,ridge,lasso,svm",
+               help="Kommagetrennte Liste der Algorithmen")
     p.add_argument("--lags", default="5,10,20",
                    help="Range 'start:stop:step' oder kommagetrennt für Lags (z. B. '4:40:4' oder '5,10,20')")
     p.add_argument("--horizons", default="1:16:2",
