@@ -61,9 +61,16 @@ class RidgeLassoInference(BaseInferenceProcessor):
         return X_in, ts, true_value
 
     def _inverse_transform_prediction(self, prediction_scaled: np.ndarray) -> np.ndarray:
-        """If a dedicated y_scaler was used at training, inverse-transform; else return as-is."""
+        pred = np.asarray(prediction_scaled)
+
+        # Auf 2D (1, H) normalisieren – egal, ob (H,), (1,H) oder (H,1) reinkommt
+        if pred.ndim == 1:
+            pred = pred.reshape(1, -1)
+        elif pred.ndim == 2 and pred.shape[0] != 1 and pred.shape[1] == 1:
+            pred = pred.reshape(1, -1)
+
         if getattr(self, "y_scaler", None) is None:
-            pred = np.asarray(prediction_scaled).reshape(-1)
-            return pred
-        arr = np.asarray(prediction_scaled).reshape(-1, 1)
-        return self.y_scaler.inverse_transform(arr).flatten()
+            return pred.ravel()
+
+        return self.y_scaler.inverse_transform(pred).ravel()
+
