@@ -21,6 +21,31 @@ class RidgeLassoInference(BaseInferenceProcessor):
         super().__init__(config, folder_flag)
         self.lags = int(self.config.get("lags", 1))
 
+    def _post_load_artifacts(self):
+        """
+        Nach Laden der Trainings-Artefakte: training_config in self.config mergen,
+        Laufzeit-Keys erhalten und DataProcessor neu initialisieren (Buffer übernehmen).
+        """
+        preserve_keys = ("loading_strategy", "inference_interval_sec", "model_filename", "inference_steps")
+        preserved = {k: self.config.get(k) for k in preserve_keys if k in self.config}
+
+        if getattr(self, "training_config", None):
+            self.config.update(self.training_config)
+
+        self.config.update(preserved)
+
+        # DataProcessor warm-start
+        old_buf = getattr(getattr(self, "data_processor", None), "_buffer", None)
+        self.data_processor = RealTimeDataProcessor(self.config)
+        if old_buf is not None:
+            try:
+                if not getattr(old_buf, "empty", True):
+                    max_len = getattr(self.data_processor, "_max_buffer_size", len(old_buf))
+                    self.data_processor._buffer = old_buf.tail(max_len)
+                    logger.info("RidgeLassoInference: DataProcessor warm-started mit %d Zeilen.", len(self.data_processor._buffer))
+            except Exception as e:
+                logger.warning("RidgeLassoInference: Konnte alten Buffer nicht übernehmen: %s", e)
+
     def _prepare_input_data(self, payload: dict):
         if not payload:
             return None, None, None

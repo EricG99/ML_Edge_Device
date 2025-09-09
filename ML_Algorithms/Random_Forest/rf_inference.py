@@ -142,59 +142,84 @@ class RFInference(BaseInferenceProcessor):
         return y_hat, t_ms
 
 
+    
+    def _post_load_artifacts(self):
+        """
+        Nach dem Laden der Artefakte: Merge training_config -> self.config (ohne Laufzeit-Keys zu verlieren)
+        und DataProcessor mit finaler Config neu aufsetzen (Buffer erhalten).
+        """
+        preserve_keys = ("loading_strategy", "inference_interval_sec", "model_filename", "inference_steps")
+        preserved = {k: self.config.get(k) for k in preserve_keys if k in self.config}
+
+        if getattr(self, "training_config", None):
+            self.config.update(self.training_config)
+
+        self.config.update(preserved)
+
+        # DataProcessor warm-start
+        old_buf = getattr(getattr(self, "data_processor", None), "_buffer", None)
+        self.data_processor = RealTimeDataProcessor(self.config)
+        if old_buf is not None:
+            try:
+                if not old_buf.empty:
+                    max_len = getattr(self.data_processor, "_max_buffer_size", len(old_buf))
+                    self.data_processor._buffer = old_buf.tail(max_len)
+                    logging.info("RFInference: DataProcessor warm-started mit %d Zeilen.", len(self.data_processor._buffer))
+            except Exception as e:
+                logging.warning("RFInference: Konnte alten Buffer nicht übernehmen: %s", e)
     def _prepare_retrain_XY(self, df_featured):
-        """
-        Baut X und Y (Mehrschritt-Ziele) aus einem FE-DataFrame für den RF-Retrain.
-        Garantiert: Y.shape == (n_samples, H).
-        """
-        import os
-        import joblib
-        import numpy as np
-        import pandas as pd
+            """
+            Baut X und Y (Mehrschritt-Ziele) aus einem FE-DataFrame für den RF-Retrain.
+            Garantiert: Y.shape == (n_samples, H).
+            """
+            import os
+            import joblib
+            import numpy as np
+            import pandas as pd
 
-        df = df_featured.copy().sort_index().dropna()
-        H = int(self.config.get("horizon", 1))
+            df = df_featured.copy().sort_index().dropna()
+            H = int(self.config.get("horizon", 1))
 
-        # gespeicherte Feature-Liste laden
-        features_path = os.path.join(self.config["paths"]["Models"], "features.joblib")
-        features = joblib.load(features_path)
+            # gespeicherte Feature-Liste laden
+            features_path = os.path.join(self.config["paths"]["Models"], "features.joblib")
+            features = joblib.load(features_path)
 
-        # Zielspalte robust bestimmen
-        candidates = [
-            self.config.get("target_column"),
-            self.config.get("target"),
-            (self.config.get("base_features") or [None])[0],
-            "target", "y", "value", "true_value"
-        ]
-        target_col = next((c.lower() for c in candidates if c and c.lower() in df.columns), None)
-        if target_col is None:
-            raise ValueError("RF-Retrain: Keine Zielspalte gefunden (z.B. config['target_column']).")
+            # Zielspalte robust bestimmen
+            candidates = [
+                self.config.get("target_column"),
+                self.config.get("target"),
+                (self.config.get("base_features") or [None])[0],
+                "target", "y", "value", "true_value"
+            ]
+            target_col = next((c.lower() for c in candidates if c and c.lower() in df.columns), None)
+            if target_col is None:
+                raise ValueError("RF-Retrain: Keine Zielspalte gefunden (z.B. config['target_column']).")
 
-        # X: exakt die gespeicherten Features (Schnittmenge)
-        feat_cols = [c for c in features if c in df.columns]
-        if not feat_cols:
-            raise ValueError("RF-Retrain: Keine der gespeicherten Features im DF gefunden.")
-        X_all = df[feat_cols].to_numpy(dtype=float)
+            # X: exakt die gespeicherten Features (Schnittmenge)
+            feat_cols = [c for c in features if c in df.columns]
+            if not feat_cols:
+                raise ValueError("RF-Retrain: Keine der gespeicherten Features im DF gefunden.")
+            X_all = df[feat_cols].to_numpy(dtype=float)
 
-        # Y: Direkt-Mehrschritt-Ziele Y_{t+1..t+H}
-        y = df[target_col].to_numpy(dtype=float)
-        Y_all = np.column_stack([np.roll(y, -(k + 1)) for k in range(H)])
+            # Y: Direkt-Mehrschritt-Ziele Y_{t+1..t+H}
+            y = df[target_col].to_numpy(dtype=float)
+            Y_all = np.column_stack([np.roll(y, -(k + 1)) for k in range(H)])
 
-        # Am Ende fehlen H Zeilen → kürzen
-        valid_len = len(df) - H
-        if valid_len <= 0:
-            raise ValueError("RF-Retrain: Zu wenig Daten nach Horizon-Ausrichtung.")
+            # Am Ende fehlen H Zeilen → kürzen
+            valid_len = len(df) - H
+            if valid_len <= 0:
+                raise ValueError("RF-Retrain: Zu wenig Daten nach Horizon-Ausrichtung.")
 
-        X = X_all[:valid_len]
-        Y = Y_all[:valid_len]
+            X = X_all[:valid_len]
+            Y = Y_all[:valid_len]
 
-        # NaNs filtern (z.B. durch Rolling/Lags)
-        mask = np.isfinite(X).all(axis=1) & np.isfinite(Y).all(axis=1)
-        X = X[mask]
-        Y = Y[mask]
-        used_index = df.index[:valid_len][mask]
+            # NaNs filtern (z.B. durch Rolling/Lags)
+            mask = np.isfinite(X).all(axis=1) & np.isfinite(Y).all(axis=1)
+            X = X[mask]
+            Y = Y[mask]
+            used_index = df.index[:valid_len][mask]
 
-        return X, Y, used_index
+            return X, Y, used_index
 
     def _prepare_input_data(self, payload: dict) -> tuple[np.ndarray | None, any, float | None]:
         """
@@ -220,6 +245,13 @@ class RFInference(BaseInferenceProcessor):
             return None, None, None
 
         # Letzten Vektor extrahieren
+        # Prüfen, ob alle erwarteten Features aus dem Training vorhanden sind
+        missing_features = [c for c in self.feature_list if c not in featured_buffer.columns]
+        if missing_features:
+            logging.error("RFInference: Fehlende Features im Buffer ({} von {}): {}...".format(
+                len(missing_features), len(self.feature_list), missing_features[:10]))
+            return None, None, None
+
         last_vector_full = featured_buffer[self.feature_list].iloc[-1:]
 
         if last_vector_full.isnull().values.any():

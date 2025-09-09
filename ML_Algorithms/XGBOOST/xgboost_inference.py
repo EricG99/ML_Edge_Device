@@ -106,6 +106,13 @@ class XGBoostInference(BaseInferenceProcessor):
         if featured_buffer is None or featured_buffer.empty:
             return None, None, None
 
+        # Sicherstellen, dass alle erwarteten Features vorhanden sind
+        missing_features = [c for c in self.feature_list if c not in featured_buffer.columns]
+        if missing_features:
+            logging.error("XGBoostInference: Fehlende Features im Buffer ({} von {}): {}...".format(
+                len(missing_features), len(self.feature_list), missing_features[:10]))
+            return None, None, None
+
         last_vector_full = featured_buffer[self.feature_list].iloc[-1:]
         if last_vector_full.isnull().values.any():
             logging.warning("NaNs im finalen Inferenz-Vektor entdeckt. Überspringe Schritt.")
@@ -123,3 +130,29 @@ class XGBoostInference(BaseInferenceProcessor):
 
     def _inverse_transform_prediction(self, prediction_scaled: np.ndarray) -> np.ndarray:
         return np.asarray(prediction_scaled).flatten()
+
+
+    def _post_load_artifacts(self):
+        """
+        Nach Laden der Trainings-Artefakte: Training-Config in Laufzeit-Config mergen
+        und DataProcessor mit finaler Config neu initialisieren (Puffer erhalten).
+        """
+        preserve_keys = ("loading_strategy", "inference_interval_sec", "model_filename", "inference_steps")
+        preserved = {k: self.config.get(k) for k in preserve_keys if k in self.config}
+
+        if getattr(self, "training_config", None):
+            self.config.update(self.training_config)
+
+        self.config.update(preserved)
+
+        # DataProcessor warm-start
+        old_buf = getattr(getattr(self, "data_processor", None), "_buffer", None)
+        self.data_processor = RealTimeDataProcessor(self.config)
+        if old_buf is not None:
+            try:
+                if not old_buf.empty:
+                    max_len = getattr(self.data_processor, "_max_buffer_size", len(old_buf))
+                    self.data_processor._buffer = old_buf.tail(max_len)
+                    logging.info("XGBoostInference: DataProcessor warm-started mit %d Zeilen.", len(self.data_processor._buffer))
+            except Exception as e:
+                logging.warning("XGBoostInference: Konnte alten Buffer nicht übernehmen: %s", e)
