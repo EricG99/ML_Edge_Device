@@ -412,7 +412,9 @@ def run_feature_experiments(
         if not algo:
             continue
 
-        qmodes = quant_modes_for_algorithm(algo)
+        requested = globals().get("__REQ_QMODES__", "")
+        qmodes = quant_modes_for_algorithm(algo, requested=requested)
+
         print(f"\n--- Algorithmus: {algo} (Quantisierungsmodi: {qmodes}) ---")
 
         for horizon in horizon_values:
@@ -555,8 +557,10 @@ def main() -> None:
     ap = build_argparser()
     args = ap.parse_args()
     # globaler Schalter für die obige if-Verzweigung
-    requested = globals().get("__REQ_QMODES__", "")
-    qmodes = quant_modes_for_algorithm(algo, requested=requested)
+    # Flags aus dem CLI global verfügbar machen
+    globals()["__REQ_QMODES__"] = args.quant_modes
+    globals()["__INFER_Q_ONLY__"] = bool(args.inference_quant_only)
+
 
 
     algorithms = [a.strip() for a in (args.algorithms or "").split(",") if a.strip()]
