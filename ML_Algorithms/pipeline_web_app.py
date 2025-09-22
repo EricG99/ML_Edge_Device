@@ -765,6 +765,11 @@ def main():
     parser.add_argument("--set", action="append", default=[], help="Konfigurations-Override als key=value.")
     parser.add_argument("--quant-mode", nargs='+', default=["no-quant"], choices=["no-quant", "quant-16", "quant-8"],
                         help="Quantisierungsmodus für das initiale Training. Default: no-quant.")
+    parser.add_argument(
+                        "--auto-quant-fallback",
+                        action="store_true",
+                        help="Starte erst no-quant in einem Subprozess; bei Fehler automatisch quant-16/quant-8 probieren.")
+
 
     args = parser.parse_args()
 
@@ -887,6 +892,95 @@ def main():
         config['paths'] = paths
 
     logging.info(log_msg)
+
+    # === AUTO QUANT FALLBACK LAUNCHER ===
+    if args.auto_quant_fallback and args.load_id:
+        model_dir = config['paths'].get('Models')
+        if not model_dir or not os.path.isdir(model_dir):
+            logging.error(f"Models-Ordner nicht gefunden: {model_dir}")
+            sys.exit(2)
+
+        variants = list_model_variants(model_dir)  # [(pfad, label), label in {'no-quant','quant-16','quant-8'}]
+        if not variants:
+            logging.error(f"Keine Modellvarianten in {model_dir} gefunden.")
+            sys.exit(2)
+
+        # Bevorzugte Reihenfolge: erst FP32/FP16 testen, dann INT8
+        try_order = ["no-quant", "quant-16", "quant-8"]
+
+        # Wenn Nutzer explizit eine Datei angibt, versuche deren Label zuerst
+        first = []
+        if args.model_filename:
+            fn_low = args.model_filename.lower()
+            if fn_low.endswith((".keras", ".h5", ".json")):
+                first = ["no-quant"]
+            elif any(k in fn_low for k in ("fp16", "float16", "quant16", "_16", "-16")):
+                first = ["quant-16"]
+            elif any(k in fn_low for k in ("int8", "quant8", "q8", "_8", "-8")):
+                first = ["quant-8"]
+
+        # Map label -> Dateiname
+        by_label = {}
+        for p, lbl in variants:
+            by_label[lbl] = os.path.basename(p)
+
+        # Zusätzliche Args für das Kind bauen (Web-Flags etc.)
+        add_args = []
+        if not args.no_web:
+            # gleiche Host/Port an Kind durchreichen
+            add_args += ["--host", args.host]
+            if port is not None:
+                add_args += ["--port", str(port)]
+        if args.web_only:
+            add_args += ["--web-only"]
+        if args.retraining:
+            add_args += ["--retraining"]
+
+        # Konfig-Overrides durchreichen (wichtige Keys)
+        extra_sets = {}
+        if "loading_strategy" in config:
+            extra_sets["loading_strategy"] = config["loading_strategy"]
+        if "inference_interval_sec" in config:
+            extra_sets["inference_interval_sec"] = config["inference_interval_sec"]
+
+        # Inference-Steps nur setzen, wenn explizit angegeben (sonst darf 'infinite' gelten)
+        steps = args.inference_steps if args.inference_steps is not None else None
+
+        tried = set()
+        for lbl in first + [l for l in try_order if l not in first]:
+            if lbl in tried:
+                continue
+            tried.add(lbl)
+            fn = by_label.get(lbl)
+            if not fn:
+                continue
+
+            logging.info(f"[Launcher] Versuche Modellvariante: {lbl} ({fn})")
+            rc = run_inference_via_subprocess(
+                load_id=args.load_id,
+                model_filename=fn,
+                algorithm=args.algorithm,
+                no_web=args.no_web,
+                inference_steps=steps,
+                extra_sets=extra_sets,
+                additional_args=add_args
+            )
+
+            # Erfolgreich?
+            if rc == 0:
+                logging.info(f"[Launcher] Variante {lbl} lief erfolgreich. Beende Launcher.")
+                sys.exit(0)
+
+            # Typische OOM-/Kill-Codes abfangen
+            if rc in (137, 9, -9):
+                logging.warning(f"[Launcher] Kindprozess durch OOM/SIGKILL beendet (rc={rc}). Probiere nächste Variante.")
+            else:
+                logging.warning(f"[Launcher] Kindprozess endete mit rc={rc}. Probiere nächste Variante.")
+
+        logging.error("[Launcher] Keine Modellvariante lief erfolgreich.")
+        sys.exit(1)
+    # === ENDE Launcher ===
+
 
     training_thread = None
     if not args.load_id:

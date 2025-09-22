@@ -22,6 +22,8 @@ import csv
 import time
 from pathlib import Path
 from typing import List, Dict, Optional
+import os, subprocess, json
+import pandas as pd
 
 # =========================
 # 1) ZENTRALE FEATURE-DEFS
@@ -109,6 +111,171 @@ def quant_modes_for_algorithm(algo: str) -> List[str]:
     if a in ("cnn1d", "lstm"):
         return ["no-quant", "quant-16", "quant-8"]
     return ["no-quant"]
+
+
+def _resolve_python_executable() -> str:
+    import shutil, sys, os
+    if sys.executable and os.path.exists(sys.executable):
+        return sys.executable
+    for name in ("python3", "python"):
+        p = shutil.which(name)
+        if p: return p
+    return "python"
+
+def _pipeline_script_path() -> str:
+    # .../experiment/Experiment_3_Pipeline_Featureconfigs.py  ->  .../ML_Algorithms/pipeline_web_app.py
+    here = Path(__file__).resolve().parent
+    return str((here.parent / "ML_Algorithms" / "pipeline_web_app.py").resolve())
+
+def _select_primary_model_filename(models_dir: str) -> str:
+    """Bevorzugt Keras-Modelle; sonst erstes .tflite."""
+    p = Path(models_dir)
+    for name in ("model.keras", "model.h5"):
+        if (p / name).exists():
+            return name
+    for f in p.glob("*.tflite"):
+        return f.name
+    # Fallback: irgendeine Datei
+    for f in p.iterdir():
+        if f.is_file():
+            return f.name
+    raise FileNotFoundError(f"Keine Modell-Datei in {models_dir} gefunden.")
+
+def _run_inference_subprocess_with_fallback(*, algorithm: str, run_id: str, model_filename: str,
+                                            inference_steps: int, loading_strategy: str,
+                                            interval_sec: float, no_web: bool = True) -> int:
+    """Startet pipeline_web_app.py als Kindprozess mit --auto-quant-fallback."""
+    py = _resolve_python_executable()
+    script = _pipeline_script_path()
+    args = [
+        py, script,
+        "--algorithm", str(algorithm),
+        "--load_id", str(run_id),
+        "--model_filename", str(model_filename),
+        "--inference-steps", str(inference_steps),
+        "--set", f"loading_strategy={loading_strategy}",
+        "--set", f"inference_interval_sec={interval_sec}",
+        "--auto-quant-fallback",
+    ]
+    if no_web:
+        args.append("--no-web")
+    print("[SPAWN] ", " ".join(args))
+    return subprocess.call(args)
+
+def _find_step_csv(run_dir: Path) -> Optional[str]:
+    """Sucht rekursiv eine Schritt-CSV (robust)."""
+    # 1) bekannte JSON-Metadateien prüfen
+    for nm in ("inference_summary.json", "predictions_meta.json"):
+        fp = run_dir / nm
+        if fp.exists():
+            try:
+                data = json.loads(fp.read_text(encoding="utf-8")) or {}
+                step_csv = data.get("step_csv") or data.get("predictions_step_csv")
+                if step_csv:
+                    cand = Path(step_csv) if os.path.isabs(step_csv) else (run_dir / step_csv)
+                    if cand.exists():
+                        return str(cand)
+            except Exception:
+                pass
+    # 2) Pattern-Suche
+    for root, _, files in os.walk(str(run_dir)):
+        for fn in files:
+            low = fn.lower()
+            if low.endswith("_predictions_step.csv") or "predictions_step" in low:
+                return str(Path(root) / fn)
+            if low.endswith(".csv") and "predictions" in low and "step" in low:
+                return str(Path(root) / fn)
+    return None
+
+def _summarize_step_csv(step_csv: str) -> Dict[str, float]:
+    """Berechnet einfache Mittelwerte für die wichtigsten Spalten."""
+    try:
+        df = pd.read_csv(step_csv)
+    except Exception:
+        return {}
+    res = {}
+    for c in ("inference_time_ms", "total_time_ms", "cpu_percent", "memory_percent"):
+        if c in df.columns:
+            res[f"avg_{c}"] = float(pd.to_numeric(df[c], errors="coerce").mean())
+    return res
+
+def _append_summary(summary_csv: Path, row: Dict) -> None:
+    summary_csv.parent.mkdir(parents=True, exist_ok=True)
+    write_header = not summary_csv.exists()
+    cols = ["timestamp","run_id","algorithm","feature_config_name","horizon","lags",
+            "step_csv","avg_inference_time_ms","avg_total_time_ms","avg_cpu_percent","avg_memory_percent",
+            "note"]
+    with open(summary_csv, "a", newline="", encoding="utf-8") as fh:
+        wr = csv.writer(fh)
+        if write_header:
+            wr.writerow(cols)
+        wr.writerow([row.get(k,"") for k in cols])
+
+def _run_all_inferences_and_summarize_auto_fallback(
+    *, algo: str, cfg: Dict, run_id: str, inference_steps: int,
+    loading_strategy: str, interval_sec: float, summary_csv: Path, delete_models: bool
+) -> None:
+    base_output = Path(cfg["paths"]["output"]).resolve()
+    folder_flag = algorithm_to_folder(algo)
+    run_dir = base_output / folder_flag / run_id
+    models_dir = run_dir / "Models"
+
+    # Primäre Modell-Datei wählen (FP32, falls vorhanden)
+    try:
+        model_filename = _select_primary_model_filename(str(models_dir))
+    except Exception as e:
+        print(f"[ERROR] {e}")
+        return
+
+    # Subprozess mit Auto-Fallback starten (FP32 → FP16 → INT8)
+    rc = _run_inference_subprocess_with_fallback(
+        algorithm=algo,
+        run_id=run_id,
+        model_filename=model_filename,
+        inference_steps=int(inference_steps),
+        loading_strategy=str(loading_strategy),
+        interval_sec=float(interval_sec),
+        no_web=True,
+    )
+
+    note = ""
+    if rc == 0:
+        note = "ok (auto-fallback möglich)"
+    elif rc in (137, 9, -9):
+        note = "killed/oom"
+    else:
+        note = f"rc={rc}"
+
+    # Step-CSV finden und kennzahlen berechnen
+    step_csv = _find_step_csv(run_dir)
+    metrics = _summarize_step_csv(step_csv) if step_csv else {}
+
+    # Summary-Zeile schreiben
+    _append_summary(Path(summary_csv), {
+        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "run_id": run_id,
+        "algorithm": algo,
+        "feature_config_name": cfg.get("feature_config_name",""),
+        "horizon": int(cfg.get("horizon", 0)),
+        "lags": int(cfg.get("lags", 0)),
+        "step_csv": step_csv or "",
+        "avg_inference_time_ms": metrics.get("avg_inference_time_ms", ""),
+        "avg_total_time_ms": metrics.get("avg_total_time_ms", ""),
+        "avg_cpu_percent": metrics.get("avg_cpu_percent", ""),
+        "avg_memory_percent": metrics.get("avg_memory_percent", ""),
+        "note": note,
+    })
+
+    # Optional: Modelle löschen, wenn gewünscht
+    if delete_models:
+        try:
+            for f in (models_dir.glob("model*.*")):
+                try: f.unlink()
+                except Exception: pass
+        except Exception:
+            pass
+
+
 
 # =========================
 # 4) Hauptlogik
@@ -200,18 +367,33 @@ def run_feature_experiments(
                 )
 
                 # 5) Inferenz + Summary
+                # 5) Inferenz + Summary
                 summary_csv = out_dir / "Experiment_Summary_Server_featureconfigs_v2.csv"
-                _run_all_inferences_and_summarize(
-                    algo=algo,
-                    cfg=cfg,
-                    run_id=run_id,
-                    models_dir=models_dir,
-                    inference_steps=int(inference_steps),
-                    loading_strategy=loading_strategy,
-                    interval_sec=float(interval_sec),
-                    summary_csv=summary_csv,
-                    delete_models=(not keep_models),
-                )
+
+                # AUTO-FALLBACK nutzen?
+                if bool(globals().get("__AUTO_FALLBACK_ENABLED__", False)):
+                    _run_all_inferences_and_summarize_auto_fallback(
+                        algo=algo,
+                        cfg=cfg,
+                        run_id=run_id,
+                        inference_steps=int(inference_steps),
+                        loading_strategy=loading_strategy,
+                        interval_sec=float(interval_sec),
+                        summary_csv=summary_csv,
+                        delete_models=(not keep_models),
+                    )
+                else:
+                    _run_all_inferences_and_summarize(
+                        algo=algo,
+                        cfg=cfg,
+                        run_id=run_id,
+                        models_dir=models_dir,
+                        inference_steps=int(inference_steps),
+                        loading_strategy=loading_strategy,
+                        interval_sec=float(interval_sec),
+                        summary_csv=summary_csv,
+                        delete_models=(not keep_models),
+                    )
 
                 runs_done += 1
 
@@ -251,12 +433,19 @@ def build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--lags", type=int, default=DEFAULT_LAGS, help="Anzahl Lags (Standard=20)")
     p.add_argument("--rolling-window-size", type=int, default=DEFAULT_ROLLING_WINDOW,
                    help="Fenstergröße für Rolling-Features (falls aktiviert)")
+    
+    p.add_argument("--auto-quant-fallback", action="store_true",
+               help="Inferenz per Subprozess starten: erst no-quant, bei Kill/Fehler automatisch quant-16 und quant-8 versuchen.")
+
 
     return p
 
 def main() -> None:
     ap = build_argparser()
     args = ap.parse_args()
+    # globaler Schalter für die obige if-Verzweigung
+    globals()["__AUTO_FALLBACK_ENABLED__"] = bool(getattr(args, "auto_quant_fallback", False))
+
 
     algorithms = [a.strip() for a in (args.algorithms or "").split(",") if a.strip()]
     horizon_vals = _range_from_str(args.horizon)
