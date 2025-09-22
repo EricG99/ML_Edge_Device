@@ -47,6 +47,229 @@ shared_model = {"model": None, "scaler": None, "y_scaler": None, "features": Non
 all_predictions = []
 
 
+# === BEGIN: Shared experiment utilities (centralized per requests 6,7,8) ===
+import os
+import json
+import subprocess
+import sys
+import shutil
+from pathlib import Path
+from typing import List, Dict, Optional, Tuple
+
+import pandas as pd
+
+
+def algorithm_to_folder(algorithm: str) -> str:
+    mapping = {
+        "lstm": "LSTM",
+        "cnn1d": "CNN1D",
+        "random_forest": "Random_Forest",
+        "xgboost": "XGBOOST",
+        "light_xgboost": "Light_XGBOOST",
+    }
+    algo_key = (algorithm or "").strip().lower()
+    return mapping.get(algo_key, algo_key.upper())
+
+
+def normalize_quant_label(label: Optional[str]) -> str:
+    """
+    Normalisiert verschiedene Schreibweisen auf: no-quant | quant-16 | quant-8
+    """
+    if not label:
+        return "no-quant"
+    l = str(label).strip().lower()
+    if l in ("quant-8-full", "int8", "8", "q8", "full-int8", "quant8"):
+        return "quant-8"
+    if l in ("quant-16", "float16", "fp16", "q16", "16", "quant16"):
+        return "quant-16"
+    if l in ("none", "no", "no-quant", "fp32", "float32"):
+        return "no-quant"
+    return l
+
+
+def list_model_variants(model_dir: str) -> List[Tuple[str, str]]:
+    """
+    Liefert Liste von (variant_path, variant_label).
+    Erkennt Keras, TFLite, joblib/PKL und JSON-Modelle.
+    Labels sind normalisiert: no-quant | quant-16 | quant-8
+    """
+    p = Path(model_dir)
+    out: List[Tuple[str, str]] = []
+    if not p.exists():
+        return out
+
+    for f in ["model.keras", "model.h5"]:
+        if (p / f).exists():
+            out.append((str(p / f), "no-quant"))
+            break
+
+    for f in p.glob("*.tflite"):
+        name = f.name.lower()
+        q = "no-quant"
+        if any(k in name for k in ("int8", "quant8", "q8")):
+            q = "quant-8"
+        elif any(k in name for k in ("fp16", "float16", "quant16", "16")):
+            q = "quant-16"
+        out.append((str(f), normalize_quant_label(q)))
+
+    for g in ("*.joblib", "*.pkl", "model.json"):
+        for f in p.glob(g):
+            out.append((str(f), "no-quant"))
+
+    seen = set()
+    unique: List[Tuple[str, str]] = []
+    for path, label in out:
+        key = (Path(path).name, label)
+        if key not in seen:
+            seen.add(key)
+            unique.append((path, label))
+    return unique
+
+
+def summarize_step_csv(step_csv_path: str) -> Dict[str, float]:
+    """
+    Berechnet Mittelwerte aus einer Step-CSV:
+    inference_time_ms, total_time_ms, cpu_percent, memory_percent.
+    """
+    step_csv_path = str(step_csv_path)
+    if not os.path.exists(step_csv_path):
+        return {}
+    try:
+        df = pd.read_csv(step_csv_path)
+    except Exception:
+        return {}
+
+    metrics = [
+        c
+        for c in ["inference_time_ms", "total_time_ms", "cpu_percent", "memory_percent"]
+        if c in df.columns
+    ]
+    res: Dict[str, float] = {}
+    for m in metrics:
+        try:
+            res[f"avg_{m}"] = float(pd.to_numeric(df[m], errors="coerce").mean())
+        except Exception:
+            pass
+    return res
+
+
+def discover_predictions_file_from_json(output_dir: str) -> Optional[str]:
+    """
+    Versucht, die Step-CSV über eine JSON-Zusammenfassung im output_dir zu finden.
+    """
+    output_dir = str(output_dir)
+    candidates = ["inference_summary.json", "predictions_meta.json"]
+    for nm in candidates:
+        fp = os.path.join(output_dir, nm)
+        if os.path.exists(fp):
+            try:
+                with open(fp, "r", encoding="utf-8") as f:
+                    data = json.load(f) or {}
+                if isinstance(data, dict):
+                    step_csv = data.get("step_csv") or data.get("predictions_step_csv")
+                    if step_csv:
+                        cand = step_csv if os.path.isabs(step_csv) else os.path.join(output_dir, step_csv)
+                        if os.path.exists(cand):
+                            return cand
+            except Exception:
+                pass
+    return None
+
+
+def fallback_find_step_csv(output_dir: str) -> Optional[str]:
+    """
+    Fallback: rekursiv nach *_predictions_step.csv im output_dir suchen.
+    """
+    output_dir = str(output_dir)
+    for root, _, files in os.walk(output_dir):
+        for fn in files:
+            low = fn.lower()
+            if low.endswith("_predictions_step.csv") or low.endswith("predictions_step.csv"):
+                return os.path.join(root, fn)
+    return None
+
+
+def get_summary_output_path(output_root: str, filename: str = "Experiment_Summary.csv") -> str:
+    """
+    Erzeugt/erzwingt den einheitlichen Zielort .../output/Error_Metrics/<filename>
+    und gibt den absoluten Pfad zurück.
+    """
+    output_root = str(output_root)
+    if os.path.basename(output_root) != "output":
+        output_root = os.path.join(output_root, "output")
+    em_dir = os.path.join(output_root, "Error_Metrics")
+    os.makedirs(em_dir, exist_ok=True)
+    return os.path.join(em_dir, filename)
+
+
+def _resolve_python_executable(python_executable: Optional[str]) -> str:
+    """
+    Wählt robust einen Python-Interpreter (fix für WindowsApps-Stub):
+    - expliziter Pfad (falls existiert)
+    - sys.executable (falls existent und nicht WindowsApps)
+    - which('python') / which('python3') / which('py')
+    - sonst 'python'
+    """
+    if python_executable and os.path.exists(python_executable):
+        return python_executable
+
+    cand = sys.executable
+    if cand and os.path.exists(cand) and "WindowsApps" not in cand:
+        return cand
+
+    for name in ("python", "python3", "py"):
+        path = shutil.which(name)
+        if path:
+            return path
+
+    return "python"
+
+
+def run_inference_via_subprocess(
+    load_id: str,
+    model_filename: str,
+    horizon: int,
+    *,
+    algorithm: str,
+    folder_flag: str,
+    no_web: bool = True,
+    extra_sets: Optional[Dict[str, str]] = None,
+    python_executable: Optional[str] = None,
+    pipeline_script: Optional[str] = None,
+    additional_args: Optional[List[str]] = None,
+) -> int:
+    """
+    Startet die pipeline_web_app in einem Subprozess für die Inferenz.
+    Gibt den Returncode des Prozesses zurück.
+    """
+    py = _resolve_python_executable(python_executable)
+    script = pipeline_script or os.path.realpath(__file__)
+    args = [
+        py,
+        script,
+        "--load_id",
+        str(load_id),
+        "--inference-steps",
+        str(horizon),
+        "--model_filename",
+        str(model_filename),
+    ]
+    if no_web:
+        args.append("--no-web")
+    if algorithm:
+        args += ["--algorithm", str(algorithm)]
+    if folder_flag:
+        args += ["--folder_flag", str(folder_flag)]
+    if extra_sets:
+        for k, v in extra_sets.items():
+            args += ["--set", f"{k}={v}"]
+    if additional_args:
+        args += list(additional_args)
+
+    print("[SPAWN]", " ".join(args))
+    return subprocess.call(args)
+# === END: Shared experiment utilities ===
+
 def load_config_dynamically(algorithm: str, config_name: str) -> dict:
     try:
         module_path = f"config.config_ml_{algorithm}"
@@ -1051,225 +1274,3 @@ if __name__ == "__main__":
     main()
 
 
-# === BEGIN: Shared experiment utilities (centralized per requests 6,7,8) ===
-import os
-import json
-import subprocess
-import sys
-import shutil
-from pathlib import Path
-from typing import List, Dict, Optional, Tuple
-
-import pandas as pd
-
-
-def algorithm_to_folder(algorithm: str) -> str:
-    mapping = {
-        "lstm": "LSTM",
-        "cnn1d": "CNN1D",
-        "random_forest": "Random_Forest",
-        "xgboost": "XGBOOST",
-        "light_xgboost": "Light_XGBOOST",
-    }
-    algo_key = (algorithm or "").strip().lower()
-    return mapping.get(algo_key, algo_key.upper())
-
-
-def normalize_quant_label(label: Optional[str]) -> str:
-    """
-    Normalisiert verschiedene Schreibweisen auf: no-quant | quant-16 | quant-8
-    """
-    if not label:
-        return "no-quant"
-    l = str(label).strip().lower()
-    if l in ("quant-8-full", "int8", "8", "q8", "full-int8", "quant8"):
-        return "quant-8"
-    if l in ("quant-16", "float16", "fp16", "q16", "16", "quant16"):
-        return "quant-16"
-    if l in ("none", "no", "no-quant", "fp32", "float32"):
-        return "no-quant"
-    return l
-
-
-def list_model_variants(model_dir: str) -> List[Tuple[str, str]]:
-    """
-    Liefert Liste von (variant_path, variant_label).
-    Erkennt Keras, TFLite, joblib/PKL und JSON-Modelle.
-    Labels sind normalisiert: no-quant | quant-16 | quant-8
-    """
-    p = Path(model_dir)
-    out: List[Tuple[str, str]] = []
-    if not p.exists():
-        return out
-
-    for f in ["model.keras", "model.h5"]:
-        if (p / f).exists():
-            out.append((str(p / f), "no-quant"))
-            break
-
-    for f in p.glob("*.tflite"):
-        name = f.name.lower()
-        q = "no-quant"
-        if any(k in name for k in ("int8", "quant8", "q8")):
-            q = "quant-8"
-        elif any(k in name for k in ("fp16", "float16", "quant16", "16")):
-            q = "quant-16"
-        out.append((str(f), normalize_quant_label(q)))
-
-    for g in ("*.joblib", "*.pkl", "model.json"):
-        for f in p.glob(g):
-            out.append((str(f), "no-quant"))
-
-    seen = set()
-    unique: List[Tuple[str, str]] = []
-    for path, label in out:
-        key = (Path(path).name, label)
-        if key not in seen:
-            seen.add(key)
-            unique.append((path, label))
-    return unique
-
-
-def summarize_step_csv(step_csv_path: str) -> Dict[str, float]:
-    """
-    Berechnet Mittelwerte aus einer Step-CSV:
-    inference_time_ms, total_time_ms, cpu_percent, memory_percent.
-    """
-    step_csv_path = str(step_csv_path)
-    if not os.path.exists(step_csv_path):
-        return {}
-    try:
-        df = pd.read_csv(step_csv_path)
-    except Exception:
-        return {}
-
-    metrics = [
-        c
-        for c in ["inference_time_ms", "total_time_ms", "cpu_percent", "memory_percent"]
-        if c in df.columns
-    ]
-    res: Dict[str, float] = {}
-    for m in metrics:
-        try:
-            res[f"avg_{m}"] = float(pd.to_numeric(df[m], errors="coerce").mean())
-        except Exception:
-            pass
-    return res
-
-
-def discover_predictions_file_from_json(output_dir: str) -> Optional[str]:
-    """
-    Versucht, die Step-CSV über eine JSON-Zusammenfassung im output_dir zu finden.
-    """
-    output_dir = str(output_dir)
-    candidates = ["inference_summary.json", "predictions_meta.json"]
-    for nm in candidates:
-        fp = os.path.join(output_dir, nm)
-        if os.path.exists(fp):
-            try:
-                with open(fp, "r", encoding="utf-8") as f:
-                    data = json.load(f) or {}
-                if isinstance(data, dict):
-                    step_csv = data.get("step_csv") or data.get("predictions_step_csv")
-                    if step_csv:
-                        cand = step_csv if os.path.isabs(step_csv) else os.path.join(output_dir, step_csv)
-                        if os.path.exists(cand):
-                            return cand
-            except Exception:
-                pass
-    return None
-
-
-def fallback_find_step_csv(output_dir: str) -> Optional[str]:
-    """
-    Fallback: rekursiv nach *_predictions_step.csv im output_dir suchen.
-    """
-    output_dir = str(output_dir)
-    for root, _, files in os.walk(output_dir):
-        for fn in files:
-            low = fn.lower()
-            if low.endswith("_predictions_step.csv") or low.endswith("predictions_step.csv"):
-                return os.path.join(root, fn)
-    return None
-
-
-def get_summary_output_path(output_root: str, filename: str = "Experiment_Summary.csv") -> str:
-    """
-    Erzeugt/erzwingt den einheitlichen Zielort .../output/Error_Metrics/<filename>
-    und gibt den absoluten Pfad zurück.
-    """
-    output_root = str(output_root)
-    if os.path.basename(output_root) != "output":
-        output_root = os.path.join(output_root, "output")
-    em_dir = os.path.join(output_root, "Error_Metrics")
-    os.makedirs(em_dir, exist_ok=True)
-    return os.path.join(em_dir, filename)
-
-
-def _resolve_python_executable(python_executable: Optional[str]) -> str:
-    """
-    Wählt robust einen Python-Interpreter (fix für WindowsApps-Stub):
-    - expliziter Pfad (falls existiert)
-    - sys.executable (falls existent und nicht WindowsApps)
-    - which('python') / which('python3') / which('py')
-    - sonst 'python'
-    """
-    if python_executable and os.path.exists(python_executable):
-        return python_executable
-
-    cand = sys.executable
-    if cand and os.path.exists(cand) and "WindowsApps" not in cand:
-        return cand
-
-    for name in ("python", "python3", "py"):
-        path = shutil.which(name)
-        if path:
-            return path
-
-    return "python"
-
-
-def run_inference_via_subprocess(
-    load_id: str,
-    model_filename: str,
-    horizon: int,
-    *,
-    algorithm: str,
-    folder_flag: str,
-    no_web: bool = True,
-    extra_sets: Optional[Dict[str, str]] = None,
-    python_executable: Optional[str] = None,
-    pipeline_script: Optional[str] = None,
-    additional_args: Optional[List[str]] = None,
-) -> int:
-    """
-    Startet die pipeline_web_app in einem Subprozess für die Inferenz.
-    Gibt den Returncode des Prozesses zurück.
-    """
-    py = _resolve_python_executable(python_executable)
-    script = pipeline_script or os.path.realpath(__file__)
-    args = [
-        py,
-        script,
-        "--load_id",
-        str(load_id),
-        "--inference-steps",
-        str(horizon),
-        "--model_filename",
-        str(model_filename),
-    ]
-    if no_web:
-        args.append("--no-web")
-    if algorithm:
-        args += ["--algorithm", str(algorithm)]
-    if folder_flag:
-        args += ["--folder_flag", str(folder_flag)]
-    if extra_sets:
-        for k, v in extra_sets.items():
-            args += ["--set", f"{k}={v}"]
-    if additional_args:
-        args += list(additional_args)
-
-    print("[SPAWN]", " ".join(args))
-    return subprocess.call(args)
-# === END: Shared experiment utilities ===
